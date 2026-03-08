@@ -46,6 +46,30 @@
       "max_turns": 12,
       "timeout_minutes": 20,
       "priority": "high"
+    },
+    "morning-brief": {
+      "model": "sonnet",
+      "max_turns": 10,
+      "timeout_minutes": 10,
+      "priority": "medium"
+    },
+    "weekly-review": {
+      "model": "opus",
+      "max_turns": 15,
+      "timeout_minutes": 20,
+      "priority": "medium"
+    },
+    "finance-context": {
+      "model": "sonnet",
+      "max_turns": 10,
+      "timeout_minutes": 10,
+      "priority": "low"
+    },
+    "orchestrator": {
+      "model": "opus",
+      "max_turns": 15,
+      "timeout_minutes": 15,
+      "priority": "highest"
     }
   },
   "safety": {

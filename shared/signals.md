@@ -23,4 +23,4 @@ _No active signals._
 
 ## Signal History
 
-_Populated by agents during pipeline execution._
+**2026-03-09 00:01 WATCHDOG OK** — All 5 containers healthy (fathom: 180.6MB/384MB, hl:dydx:spot:perp active, ar-quant-alpha: 13d uptime, ht-tg-bot: 6w uptime)

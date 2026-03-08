@@ -14,6 +14,20 @@ Agent identity, memory & orchestration for RigpaLabs pipeline. Each agent has:
 4. **Post signals** when completing, blocking, or failing
 5. **Respect limits.json** — model tier, max turns, timeout
 
+## Engine
+
+The werma CLI (`engine/`) is a Rust binary that manages the agent queue, scheduling, Linear integration, and pipeline automation. Key commands:
+
+- `werma add/run/status/list` — task queue management
+- `werma daemon` — heartbeat + scheduler (replaces heartbeat.sh)
+- `werma sched` — cron-based scheduling
+- `werma linear` — Linear issue integration
+- `werma pipeline` — automated CI/CD pipeline
+- `werma dash` — status dashboard
+- `werma migrate` — import from old aq system
+
+Runtime data: `~/.werma/` (SQLite database, logs, backups)
+
 ## Memory Update Protocol
 
 After each task, append to your `memory.md`:

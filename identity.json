@@ -8,9 +8,9 @@
       "bot_name": "Werma",
       "status_emoji": "⚔️",
       "channels": {
-        "alerts": null,
-        "reports": null,
-        "debug": null
+        "alerts": "#werma-alerts",
+        "reports": "#werma-reports",
+        "debug": "#werma-debug"
       }
     },
     "linear": {
