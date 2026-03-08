@@ -1,0 +1,58 @@
+{
+  "global": {
+    "max_concurrent_agents": 3,
+    "max_daily_opus_calls": 50,
+    "max_daily_sonnet_calls": 200,
+    "max_daily_haiku_calls": 500,
+    "max_turns_per_task": 25,
+    "timeout_minutes": 30,
+    "rate_limit_cooldown_seconds": 60
+  },
+  "agents": {
+    "watchdog": {
+      "model": "haiku",
+      "max_turns": 8,
+      "timeout_minutes": 5,
+      "llm_frequency": "*/15 * * * *",
+      "bash_heartbeat_seconds": 60,
+      "priority": "highest"
+    },
+    "analyst": {
+      "model": "opus",
+      "max_turns": 15,
+      "timeout_minutes": 20,
+      "priority": "high"
+    },
+    "engineer": {
+      "model": "opus",
+      "max_turns": 25,
+      "timeout_minutes": 30,
+      "priority": "high"
+    },
+    "reviewer": {
+      "model": "sonnet",
+      "max_turns": 10,
+      "timeout_minutes": 15,
+      "priority": "medium"
+    },
+    "qa": {
+      "model": "sonnet",
+      "max_turns": 10,
+      "timeout_minutes": 15,
+      "priority": "medium"
+    },
+    "devops": {
+      "model": "sonnet",
+      "max_turns": 12,
+      "timeout_minutes": 20,
+      "priority": "high"
+    }
+  },
+  "safety": {
+    "no_force_push": true,
+    "no_delete_branches_without_merge": true,
+    "require_ci_green_before_merge": true,
+    "max_files_changed_per_pr": 50,
+    "alert_on_secret_patterns": ["sk-", "ghp_", "AKIA", "BEGIN.*PRIVATE KEY"]
+  }
+}

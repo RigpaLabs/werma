@@ -1,0 +1,26 @@
+# Signals — Inter-Agent Communication
+
+## Format
+
+```
+[TIMESTAMP] [AGENT] [SIGNAL_TYPE] message
+```
+
+## Signal Types
+
+| Signal | Meaning | Who sends | Who reads |
+|--------|---------|-----------|-----------|
+| `READY` | Task completed, next agent can proceed | Any pipeline agent | Orchestrator |
+| `BLOCKED` | Cannot proceed, needs human input | Any | Orchestrator → Human |
+| `ALERT` | Something is wrong (infra, CI, deploy) | Watchdog, DevOps | Orchestrator → Slack |
+| `HANDOFF` | Passing context to next pipeline stage | Pipeline agents | Next agent in pipeline |
+| `RETRY` | Previous attempt failed, retrying | Any | Orchestrator |
+| `STALE` | Agent appears stuck or unresponsive | Heartbeat | Orchestrator |
+
+## Active Signals
+
+_No active signals._
+
+## Signal History
+
+_Populated by agents during pipeline execution._
