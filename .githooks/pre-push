@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Rigpa shared pre-push hook
+# Enforces branch naming: (feat|fix|chore|refactor|docs|test|perf)/RIG-\d+-description
+# Also allows werma- automated branches: (feat|...)/werma-*
+# Blocks direct push to main
+
+set -euo pipefail
+
+BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || true)
+
+if [ -z "$BRANCH" ]; then
+    echo "⚠ Detached HEAD — skipping branch check"
+    exit 0
+fi
+
+# Block push to main
+if [ "$BRANCH" = "main" ] || [ "$BRANCH" = "master" ]; then
+    echo "✗ Direct push to $BRANCH is blocked."
+    echo "  Create a feature branch: feat/RIG-XX-description"
+    echo "  Then open a PR to $BRANCH."
+    exit 1
+fi
+
+# Enforce RIG-XX or werma- in branch name
+PATTERN="^(feat|fix|chore|refactor|docs|test|perf)/(RIG-[0-9]+-|werma-)[a-z0-9]"
+
+if ! echo "$BRANCH" | grep -qE "$PATTERN"; then
+    echo "✗ Branch name '$BRANCH' doesn't match required pattern."
+    echo "  Expected: (feat|fix|chore|refactor|docs|test|perf)/(RIG-XX-desc|werma-id)"
+    echo "  Examples:"
+    echo "    feat/RIG-34-daemon-pipeline"
+    echo "    fix/RIG-12-memory-leak"
+    echo "    chore/RIG-5-cleanup-deps"
+    echo "    feat/werma-20260310-001"
+    exit 1
+fi
+
+exit 0

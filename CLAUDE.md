@@ -57,9 +57,22 @@ Post to `shared/signals.md`:
 | `identity.json` | Human | Read-only |
 | `limits.json` | Human | Read-only |
 
+## Git Worktrees
+
+Write tasks (code, full, refactor, pipeline-engineer, pipeline-devops) run in isolated git worktrees under `.trees/` in the working directory. Read-only tasks run directly. Worktrees are NOT auto-cleaned — failed tasks keep their worktree for inspection, completed tasks keep theirs for PR review.
+
+## Agent Permission Tiers
+
+| Tier | Operations |
+|------|-----------|
+| **Always OK** | Read files, run tests, commit to feature branch, create branches, create PRs with `ai-generated` label |
+| **Ask first** | Add dependencies, modify CI/CD, architectural changes |
+| **Never** | Force push, delete branches, commit secrets, push to main, merge PRs |
+
 ## Conventions
 
 - All communication in English (technical context)
 - Structured markdown for all outputs
 - No emojis in technical documents (identity.json excepted)
 - Reference files by relative path from repo root
+- `.trees/` directories are gitignored — do not commit worktree contents
