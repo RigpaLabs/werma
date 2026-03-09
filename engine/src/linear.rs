@@ -110,7 +110,7 @@ impl LinearClient {
 
         // Get workflow statuses for this team
         let states_query = r#"
-            query($teamId: String!) {
+            query($teamId: ID!) {
                 workflowStates(filter: { team: { id: { eq: $teamId } } }) {
                     nodes { id name type }
                 }
@@ -207,7 +207,7 @@ impl LinearClient {
             .context("'todo' status not found in linear.json")?;
 
         let issues_query = r#"
-            query($teamId: String!, $stateId: String!) {
+            query($teamId: ID!, $stateId: ID!) {
                 issues(
                     filter: {
                         team: { id: { eq: $teamId } },
@@ -406,7 +406,7 @@ impl LinearClient {
     /// Move an issue to a status by state ID.
     fn move_issue(&self, issue_id: &str, state_id: &str) -> Result<()> {
         self.query(
-            r#"mutation($id: String!, $stateId: String!) {
+            r#"mutation($id: ID!, $stateId: ID!) {
                 issueUpdate(id: $id, input: { stateId: $stateId }) { success }
             }"#,
             &json!({"id": issue_id, "stateId": state_id}),
@@ -427,7 +427,7 @@ impl LinearClient {
     /// Add a comment to an issue.
     pub fn comment(&self, issue_id: &str, body: &str) -> Result<()> {
         self.query(
-            r#"mutation($issueId: String!, $body: String!) {
+            r#"mutation($issueId: ID!, $body: String!) {
                 commentCreate(input: { issueId: $issueId, body: $body }) { success }
             }"#,
             &json!({"issueId": issue_id, "body": body}),
@@ -444,7 +444,7 @@ impl LinearClient {
         };
 
         let data = self.query(
-            r#"query($teamId: String!, $stateId: String!) {
+            r#"query($teamId: ID!, $stateId: ID!) {
                 issues(
                     filter: {
                         team: { id: { eq: $teamId } },
