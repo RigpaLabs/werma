@@ -11,7 +11,7 @@ use cron::Schedule;
 use crate::db::Db;
 use crate::runner;
 
-const TICK_INTERVAL_SECS: u64 = 60;
+const TICK_INTERVAL_SECS: u64 = 5;
 const ORCHESTRATOR_INTERVAL_SECS: u64 = 900;
 const MAX_CONCURRENT_AGENTS: usize = 3;
 const DEFAULT_STUCK_TIMEOUT_MINS: i64 = 30;
