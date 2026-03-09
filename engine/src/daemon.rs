@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use cron::Schedule;
 
+use crate::config::read_env_file_key;
 use crate::db::Db;
 use crate::runner;
 
@@ -26,6 +27,13 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(werma_dir.join("logs"))?;
 
     log_daemon(&log_path, "daemon started");
+
+    if std::env::var("LINEAR_API_KEY").is_err() && read_env_file_key("LINEAR_API_KEY").is_err() {
+        log_daemon(
+            &log_path,
+            "WARNING: LINEAR_API_KEY not set — pipeline poll/sync disabled",
+        );
+    }
 
     // Trigger orchestrator immediately on first tick.
     let mut last_orchestrator = Instant::now() - Duration::from_secs(ORCHESTRATOR_INTERVAL_SECS);
