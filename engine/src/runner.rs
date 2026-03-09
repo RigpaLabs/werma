@@ -7,6 +7,11 @@ use anyhow::{Context, Result, bail};
 use crate::db::Db;
 use crate::models::{Status, Task};
 
+/// Limits for context injection.
+const MAX_CONTEXT_LINES: usize = 200;
+const MAX_DEPENDENCY_OUTPUT_LINES: usize = 50;
+const MAX_DEPENDENCY_OUTPUTS: usize = 5;
+
 /// Map task type to allowed tools (matching aq bash patterns).
 pub fn tools_for_type(task_type: &str, has_output: bool) -> String {
     const LINEAR_READ: &str = "mcp__plugin_linear_linear__get_issue,\
@@ -21,7 +26,8 @@ pub fn tools_for_type(task_type: &str, has_output: bool) -> String {
     const SLACK_WRITE: &str = "mcp__plugin_slack_slack__slack_send_message";
 
     let mut tools = match task_type {
-        "research" => "Read,Grep,Glob,WebSearch,WebFetch".to_string(),
+        "research" => "Read,Grep,Glob,WebSearch,WebFetch,Write".to_string(),
+        "research-curator" => "Read,Grep,Glob".to_string(),
         "review" | "analyze" => "Read,Grep,Glob".to_string(),
         "code" | "refactor" => "Read,Edit,Write,Glob,Grep".to_string(),
         "full" => format!("Read,Edit,Write,Bash,Glob,Grep,{SLACK_READ},{SLACK_WRITE}"),
@@ -52,8 +58,8 @@ pub fn model_flag(model: &str) -> &str {
     }
 }
 
-/// Build the full prompt with context files prepended.
-pub fn build_prompt(task: &Task, working_dir: &Path) -> Result<String> {
+/// Build the full prompt with context files and dependency outputs prepended.
+pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result<String> {
     let mut prompt = String::new();
 
     if !task.context_files.is_empty() {
@@ -71,7 +77,11 @@ pub fn build_prompt(task: &Task, working_dir: &Path) -> Result<String> {
             if resolved.exists() {
                 let content = std::fs::read_to_string(&resolved)
                     .with_context(|| format!("reading context file: {}", resolved.display()))?;
-                let limited: String = content.lines().take(200).collect::<Vec<_>>().join("\n");
+                let limited: String = content
+                    .lines()
+                    .take(MAX_CONTEXT_LINES)
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 prompt.push_str(&format!(
                     "\n--- Context: {} ---\n{}\n--- End context ---\n",
                     resolved.display(),
@@ -80,6 +90,30 @@ pub fn build_prompt(task: &Task, working_dir: &Path) -> Result<String> {
             }
         }
         prompt.push_str("\nTask:\n");
+    }
+
+    // Inject dependency outputs
+    if !task.depends_on.is_empty() {
+        let logs_dir = werma_dir.join("logs");
+        let mut dep_count = 0;
+        for dep_id in &task.depends_on {
+            if dep_count >= MAX_DEPENDENCY_OUTPUTS {
+                break;
+            }
+            let output_file = logs_dir.join(format!("{dep_id}-output.md"));
+            if output_file.exists() {
+                let content = std::fs::read_to_string(&output_file)?;
+                let limited: String = content
+                    .lines()
+                    .take(MAX_DEPENDENCY_OUTPUT_LINES)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                prompt.push_str(&format!(
+                    "\n--- Dependency output: {dep_id} ---\n{limited}\n--- End dependency ---\n"
+                ));
+                dep_count += 1;
+            }
+        }
     }
 
     prompt.push_str(&task.prompt);
@@ -201,7 +235,7 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     let prompt_file = logs_dir.join(format!("{task_id}-prompt.txt"));
     let exec_script = logs_dir.join(format!("{task_id}-exec.sh"));
 
-    let full_prompt = build_prompt(task, &working_dir)?;
+    let full_prompt = build_prompt(task, &working_dir, werma_dir)?;
 
     // Write prompt to file — never interpolated into shell
     std::fs::write(&prompt_file, &full_prompt)?;
@@ -367,7 +401,19 @@ mod tests {
         assert!(tools.contains("Read"));
         assert!(tools.contains("Grep"));
         assert!(tools.contains("WebSearch"));
+        assert!(tools.contains("Write"));
         assert!(!tools.contains("Edit"));
+        assert!(!tools.contains("Bash"));
+    }
+
+    #[test]
+    fn tools_for_research_curator() {
+        let tools = tools_for_type("research-curator", false);
+        assert!(tools.contains("Read"));
+        assert!(tools.contains("Grep"));
+        assert!(tools.contains("Glob"));
+        assert!(!tools.contains("Write"));
+        assert!(!tools.contains("WebSearch"));
         assert!(!tools.contains("Bash"));
     }
 
@@ -389,14 +435,14 @@ mod tests {
 
     #[test]
     fn tools_adds_write_for_output() {
-        let tools = tools_for_type("research", true);
+        let tools = tools_for_type("review", true);
         assert!(tools.contains("Write"));
     }
 
     #[test]
     fn tools_no_duplicate_write() {
-        let tools = tools_for_type("code", true);
-        // Write already present, should not be duplicated
+        // research already has Write, adding output should not duplicate it
+        let tools = tools_for_type("research", true);
         let count = tools.matches("Write").count();
         assert_eq!(count, 1);
     }
@@ -455,7 +501,7 @@ mod tests {
             context_files: vec![],
         };
 
-        let result = build_prompt(&task, Path::new("/tmp")).unwrap();
+        let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
         assert_eq!(result, "Do something");
     }
 
@@ -487,7 +533,7 @@ mod tests {
             context_files: vec!["ctx.txt".to_string()],
         };
 
-        let result = build_prompt(&task, dir.path()).unwrap();
+        let result = build_prompt(&task, dir.path(), dir.path()).unwrap();
         assert!(result.contains("Use the following context files for reference:"));
         assert!(result.contains("context content here"));
         assert!(result.contains("Task:\nDo the thing"));
@@ -517,9 +563,123 @@ mod tests {
             context_files: vec!["/nonexistent/file.txt".to_string()],
         };
 
-        let result = build_prompt(&task, Path::new("/tmp")).unwrap();
+        let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
         // Missing files are skipped, but header is still there
         assert!(result.contains("Task:\nDo stuff"));
+    }
+
+    #[test]
+    fn build_prompt_with_dependency_output() {
+        let werma_dir = tempfile::tempdir().unwrap();
+        let logs_dir = werma_dir.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(
+            logs_dir.join("dep-001-output.md"),
+            "Analyst found: use pattern X\nKey insight here",
+        )
+        .unwrap();
+
+        let task = Task {
+            id: "test-004".to_string(),
+            status: crate::models::Status::Pending,
+            priority: 2,
+            created_at: String::new(),
+            started_at: None,
+            finished_at: None,
+            task_type: "code".to_string(),
+            prompt: "Implement feature".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            model: "sonnet".to_string(),
+            max_turns: 15,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: String::new(),
+            linear_pushed: false,
+            pipeline_stage: String::new(),
+            depends_on: vec!["dep-001".to_string()],
+            context_files: vec![],
+        };
+
+        let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
+        assert!(result.contains("--- Dependency output: dep-001 ---"));
+        assert!(result.contains("Analyst found: use pattern X"));
+        assert!(result.contains("--- End dependency ---"));
+        assert!(result.contains("Implement feature"));
+    }
+
+    #[test]
+    fn build_prompt_dependency_output_truncated() {
+        let werma_dir = tempfile::tempdir().unwrap();
+        let logs_dir = werma_dir.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+
+        // Create output with 100 lines — should be truncated to 50
+        let long_output: String = (0..100)
+            .map(|i| format!("Line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(logs_dir.join("dep-002-output.md"), &long_output).unwrap();
+
+        let task = Task {
+            id: "test-005".to_string(),
+            status: crate::models::Status::Pending,
+            priority: 2,
+            created_at: String::new(),
+            started_at: None,
+            finished_at: None,
+            task_type: "code".to_string(),
+            prompt: "Do work".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            model: "sonnet".to_string(),
+            max_turns: 15,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: String::new(),
+            linear_pushed: false,
+            pipeline_stage: String::new(),
+            depends_on: vec!["dep-002".to_string()],
+            context_files: vec![],
+        };
+
+        let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
+        assert!(result.contains("Line 0"));
+        assert!(result.contains("Line 49"));
+        assert!(!result.contains("Line 50"));
+    }
+
+    #[test]
+    fn build_prompt_missing_dependency_output() {
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = Task {
+            id: "test-006".to_string(),
+            status: crate::models::Status::Pending,
+            priority: 2,
+            created_at: String::new(),
+            started_at: None,
+            finished_at: None,
+            task_type: "code".to_string(),
+            prompt: "Do work".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            model: "sonnet".to_string(),
+            max_turns: 15,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: String::new(),
+            linear_pushed: false,
+            pipeline_stage: String::new(),
+            depends_on: vec!["nonexistent-dep".to_string()],
+            context_files: vec![],
+        };
+
+        let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
+        // Missing dependency output is silently skipped
+        assert!(!result.contains("Dependency output"));
+        assert_eq!(result, "Do work");
     }
 
     #[test]
