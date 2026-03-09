@@ -809,14 +809,19 @@ fn extract_tldr(text: &str) -> String {
 
 /// Show pipeline status: count issues at each stage.
 pub fn status(db: &Db) -> Result<()> {
-    // Try to get Linear counts
-    let linear_available = LinearClient::new().is_ok();
-
     println!("\nPipeline Status:");
     println!("================\n");
 
-    if linear_available {
-        let linear = LinearClient::new()?;
+    let linear = match LinearClient::new() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            eprintln!("  WARNING: Linear not available — {e}");
+            eprintln!("  Pipeline poll/sync disabled until LINEAR_API_KEY is set.\n");
+            None
+        }
+    };
+
+    if let Some(ref linear) = linear {
         let stages = [
             ("backlog", "Backlog"),
             ("todo", "Todo"),
@@ -846,8 +851,6 @@ pub fn status(db: &Db) -> Result<()> {
                 }
             }
         }
-    } else {
-        println!("  (Linear not configured — showing local pipeline tasks only)");
     }
 
     // Show local pipeline tasks

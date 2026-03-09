@@ -9,6 +9,20 @@ echo "============="
 echo "WERMA_DIR: $WERMA_DIR"
 echo ""
 
+# --- Step 0: Sync repo ---
+echo "→ Syncing repo..."
+git -C "$WERMA_DIR" fetch origin main --quiet
+LOCAL=$(git -C "$WERMA_DIR" rev-parse main 2>/dev/null)
+REMOTE=$(git -C "$WERMA_DIR" rev-parse origin/main 2>/dev/null)
+if [ "$LOCAL" != "$REMOTE" ]; then
+    git -C "$WERMA_DIR" checkout main --quiet
+    git -C "$WERMA_DIR" pull --ff-only origin main --quiet
+    echo "  ✓ Updated main ($LOCAL → $REMOTE)"
+else
+    echo "  ✓ Already up to date"
+fi
+echo ""
+
 # --- Step 1: Build ---
 echo "→ Building werma engine..."
 cargo build --release --manifest-path "$WERMA_DIR/engine/Cargo.toml"

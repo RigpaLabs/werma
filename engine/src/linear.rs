@@ -26,7 +26,7 @@ impl LinearClient {
         let api_key = std::env::var("LINEAR_API_KEY")
             .or_else(|_| std::env::var("WERMA_LINEAR_API_KEY"))
             .or_else(|_| read_env_file_key("LINEAR_API_KEY"))
-            .context("LINEAR_API_KEY not set (env or ~/.werma/.env)")?;
+            .context("LINEAR_API_KEY not set\n  Fix: export LINEAR_API_KEY=lin_api_...\n  Or add to ~/.werma/.env:\n    LINEAR_API_KEY=lin_api_...")?;
 
         Ok(Self {
             client: Client::new(),
