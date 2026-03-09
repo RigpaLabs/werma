@@ -353,7 +353,15 @@ pub fn callback(
             )?;
 
             // Create engineer task with analyst's output as handoff
-            create_next_stage_task(db, linear_issue_id, "engineer", result, task_id, stage, working_dir)?;
+            create_next_stage_task(
+                db,
+                linear_issue_id,
+                "engineer",
+                result,
+                task_id,
+                stage,
+                working_dir,
+            )?;
         }
 
         "engineer" => {
@@ -386,7 +394,15 @@ pub fn callback(
                         task_id
                     ),
                 )?;
-                create_next_stage_task(db, linear_issue_id, "engineer", result, task_id, stage, working_dir)?;
+                create_next_stage_task(
+                    db,
+                    linear_issue_id,
+                    "engineer",
+                    result,
+                    task_id,
+                    stage,
+                    working_dir,
+                )?;
             }
             _ => {
                 // No verdict for reviewer — already handled above, but just in case
@@ -414,7 +430,15 @@ pub fn callback(
                         task_id
                     ),
                 )?;
-                create_next_stage_task(db, linear_issue_id, "engineer", result, task_id, stage, working_dir)?;
+                create_next_stage_task(
+                    db,
+                    linear_issue_id,
+                    "engineer",
+                    result,
+                    task_id,
+                    stage,
+                    working_dir,
+                )?;
             }
             _ => {
                 eprintln!("qa: unexpected verdict '{}'", verdict_str);
