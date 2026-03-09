@@ -299,10 +299,35 @@ fn process_completed_pipeline_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                     // Skip — will retry next tick.
                 }
             }
+        } else if task.task_type == "research" {
+            // Research task: post summary comment and create curator follow-up.
+            let output_file = werma_dir.join(format!("logs/{}-output.md", task.id));
+            let output = std::fs::read_to_string(&output_file).unwrap_or_default();
+
+            match pipeline::handle_research_completion(db, task, &output) {
+                Ok(()) => {
+                    db.set_linear_pushed(&task.id, true)?;
+                    log_daemon(
+                        &log_path,
+                        &format!(
+                            "research completion: {} issue={}",
+                            task.id, task.linear_issue_id
+                        ),
+                    );
+                }
+                Err(e) => {
+                    log_daemon(
+                        &log_path,
+                        &format!("research completion failed: {} error={e}", task.id),
+                    );
+                    // Skip — will retry next tick.
+                }
+            }
         } else {
             // Non-pipeline task with linear_issue_id: push comment + move to Done.
             match linear::LinearClient::new().and_then(|client| client.push(db, &task.id)) {
                 Ok(()) => {
+                    db.set_linear_pushed(&task.id, true)?;
                     log_daemon(
                         &log_path,
                         &format!("linear push: {} issue={}", task.id, task.linear_issue_id),

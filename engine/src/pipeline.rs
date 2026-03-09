@@ -631,7 +631,7 @@ fn extract_tldr(text: &str) -> String {
     let mut lines = Vec::new();
 
     for line in text.lines() {
-        if line.trim().starts_with("## TL;DR") || line.trim().starts_with("## TL;DR") {
+        if line.trim().starts_with("## TL;DR") || line.trim().starts_with("## TLDR") {
             in_tldr = true;
             continue;
         }
