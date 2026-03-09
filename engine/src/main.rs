@@ -687,6 +687,151 @@ fn cmd_sched_trigger(db: &Db, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Parse review target into a PR number (if applicable) and a descriptive label.
+fn parse_review_target(target: &str) -> (Option<u32>, String) {
+    // #123 format
+    if let Some(num_str) = target.strip_prefix('#')
+        && let Ok(n) = num_str.parse::<u32>()
+    {
+        return (Some(n), format!("PR #{n}"));
+    }
+    // Plain number
+    if let Ok(n) = target.parse::<u32>() {
+        return (Some(n), format!("PR #{n}"));
+    }
+    // URL containing /pull/123
+    if target.contains("/pull/")
+        && let Some(num_str) = target.rsplit('/').next()
+        && let Ok(n) = num_str.parse::<u32>()
+    {
+        return (Some(n), format!("PR #{n}"));
+    }
+    // Branch name
+    (None, format!("branch {target}"))
+}
+
+fn cmd_review(
+    db: &Db,
+    werma_dir: &std::path::Path,
+    target: Option<&str>,
+    dir: Option<&str>,
+) -> Result<()> {
+    let working_dir = match dir {
+        Some(d) => expand_tilde(d),
+        None => std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "~/projects/ar".to_string()),
+    };
+
+    let (pr_number, label) = match target {
+        Some(t) => parse_review_target(t),
+        None => (None, "current changes".to_string()),
+    };
+
+    // Dedup: check if this PR was already reviewed
+    if let Some(n) = pr_number {
+        let pr_key = format!("{}:{}", working_dir, n);
+        if db.is_pr_reviewed(&pr_key)? {
+            println!("already reviewed: {label} in {working_dir}");
+            println!("  (use `werma review {n} --force` to re-review)");
+            // Don't block — just inform. Still create the task.
+        }
+    }
+
+    // Capture diff as context file
+    let logs_dir = werma_dir.join("logs");
+    std::fs::create_dir_all(&logs_dir)?;
+
+    let task_id = db.next_task_id()?;
+    let diff_path = logs_dir.join(format!("{task_id}-review-diff.patch"));
+
+    let diff_cmd = if let Some(n) = pr_number {
+        format!("cd '{}' && gh pr diff {}", working_dir, n)
+    } else if let Some(t) = target {
+        format!("cd '{}' && git diff main...{}", working_dir, t)
+    } else {
+        format!("cd '{}' && git diff main...HEAD", working_dir)
+    };
+
+    let diff_output = std::process::Command::new("bash")
+        .args(["-c", &diff_cmd])
+        .output();
+
+    match diff_output {
+        Ok(out) if out.status.success() => {
+            let diff = String::from_utf8_lossy(&out.stdout);
+            if diff.trim().is_empty() {
+                bail!("no diff found for {label}");
+            }
+            std::fs::write(&diff_path, diff.as_bytes())?;
+            println!("captured diff: {} lines", diff.lines().count());
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            bail!("failed to get diff for {label}: {stderr}");
+        }
+        Err(e) => bail!("failed to run diff command: {e}"),
+    }
+
+    // Build review prompt
+    let prompt = format!(
+        "# Code Review: {label}\n\n\
+         Review the code diff provided in the context file.\n\n\
+         ## Review Protocol\n\
+         1. Read the diff carefully\n\
+         2. Check for bugs, security issues, missing tests, style violations\n\
+         3. Classify each finding as **blocker** or **nit**\n\
+         4. APPROVE if no blockers, REJECT only on blockers\n\n\
+         ## Output Format\n\
+         - Each finding: `file:line — [blocker|nit] description`\n\
+         - End with: REVIEW_VERDICT=APPROVED or REVIEW_VERDICT=REJECTED\n\
+         - If rejected, clearly explain what must change"
+    );
+
+    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let allowed_tools = runner::tools_for_type("pipeline-reviewer", false);
+
+    let task = crate::models::Task {
+        id: task_id.clone(),
+        status: crate::models::Status::Pending,
+        priority: 1,
+        created_at: now,
+        started_at: None,
+        finished_at: None,
+        task_type: "pipeline-reviewer".to_string(),
+        prompt,
+        output_path: String::new(),
+        working_dir,
+        model: "sonnet".to_string(),
+        max_turns: crate::default_turns("pipeline-reviewer"),
+        allowed_tools,
+        session_id: String::new(),
+        linear_issue_id: String::new(),
+        linear_pushed: false,
+        pipeline_stage: String::new(),
+        depends_on: vec![],
+        context_files: vec![diff_path.to_string_lossy().to_string()],
+        repo_hash: crate::runtime_repo_hash(),
+    };
+
+    db.insert_task(&task)?;
+
+    // Mark PR as reviewed for dedup
+    if let Some(n) = pr_number {
+        let pr_key = format!("{}:{}", task.working_dir, n);
+        db.mark_pr_reviewed(&pr_key)?;
+    }
+
+    // Launch immediately
+    match runner::run_task(db, &task, werma_dir) {
+        Ok(Some(id)) => println!("review launched: {id} ({label})"),
+        Ok(None) => println!("review queued: {task_id} ({label})"),
+        Err(e) => eprintln!("review launch failed: {e} (task {task_id} is queued)"),
+    }
+
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
 
@@ -886,8 +1031,10 @@ fn main() -> anyhow::Result<()> {
             }
         },
 
-        cli::Commands::Review => {
-            println!("not implemented yet, use `gh` CLI directly");
+        cli::Commands::Review { target, dir } => {
+            let db = open_db()?;
+            let wdir = werma_dir()?;
+            cmd_review(&db, &wdir, target.as_deref(), dir.as_deref())?;
         }
         cli::Commands::Dash => {
             let db = open_db()?;
@@ -904,4 +1051,37 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_review_target_pr_hash() {
+        let (n, label) = parse_review_target("#42");
+        assert_eq!(n, Some(42));
+        assert_eq!(label, "PR #42");
+    }
+
+    #[test]
+    fn parse_review_target_plain_number() {
+        let (n, label) = parse_review_target("7");
+        assert_eq!(n, Some(7));
+        assert_eq!(label, "PR #7");
+    }
+
+    #[test]
+    fn parse_review_target_url() {
+        let (n, label) = parse_review_target("https://github.com/org/repo/pull/99");
+        assert_eq!(n, Some(99));
+        assert_eq!(label, "PR #99");
+    }
+
+    #[test]
+    fn parse_review_target_branch() {
+        let (n, label) = parse_review_target("feat/new-thing");
+        assert_eq!(n, None);
+        assert_eq!(label, "branch feat/new-thing");
+    }
 }

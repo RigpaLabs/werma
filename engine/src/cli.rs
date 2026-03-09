@@ -136,8 +136,15 @@ pub enum Commands {
         action: PipelineAction,
     },
 
-    /// Code review (stub)
-    Review,
+    /// Run code review on a PR, branch, or current changes
+    Review {
+        /// Target: PR URL, #number, or branch name
+        target: Option<String>,
+
+        /// Repository directory (defaults to current dir)
+        #[arg(short, long)]
+        dir: Option<String>,
+    },
 
     /// Dashboard (stub)
     Dash,
