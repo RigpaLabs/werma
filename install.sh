@@ -28,11 +28,27 @@ echo "→ Building werma engine..."
 cargo build --release --manifest-path "$WERMA_DIR/engine/Cargo.toml"
 echo "  ✓ Built successfully"
 
+# --- Step 1.5: Smoke test (before installing) ---
+BINARY="$WERMA_DIR/engine/target/release/werma"
+echo ""
+echo "→ Smoke testing new binary..."
+FAIL=0
+$BINARY --help >/dev/null 2>&1 || { echo "  ✗ FAIL: --help crashed"; FAIL=1; }
+$BINARY st >/dev/null 2>&1 || { echo "  ✗ FAIL: st crashed"; FAIL=1; }
+$BINARY list >/dev/null 2>&1 || { echo "  ✗ FAIL: list crashed"; FAIL=1; }
+$BINARY sched ls >/dev/null 2>&1 || { echo "  ✗ FAIL: sched ls crashed"; FAIL=1; }
+if [ "$FAIL" -ne 0 ]; then
+    echo ""
+    echo "  ✗ SMOKE TEST FAILED — aborting install. Old binary preserved."
+    exit 1
+fi
+echo "  ✓ All smoke tests passed"
+
 # --- Step 2: Symlink ---
 echo ""
 echo "→ Creating symlink..."
 mkdir -p "$HOME/.local/bin"
-ln -sf "$WERMA_DIR/engine/target/release/werma" "$HOME/.local/bin/werma"
+ln -sf "$BINARY" "$HOME/.local/bin/werma"
 echo "  ✓ werma → $HOME/.local/bin/werma"
 
 # --- Step 3: Create runtime directories ---
