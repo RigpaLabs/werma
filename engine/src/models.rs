@@ -58,6 +58,8 @@ pub struct Task {
     pub pipeline_stage: String,
     pub depends_on: Vec<String>,
     pub context_files: Vec<String>,
+    #[serde(default)]
+    pub repo_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,0 +1,1 @@
+ALTER TABLE tasks ADD COLUMN repo_hash TEXT DEFAULT '';

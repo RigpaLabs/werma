@@ -198,6 +198,7 @@ pub fn poll(db: &Db) -> Result<()> {
             pipeline_stage: String::new(),
             depends_on: vec![],
             context_files: vec![],
+            repo_hash: crate::runtime_repo_hash(),
         };
 
         db.insert_task(&task)?;
@@ -289,6 +290,7 @@ pub fn poll(db: &Db) -> Result<()> {
                 pipeline_stage: stage_config.stage.to_string(),
                 depends_on: vec![],
                 context_files: vec![],
+                repo_hash: crate::runtime_repo_hash(),
             };
 
             db.insert_task(&task)?;
@@ -483,9 +485,7 @@ fn create_next_stage_task(
     );
 
     // Write structured handoff file
-    let werma_dir = dirs::home_dir()
-        .context("no home dir")?
-        .join(".werma");
+    let werma_dir = dirs::home_dir().context("no home dir")?.join(".werma");
     let logs_dir = werma_dir.join("logs");
     std::fs::create_dir_all(&logs_dir)?;
     let handoff_path = logs_dir.join(format!("{task_id}-handoff.md"));
@@ -523,6 +523,7 @@ fn create_next_stage_task(
         pipeline_stage: next_stage.to_string(),
         depends_on: vec![],
         context_files: vec![handoff_path.to_string_lossy().to_string()],
+        repo_hash: crate::runtime_repo_hash(),
     };
 
     db.insert_task(&task)?;
@@ -549,11 +550,7 @@ pub fn parse_output_file(result: &str) -> Option<String> {
 }
 
 /// Handle research task completion: create curator follow-up and move issue to Done.
-pub fn handle_research_completion(
-    db: &Db,
-    task: &Task,
-    output: &str,
-) -> Result<()> {
+pub fn handle_research_completion(db: &Db, task: &Task, output: &str) -> Result<()> {
     let linear = LinearClient::new()?;
 
     let output_file = parse_output_file(output).unwrap_or_default();
@@ -615,13 +612,11 @@ pub fn handle_research_completion(
             pipeline_stage: String::new(),
             depends_on: vec![task.id.clone()],
             context_files: vec![output_file],
+            repo_hash: crate::runtime_repo_hash(),
         };
 
         db.insert_task(&curator_task)?;
-        println!(
-            "  + curator task: {} for research {}",
-            curator_id, task.id
-        );
+        println!("  + curator task: {} for research {}", curator_id, task.id);
     }
 
     // Move issue to Done
@@ -849,12 +844,8 @@ mod tests {
         );
 
         // Last line wins
-        let text2 =
-            "OUTPUT_FILE=/old/path.md\nMore output\nOUTPUT_FILE=/new/path.md";
-        assert_eq!(
-            parse_output_file(text2),
-            Some("/new/path.md".to_string())
-        );
+        let text2 = "OUTPUT_FILE=/old/path.md\nMore output\nOUTPUT_FILE=/new/path.md";
+        assert_eq!(parse_output_file(text2), Some("/new/path.md".to_string()));
 
         // No output file
         assert_eq!(parse_output_file("Just some text"), None);
@@ -888,7 +879,10 @@ mod tests {
 
     #[test]
     fn truncate_lines_long() {
-        let text: String = (0..20).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let text: String = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let result = truncate_lines(&text, 5);
         assert!(result.contains("line 0"));
         assert!(result.contains("line 4"));

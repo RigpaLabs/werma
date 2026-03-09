@@ -499,6 +499,7 @@ mod tests {
             pipeline_stage: String::new(),
             depends_on: vec![],
             context_files: vec![],
+            repo_hash: String::new(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -531,6 +532,7 @@ mod tests {
             pipeline_stage: String::new(),
             depends_on: vec![],
             context_files: vec!["ctx.txt".to_string()],
+            repo_hash: String::new(),
         };
 
         let result = build_prompt(&task, dir.path(), dir.path()).unwrap();
@@ -561,6 +563,7 @@ mod tests {
             pipeline_stage: String::new(),
             depends_on: vec![],
             context_files: vec!["/nonexistent/file.txt".to_string()],
+            repo_hash: String::new(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -599,6 +602,7 @@ mod tests {
             pipeline_stage: String::new(),
             depends_on: vec!["dep-001".to_string()],
             context_files: vec![],
+            repo_hash: String::new(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -641,6 +645,7 @@ mod tests {
             pipeline_stage: String::new(),
             depends_on: vec!["dep-002".to_string()],
             context_files: vec![],
+            repo_hash: String::new(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -674,6 +679,7 @@ mod tests {
             pipeline_stage: String::new(),
             depends_on: vec!["nonexistent-dep".to_string()],
             context_files: vec![],
+            repo_hash: String::new(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();

@@ -308,6 +308,7 @@ impl LinearClient {
                 pipeline_stage: String::new(),
                 depends_on: vec![],
                 context_files: vec![],
+                repo_hash: crate::runtime_repo_hash(),
             };
 
             db.insert_task(&task)?;

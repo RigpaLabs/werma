@@ -25,7 +25,15 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
     std::fs::create_dir_all(werma_dir.join("logs"))?;
 
-    log_daemon(&log_path, "daemon started");
+    log_daemon(
+        &log_path,
+        &format!(
+            "daemon started — werma {} (bin:{}, repo:{})",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("WERMA_GIT_VERSION").unwrap_or("dev"),
+            crate::runtime_repo_hash(),
+        ),
+    );
 
     // Trigger orchestrator immediately on first tick.
     let mut last_orchestrator = Instant::now() - Duration::from_secs(ORCHESTRATOR_INTERVAL_SECS);
@@ -167,6 +175,7 @@ fn check_schedules(db: &Db, werma_dir: &Path) -> Result<()> {
             pipeline_stage: String::new(),
             depends_on: vec![],
             context_files: sched.context_files.clone(),
+            repo_hash: crate::runtime_repo_hash(),
         };
 
         db.insert_task(&task)?;
@@ -262,7 +271,13 @@ fn process_completed_pipeline_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
             let output_file = werma_dir.join(format!("logs/{}-output.md", task.id));
             let output = std::fs::read_to_string(&output_file).unwrap_or_default();
 
-            match pipeline::callback(db, &task.id, &task.pipeline_stage, &output, &task.linear_issue_id) {
+            match pipeline::callback(
+                db,
+                &task.id,
+                &task.pipeline_stage,
+                &output,
+                &task.linear_issue_id,
+            ) {
                 Ok(()) => {
                     db.set_linear_pushed(&task.id, true)?;
                     log_daemon(
@@ -397,6 +412,7 @@ fn run_orchestrator(_db: &Db, werma_dir: &Path) -> Result<()> {
         pipeline_stage: String::new(),
         depends_on: vec![],
         context_files: vec![character_file.to_string_lossy().to_string()],
+        repo_hash: crate::runtime_repo_hash(),
     };
 
     _db.insert_task(&task)?;
@@ -783,6 +799,7 @@ mod tests {
             pipeline_stage: "engineer".to_string(),
             depends_on: vec![],
             context_files: vec![],
+            repo_hash: String::new(),
         };
         db.insert_task(&task).unwrap();
 
@@ -822,6 +839,7 @@ mod tests {
             pipeline_stage: "reviewer".to_string(),
             depends_on: vec![],
             context_files: vec![],
+            repo_hash: String::new(),
         };
 
         // Non-pipeline task (empty pipeline_stage, but has linear_issue_id)
@@ -845,6 +863,7 @@ mod tests {
             pipeline_stage: String::new(),
             depends_on: vec![],
             context_files: vec![],
+            repo_hash: String::new(),
         };
 
         db.insert_task(&pipeline_task).unwrap();
@@ -854,8 +873,14 @@ mod tests {
         assert_eq!(unpushed.len(), 2);
 
         // Verify we can distinguish them by pipeline_stage
-        let pipeline_tasks: Vec<_> = unpushed.iter().filter(|t| !t.pipeline_stage.is_empty()).collect();
-        let direct_tasks: Vec<_> = unpushed.iter().filter(|t| t.pipeline_stage.is_empty()).collect();
+        let pipeline_tasks: Vec<_> = unpushed
+            .iter()
+            .filter(|t| !t.pipeline_stage.is_empty())
+            .collect();
+        let direct_tasks: Vec<_> = unpushed
+            .iter()
+            .filter(|t| t.pipeline_stage.is_empty())
+            .collect();
 
         assert_eq!(pipeline_tasks.len(), 1);
         assert_eq!(pipeline_tasks[0].id, "20260309-001");

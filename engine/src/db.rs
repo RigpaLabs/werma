@@ -5,6 +5,7 @@ use std::path::Path;
 use crate::models::{DailyUsage, Schedule, Status, Task};
 
 const MIGRATION_SQL: &str = include_str!("../migrations/001_init.sql");
+const MIGRATION_002_SQL: &str = include_str!("../migrations/002_repo_hash.sql");
 
 pub struct Db {
     conn: Connection,
@@ -38,6 +39,13 @@ impl Db {
         self.conn
             .execute_batch(MIGRATION_SQL)
             .context("running migrations")?;
+        // 002: add repo_hash column (idempotent — ignore "duplicate column" error)
+        if let Err(e) = self.conn.execute_batch(MIGRATION_002_SQL) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(e).context("migration 002_repo_hash");
+            }
+        }
         Ok(())
     }
 
@@ -80,12 +88,12 @@ impl Db {
                 id, status, priority, created_at, started_at, finished_at,
                 type, prompt, output_path, working_dir, model, max_turns,
                 allowed_tools, session_id, linear_issue_id, linear_pushed,
-                pipeline_stage, depends_on, context_files
+                pipeline_stage, depends_on, context_files, repo_hash
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
                 ?7, ?8, ?9, ?10, ?11, ?12,
                 ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19
+                ?17, ?18, ?19, ?20
             )",
             params![
                 task.id,
@@ -107,6 +115,7 @@ impl Db {
                 task.pipeline_stage,
                 depends_on,
                 context_files,
+                task.repo_hash,
             ],
         )?;
         Ok(())
@@ -118,7 +127,7 @@ impl Db {
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files
+                    pipeline_stage, depends_on, context_files, repo_hash
              FROM tasks WHERE id = ?1",
             params![id],
             |row| Ok(task_from_row(row)),
@@ -140,7 +149,7 @@ impl Db {
                 "SELECT id, status, priority, created_at, started_at, finished_at,
                         type, prompt, output_path, working_dir, model, max_turns,
                         allowed_tools, session_id, linear_issue_id, linear_pushed,
-                        pipeline_stage, depends_on, context_files
+                        pipeline_stage, depends_on, context_files, repo_hash
                  FROM tasks WHERE status = ?1
                  ORDER BY priority ASC, created_at ASC",
             )?;
@@ -153,7 +162,7 @@ impl Db {
                 "SELECT id, status, priority, created_at, started_at, finished_at,
                         type, prompt, output_path, working_dir, model, max_turns,
                         allowed_tools, session_id, linear_issue_id, linear_pushed,
-                        pipeline_stage, depends_on, context_files
+                        pipeline_stage, depends_on, context_files, repo_hash
                  FROM tasks ORDER BY priority ASC, created_at ASC",
             )?;
             let rows = stmt.query_map([], |row| Ok(task_from_row(row)))?;
@@ -203,6 +212,7 @@ impl Db {
             "pipeline_stage",
             "allowed_tools",
             "model",
+            "repo_hash",
         ];
         anyhow::ensure!(
             allowed.contains(&field),
@@ -230,7 +240,7 @@ impl Db {
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files
+                    pipeline_stage, depends_on, context_files, repo_hash
              FROM tasks
              WHERE status = 'pending'
                AND NOT EXISTS (
@@ -301,7 +311,7 @@ impl Db {
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files
+                    pipeline_stage, depends_on, context_files, repo_hash
              FROM tasks
              WHERE status = 'pending'
                AND NOT EXISTS (
@@ -457,7 +467,7 @@ impl Db {
         let base_sql = "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files
+                    pipeline_stage, depends_on, context_files, repo_hash
              FROM tasks WHERE linear_issue_id = ?1";
         let stage_clause = if stage.is_some() {
             " AND pipeline_stage = ?2"
@@ -493,7 +503,7 @@ impl Db {
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files
+                    pipeline_stage, depends_on, context_files, repo_hash
              FROM tasks
              WHERE linear_issue_id != '' AND linear_pushed = 0 AND status = 'completed'
              ORDER BY created_at ASC",
@@ -604,6 +614,7 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         pipeline_stage: row.get(16)?,
         depends_on,
         context_files,
+        repo_hash: row.get(19)?,
     })
 }
 
@@ -628,6 +639,7 @@ fn make_test_task(id: &str) -> Task {
         pipeline_stage: String::new(),
         depends_on: vec![],
         context_files: vec![],
+        repo_hash: String::new(),
     }
 }
 
