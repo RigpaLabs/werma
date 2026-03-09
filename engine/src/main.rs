@@ -15,6 +15,7 @@ mod notify;
 #[allow(dead_code)]
 mod pipeline;
 mod runner;
+mod worktree;
 
 use std::path::{Path, PathBuf};
 
@@ -471,12 +472,25 @@ fn cmd_continue(db: &Db, id: &str, prompt: Option<String>) -> Result<()> {
 
     let working_dir = expand_tilde(&task.working_dir);
 
+    // Resolve worktree path for write tasks (same logic as runner::run_task)
+    let effective_dir = if worktree::needs_worktree(&task.task_type) {
+        let branch = worktree::generate_branch_name(&task);
+        let wt_path = std::path::PathBuf::from(&working_dir).join(".trees").join(&branch);
+        if wt_path.exists() {
+            wt_path.to_string_lossy().to_string()
+        } else {
+            working_dir.clone()
+        }
+    } else {
+        working_dir.clone()
+    };
+
     // Generate safe exec script
     let script = format!(
         r##"#!/bin/bash
 set -euo pipefail
 unset CLAUDECODE
-cd '{working_dir}'
+cd '{effective_dir}'
 PROMPT=$(cat '{prompt_file}')
 claude -p "$PROMPT" \
     --resume '{session_id}' \
@@ -485,7 +499,7 @@ claude -p "$PROMPT" \
     2>> '{log_file}'
 osascript -e 'display notification "{id} continue done" with title "werma" sound name "Glass"' 2>/dev/null || true
 "##,
-        working_dir = working_dir,
+        effective_dir = effective_dir,
         prompt_file = prompt_file.display(),
         session_id = task.session_id.replace('\'', "'\\''"),
         tools = tools.replace('\'', "'\\''"),

@@ -317,6 +317,7 @@ pub fn callback(
     stage: &str,
     result: &str,
     linear_issue_id: &str,
+    working_dir: &str,
 ) -> Result<()> {
     let linear = LinearClient::new()?;
     let verdict = parse_verdict(result);
@@ -352,7 +353,7 @@ pub fn callback(
             )?;
 
             // Create engineer task with analyst's output as handoff
-            create_next_stage_task(db, linear_issue_id, "engineer", result, task_id, stage)?;
+            create_next_stage_task(db, linear_issue_id, "engineer", result, task_id, stage, working_dir)?;
         }
 
         "engineer" => {
@@ -385,7 +386,7 @@ pub fn callback(
                         task_id
                     ),
                 )?;
-                create_next_stage_task(db, linear_issue_id, "engineer", result, task_id, stage)?;
+                create_next_stage_task(db, linear_issue_id, "engineer", result, task_id, stage, working_dir)?;
             }
             _ => {
                 // No verdict for reviewer — already handled above, but just in case
@@ -413,7 +414,7 @@ pub fn callback(
                         task_id
                     ),
                 )?;
-                create_next_stage_task(db, linear_issue_id, "engineer", result, task_id, stage)?;
+                create_next_stage_task(db, linear_issue_id, "engineer", result, task_id, stage, working_dir)?;
             }
             _ => {
                 eprintln!("qa: unexpected verdict '{}'", verdict_str);
@@ -470,6 +471,7 @@ fn create_next_stage_task(
     previous_output: &str,
     prev_task_id: &str,
     prev_stage: &str,
+    working_dir: &str,
 ) -> Result<()> {
     let agent_type = agent_for_stage(next_stage);
     let model = model_for_stage(next_stage);
@@ -513,7 +515,7 @@ fn create_next_stage_task(
         task_type: agent_type.to_string(),
         prompt,
         output_path: String::new(),
-        working_dir: "~/projects/ar".to_string(),
+        working_dir: working_dir.to_string(),
         model: model.to_string(),
         max_turns,
         allowed_tools,

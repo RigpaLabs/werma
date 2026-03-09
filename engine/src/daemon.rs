@@ -277,6 +277,7 @@ fn process_completed_pipeline_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                 &task.pipeline_stage,
                 &output,
                 &task.linear_issue_id,
+                &task.working_dir,
             ) {
                 Ok(()) => {
                     db.set_linear_pushed(&task.id, true)?;

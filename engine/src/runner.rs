@@ -224,6 +224,14 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
 
     let working_dir = resolve_home(&task.working_dir);
 
+    // Set up worktree for write tasks — gives each agent an isolated copy
+    let effective_dir = if crate::worktree::needs_worktree(&task.task_type) {
+        let branch = crate::worktree::generate_branch_name(task);
+        crate::worktree::setup_worktree(&working_dir, &branch)?
+    } else {
+        working_dir.clone()
+    };
+
     let tools = if task.allowed_tools.is_empty() {
         tools_for_type(&task.task_type, !task.output_path.is_empty())
     } else {
@@ -235,7 +243,7 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     let prompt_file = logs_dir.join(format!("{task_id}-prompt.txt"));
     let exec_script = logs_dir.join(format!("{task_id}-exec.sh"));
 
-    let full_prompt = build_prompt(task, &working_dir, werma_dir)?;
+    let full_prompt = build_prompt(task, &effective_dir, werma_dir)?;
 
     // Write prompt to file — never interpolated into shell
     std::fs::write(&prompt_file, &full_prompt)?;
@@ -252,7 +260,7 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
         task_id,
         prompt_file: &prompt_file,
         output: &output,
-        working_dir: &working_dir,
+        working_dir: &effective_dir,
         tools: &tools,
         max_turns: task.max_turns,
         model,
