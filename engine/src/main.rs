@@ -475,9 +475,10 @@ fn cmd_continue(db: &Db, id: &str, prompt: Option<String>) -> Result<()> {
     // Resolve worktree path for write tasks (same logic as runner::run_task)
     let effective_dir = if worktree::needs_worktree(&task.task_type) {
         let branch = worktree::generate_branch_name(&task);
+        let dir_name = branch.replace('/', "--");
         let wt_path = std::path::PathBuf::from(&working_dir)
             .join(".trees")
-            .join(&branch);
+            .join(&dir_name);
         if wt_path.exists() {
             wt_path.to_string_lossy().to_string()
         } else {

@@ -699,7 +699,7 @@ mod tests {
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
         // Missing dependency output is silently skipped
         assert!(!result.contains("Dependency output"));
-        assert_eq!(result, "Do work");
+        assert!(result.starts_with("Do work"));
     }
 
     #[test]

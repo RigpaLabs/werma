@@ -48,7 +48,8 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
     std::fs::create_dir_all(&trees_dir)
         .with_context(|| format!("creating .trees/ in {}", working_dir.display()))?;
 
-    let worktree_path = trees_dir.join(branch_name);
+    let dir_name = branch_name.replace('/', "--");
+    let worktree_path = trees_dir.join(dir_name);
 
     // Resume case: worktree already exists
     if worktree_path.exists() {
@@ -108,14 +109,15 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
 /// Remove a worktree (does NOT delete the branch).
 #[allow(dead_code)]
 pub fn cleanup_worktree(working_dir: &Path, branch_name: &str) -> Result<()> {
-    let worktree_path = working_dir.join(".trees").join(branch_name);
+    let dir_name = branch_name.replace('/', "--");
+    let worktree_path = working_dir.join(".trees").join(dir_name);
 
     if !worktree_path.exists() {
         return Ok(());
     }
 
     let output = Command::new("git")
-        .args(["worktree", "remove", &worktree_path.to_string_lossy()])
+        .args(["worktree", "remove", "--force", &worktree_path.to_string_lossy()])
         .current_dir(working_dir)
         .output()
         .context("running git worktree remove")?;
@@ -340,7 +342,7 @@ mod tests {
         // First call: creates worktree
         let path = setup_worktree(repo_dir, branch).unwrap();
         assert!(path.exists());
-        assert!(path.ends_with(format!(".trees/{branch}")));
+        assert!(path.ends_with(".trees/feat--test-branch"));
 
         // Second call: returns same path (resume)
         let path2 = setup_worktree(repo_dir, branch).unwrap();
