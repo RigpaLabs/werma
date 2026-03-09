@@ -223,6 +223,8 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
         max_turns: task.max_turns,
         model,
         log_file: &log_file,
+        task_type: &task.task_type,
+        linear_issue_id: &task.linear_issue_id,
     });
 
     std::fs::write(&exec_script, &script)?;
@@ -288,6 +290,8 @@ struct ExecScriptParams<'a> {
     max_turns: i32,
     model: &'a str,
     log_file: &'a Path,
+    task_type: &'a str,
+    linear_issue_id: &'a str,
 }
 
 /// Generate a self-contained bash exec script for tmux.
@@ -302,6 +306,8 @@ fn generate_exec_script(params: &ExecScriptParams<'_>) -> String {
     let tools = params.tools;
     let max_turns = params.max_turns;
     let model = params.model;
+    let task_type = params.task_type;
+    let linear_issue_id = params.linear_issue_id;
 
     // Escape single quotes in task_id for SQL safety
     let safe_id = task_id.replace('\'', "''");
@@ -320,6 +326,16 @@ ALLOWED_TOOLS='{tools}'
 MAX_TURNS='{max_turns}'
 MODEL='{model}'
 LOG_FILE='{log_file_str}'
+TASK_TYPE='{task_type}'
+LINEAR_ID='{linear_issue_id}'
+
+# Build human-readable notification label
+SHORT_NUM="#$(echo "$TASK_ID" | sed 's/.*-//')"
+if [ -n "$LINEAR_ID" ]; then
+  NOTIFY_LABEL="$LINEAR_ID $SHORT_NUM $TASK_TYPE"
+else
+  NOTIFY_LABEL="$SHORT_NUM $TASK_TYPE"
+fi
 
 cd "$WORKING_DIR"
 
@@ -332,7 +348,7 @@ RESULT_JSON=$(claude -p "$PROMPT" \
     --output-format json 2>> "$LOG_FILE") || {{
     echo "$(date): FAILED (exit $?)" >> "$LOG_FILE"
     sqlite3 "$WERMA_DB" "UPDATE tasks SET status='failed', finished_at='$(date +%Y-%m-%dT%H:%M:%S)' WHERE id='$TASK_ID';"
-    osascript -e "display notification \"$TASK_ID FAILED\" with title \"werma\" sound name \"Basso\"" 2>/dev/null || true
+    osascript -e "display notification \"$NOTIFY_LABEL FAILED\" with title \"werma\" sound name \"Basso\"" 2>/dev/null || true
     exit 1
 }}
 
@@ -348,7 +364,7 @@ sqlite3 "$WERMA_DB" "UPDATE tasks SET status='completed', finished_at='$(date +%
 
 echo "$(date): DONE (session=$SESSION_ID)" >> "$LOG_FILE"
 
-osascript -e "display notification \"$TASK_ID done\" with title \"werma\" sound name \"Glass\"" 2>/dev/null || true
+osascript -e "display notification \"$NOTIFY_LABEL done\" with title \"werma\" sound name \"Glass\"" 2>/dev/null || true
 "##
     )
 }
@@ -529,6 +545,8 @@ mod tests {
             max_turns: 15,
             model: "claude-sonnet-4-6",
             log_file: Path::new("/tmp/log.log"),
+            task_type: "research",
+            linear_issue_id: "RIG-34",
         });
 
         assert!(script.contains("TASK_ID='20260308-001'"));
@@ -539,5 +557,8 @@ mod tests {
         assert!(script.contains("--output-format json"));
         assert!(script.contains("jq -r"));
         assert!(script.contains("osascript"));
+        assert!(script.contains("TASK_TYPE='research'"));
+        assert!(script.contains("LINEAR_ID='RIG-34'"));
+        assert!(script.contains("NOTIFY_LABEL"));
     }
 }

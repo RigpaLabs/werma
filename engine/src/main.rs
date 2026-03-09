@@ -415,6 +415,15 @@ fn cmd_continue(db: &Db, id: &str, prompt: Option<String>) -> Result<()> {
 
     let working_dir = expand_tilde(&task.working_dir);
 
+    // Build human-readable notification label
+    let short_num = id.rsplit('-').next().unwrap_or(id);
+    let linear_prefix = if task.linear_issue_id.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", task.linear_issue_id)
+    };
+    let notify_label = format!("{linear_prefix}#{short_num} {}", task.task_type);
+
     // Generate safe exec script
     let script = format!(
         r##"#!/bin/bash
@@ -427,7 +436,7 @@ claude -p "$PROMPT" \
     --allowedTools '{tools}' \
     --model {model_id} \
     2>> '{log_file}'
-osascript -e 'display notification "{id} continue done" with title "werma" sound name "Glass"' 2>/dev/null || true
+osascript -e 'display notification "{notify_label} ↻ done" with title "werma" sound name "Glass"' 2>/dev/null || true
 "##,
         working_dir = working_dir,
         prompt_file = prompt_file.display(),
@@ -435,7 +444,7 @@ osascript -e 'display notification "{id} continue done" with title "werma" sound
         tools = tools.replace('\'', "'\\''"),
         model_id = model_id,
         log_file = log_file.display(),
-        id = id,
+        notify_label = notify_label,
     );
 
     std::fs::write(&exec_script, &script)?;
