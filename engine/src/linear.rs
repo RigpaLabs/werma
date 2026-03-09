@@ -196,6 +196,9 @@ impl LinearClient {
 
     /// Pull Todo issues from Linear and create werma tasks.
     pub fn sync(&self, db: &Db) -> Result<()> {
+        eprintln!("warning: `werma linear sync` is deprecated. Tasks are now created via `werma add`.");
+        eprintln!("         This command will be removed in a future version.");
+
         let config = load_config()?;
         if config.team_id.is_empty() {
             bail!("Linear not configured. Run: werma linear setup");
@@ -400,6 +403,150 @@ impl LinearClient {
         }
 
         println!("\npush-all: {} pushed", pushed);
+        Ok(())
+    }
+
+    /// Create a new Linear issue and return its UUID.
+    /// Maps `status_key` (e.g. "todo") to a state_id via config.
+    pub fn create_issue(&self, title: &str, description: &str, status_key: &str) -> Result<String> {
+        let config = load_config()?;
+
+        let state_id = config.statuses.get(status_key).cloned();
+
+        let variables = if let Some(ref sid) = state_id {
+            serde_json::json!({
+                "teamId": config.team_id,
+                "title": title,
+                "description": description,
+                "stateId": sid,
+            })
+        } else {
+            serde_json::json!({
+                "teamId": config.team_id,
+                "title": title,
+                "description": description,
+            })
+        };
+
+        let data = self.query(
+            r#"mutation($teamId: String!, $title: String!, $description: String, $stateId: String) {
+                issueCreate(input: {
+                    teamId: $teamId,
+                    title: $title,
+                    description: $description,
+                    stateId: $stateId
+                }) {
+                    issue { id identifier }
+                    success
+                }
+            }"#,
+            &variables,
+        )?;
+
+        let issue_id = data["issueCreate"]["issue"]["id"]
+            .as_str()
+            .context("issueCreate returned no issue id")?
+            .to_string();
+
+        Ok(issue_id)
+    }
+
+    /// Mirror a werma task state to its linked Linear issue.
+    /// Creates the issue if none exists yet.
+    /// All Linear calls are best-effort — errors are logged but never block.
+    pub fn mirror(&self, db: &crate::db::Db, task_id: &str) -> Result<()> {
+        let task = db
+            .task(task_id)?
+            .with_context(|| format!("task not found: {task_id}"))?;
+
+        // Step 1: create Linear issue if task has none
+        let issue_id = if task.linear_issue_id.is_empty() {
+            let title = task.prompt.lines().next().unwrap_or(&task.prompt).to_string();
+            match self.create_issue(&title, &task.prompt, "todo") {
+                Ok(id) => {
+                    if let Err(e) = db.set_linear_issue_id(&task.id, &id) {
+                        eprintln!("  linear mirror: failed to persist issue_id: {e}");
+                    }
+                    id
+                }
+                Err(e) => {
+                    eprintln!("  linear mirror: create_issue failed: {e}");
+                    return Ok(());
+                }
+            }
+        } else {
+            task.linear_issue_id.clone()
+        };
+
+        // Step 2: map task status to Linear status key
+        let status_key = if !task.pipeline_stage.is_empty() {
+            match (task.status, task.pipeline_stage.as_str()) {
+                (crate::models::Status::Completed, "reviewer") => "review",
+                (crate::models::Status::Completed, "qa") => "qa",
+                (crate::models::Status::Completed, "devops") => "ready",
+                (crate::models::Status::Completed, _) => "done",
+                (crate::models::Status::Running, _) => "in_progress",
+                (crate::models::Status::Failed, _) => "failed",
+                _ => "todo",
+            }
+        } else {
+            match task.status {
+                crate::models::Status::Pending => "todo",
+                crate::models::Status::Running => "in_progress",
+                crate::models::Status::Completed => "done",
+                crate::models::Status::Failed => "failed",
+            }
+        };
+
+        if let Err(e) = self.move_issue_by_name(&issue_id, status_key) {
+            eprintln!("  linear mirror: move_issue_by_name({status_key}) failed: {e}");
+        }
+
+        // Step 3: post comment with result summary on completion/failure
+        if matches!(
+            task.status,
+            crate::models::Status::Completed | crate::models::Status::Failed
+        ) {
+            let output_preview = if !task.output_path.is_empty() {
+                let path = std::path::Path::new(&task.output_path);
+                if path.exists() {
+                    let content = std::fs::read_to_string(path).unwrap_or_default();
+                    content.lines().take(100).collect::<Vec<_>>().join("\n")
+                } else {
+                    String::new()
+                }
+            } else {
+                // Fall back to log output
+                let home = dirs::home_dir().unwrap_or_default();
+                let log_output = home
+                    .join(".werma/logs")
+                    .join(format!("{}-output.md", task.id));
+                if log_output.exists() {
+                    let content = std::fs::read_to_string(&log_output).unwrap_or_default();
+                    content.lines().take(100).collect::<Vec<_>>().join("\n")
+                } else {
+                    String::new()
+                }
+            };
+
+            let mut comment = format!(
+                "**Werma task `{}`** — status: **{}**",
+                task_id,
+                task.status
+            );
+            if !output_preview.is_empty() {
+                comment.push_str(&format!(
+                    "\n\n<details><summary>Output preview</summary>\n\n```\n{}\n```\n</details>",
+                    output_preview
+                ));
+            }
+
+            if let Err(e) = self.comment(&issue_id, &comment) {
+                eprintln!("  linear mirror: comment failed: {e}");
+            }
+        }
+
+        println!("mirrored: {task_id} -> Linear {issue_id} ({status_key})");
         Ok(())
     }
 

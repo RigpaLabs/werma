@@ -67,6 +67,9 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 if let Err(e) = run_orchestrator(&db, werma_dir) {
                     log_daemon(&log_path, &format!("orchestrator error: {e}"));
                 }
+                if let Err(e) = pipeline::check_deploy_gate(&db) {
+                    log_daemon(&log_path, &format!("deploy gate error: {e}"));
+                }
                 last_orchestrator = Instant::now();
             }
         }

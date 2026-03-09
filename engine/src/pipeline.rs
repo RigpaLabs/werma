@@ -4,6 +4,8 @@ use crate::db::Db;
 use crate::linear::LinearClient;
 use crate::models::{Status, Task};
 
+// dirs used for locating output files in callback_from_db
+
 /// Pipeline stages and their corresponding agent types.
 pub fn agent_for_stage(stage: &str) -> &str {
     match stage {
@@ -123,6 +125,9 @@ fn is_research_issue(labels: &[&str]) -> bool {
 
 /// Poll Linear for issues at pipeline-relevant statuses and create tasks.
 pub fn poll(db: &Db) -> Result<()> {
+    eprintln!("warning: `werma pipeline poll` is deprecated. Pipeline is now db-driven via callbacks.");
+    eprintln!("         This command will be removed in a future version.");
+
     let linear = LinearClient::new()?;
 
     let mut total_created = 0;
@@ -307,6 +312,65 @@ pub fn poll(db: &Db) -> Result<()> {
         total_created, total_skipped
     );
     Ok(())
+}
+
+/// Handle pipeline callback driven from werma.db (no Linear as source).
+/// Called by `werma pipeline callback <task_id>` from the exec script.
+pub fn callback_from_db(db: &Db, task_id: &str) -> Result<()> {
+    let task = match db.task(task_id)? {
+        Some(t) => t,
+        None => {
+            eprintln!("pipeline callback: task not found: {task_id}");
+            return Ok(());
+        }
+    };
+
+    // Only process completed or failed tasks
+    if !matches!(task.status, Status::Completed | Status::Failed) {
+        return Ok(());
+    }
+
+    if task.pipeline_stage.is_empty() {
+        return Ok(());
+    }
+
+    // Read output
+    let home = dirs::home_dir().unwrap_or_default();
+    let log_output = home
+        .join(".werma/logs")
+        .join(format!("{task_id}-output.md"));
+    let output = std::fs::read_to_string(&log_output).unwrap_or_default();
+
+    if task.linear_issue_id.is_empty() {
+        // No Linear issue — just create next stage task in db
+        if task.status == Status::Completed {
+            match task.pipeline_stage.as_str() {
+                "analyst" => {
+                    let _ = create_next_stage_task(
+                        db,
+                        &task.linear_issue_id,
+                        "engineer",
+                        &output,
+                        task_id,
+                        &task.pipeline_stage,
+                        &task.working_dir,
+                    );
+                }
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+
+    // Delegate to existing callback logic (which handles Linear transitions)
+    callback(
+        db,
+        task_id,
+        &task.pipeline_stage,
+        &output,
+        &task.linear_issue_id,
+        &task.working_dir,
+    )
 }
 
 /// Handle pipeline callback when a task completes.
@@ -807,72 +871,165 @@ fn extract_tldr(text: &str) -> String {
     }
 }
 
-/// Show pipeline status: count issues at each stage.
-pub fn status(db: &Db) -> Result<()> {
-    // Try to get Linear counts
-    let linear_available = LinearClient::new().is_ok();
+/// Check deploy gate: for QA-completed tasks whose Linear issue has been moved to "Ready"
+/// by a human, create a devops task in werma.db.
+/// Called from the daemon orchestrator interval.
+pub fn check_deploy_gate(db: &Db) -> Result<()> {
+    let linear = match LinearClient::new() {
+        Ok(c) => c,
+        Err(_) => return Ok(()), // Linear not configured — skip silently
+    };
 
+    // Find completed QA tasks that have a linear_issue_id and are not yet pushed
+    let all_completed = db.list_tasks(Some(Status::Completed))?;
+    let qa_done: Vec<&crate::models::Task> = all_completed
+        .iter()
+        .filter(|t| t.pipeline_stage == "qa" && !t.linear_issue_id.is_empty())
+        .collect();
+
+    for task in qa_done {
+        // Skip if a devops task already exists for this issue
+        let existing = db.tasks_by_linear_issue(&task.linear_issue_id, Some("devops"), false)?;
+        if !existing.is_empty() {
+            continue;
+        }
+
+        // Check if the Linear issue is at "Ready" status (human approved for deploy)
+        let ready_issues = match linear.get_issues_by_status("ready") {
+            Ok(issues) => issues,
+            Err(_) => continue,
+        };
+
+        let is_ready = ready_issues
+            .iter()
+            .any(|issue| issue["id"].as_str().unwrap_or("") == task.linear_issue_id);
+
+        if !is_ready {
+            continue;
+        }
+
+        // Issue is at Ready — create devops task
+        if let Err(e) = create_next_stage_task(
+            db,
+            &task.linear_issue_id,
+            "devops",
+            "",
+            &task.id,
+            "qa",
+            &task.working_dir,
+        ) {
+            eprintln!("deploy gate: failed to create devops task: {e}");
+        } else {
+            println!(
+                "deploy gate: created devops task for issue {}",
+                task.linear_issue_id
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Show pipeline status. Primary view from werma.db, with optional Linear fallback.
+pub fn status(db: &Db) -> Result<()> {
     println!("\nPipeline Status:");
     println!("================\n");
 
-    if linear_available {
-        let linear = LinearClient::new()?;
+    // Primary view: pipeline tasks from werma.db grouped by stage
+    println!("Local pipeline tasks (db):");
+    let pipeline_stages = ["analyst", "engineer", "reviewer", "qa", "devops"];
+    let all_tasks = db.list_tasks(None)?;
+
+    let mut any_stage_tasks = false;
+    for stage in &pipeline_stages {
+        let stage_tasks: Vec<_> = all_tasks
+            .iter()
+            .filter(|t| t.pipeline_stage == *stage)
+            .collect();
+
+        if stage_tasks.is_empty() {
+            continue;
+        }
+        any_stage_tasks = true;
+
+        let pending: Vec<_> = stage_tasks
+            .iter()
+            .filter(|t| t.status == Status::Pending)
+            .collect();
+        let running: Vec<_> = stage_tasks
+            .iter()
+            .filter(|t| t.status == Status::Running)
+            .collect();
+        let completed: Vec<_> = stage_tasks
+            .iter()
+            .filter(|t| t.status == Status::Completed)
+            .collect();
+        let failed: Vec<_> = stage_tasks
+            .iter()
+            .filter(|t| t.status == Status::Failed)
+            .collect();
+
+        println!(
+            "  {stage}: {} pending, {} running, {} completed, {} failed",
+            pending.len(),
+            running.len(),
+            completed.len(),
+            failed.len()
+        );
+
+        for task in &stage_tasks {
+            if matches!(task.status, Status::Pending | Status::Running) {
+                let icon = match task.status {
+                    Status::Pending => "○",
+                    Status::Running => "◉",
+                    Status::Completed => "✓",
+                    Status::Failed => "✗",
+                };
+                let linear_hint = if task.linear_issue_id.is_empty() {
+                    String::new()
+                } else {
+                    let hint_len = 8.min(task.linear_issue_id.len());
+                    format!(" [{}]", &task.linear_issue_id[..hint_len])
+                };
+                let prompt_preview: String = task.prompt.lines().next().unwrap_or(&task.prompt)
+                    .chars().take(40).collect();
+                println!(
+                    "    {} {}{} {}",
+                    icon, task.id, linear_hint, prompt_preview
+                );
+            }
+        }
+    }
+
+    if !any_stage_tasks {
+        println!("  (no pipeline tasks in db)");
+    }
+
+    // Secondary: Linear API if available
+    if let Ok(linear) = LinearClient::new() {
+        println!("\nLinear status (mirror):");
         let stages = [
-            ("backlog", "Backlog"),
-            ("todo", "Todo"),
             ("in_progress", "In Progress"),
             ("review", "In Review"),
             ("qa", "QA"),
             ("ready", "Ready for Deploy"),
             ("deploy", "Deploying"),
-            ("done", "Done"),
             ("failed", "Deploy Failed"),
         ];
 
         for (key, label) in &stages {
             match linear.get_issues_by_status(key) {
-                Ok(issues) => {
-                    if !issues.is_empty() {
-                        println!("  {} ({}): {} issues", label, key, issues.len());
-                        for issue in &issues {
-                            let id = issue["identifier"].as_str().unwrap_or("?");
-                            let title = issue["title"].as_str().unwrap_or("?");
-                            println!("    {} {}", id, title);
-                        }
+                Ok(issues) if !issues.is_empty() => {
+                    println!("  {} ({}): {} issues", label, key, issues.len());
+                    for issue in &issues {
+                        let id = issue["identifier"].as_str().unwrap_or("?");
+                        let title = issue["title"].as_str().unwrap_or("?");
+                        println!("    {} {}", id, title);
                     }
                 }
-                Err(_) => {
-                    println!("  {} ({}): <error fetching>", label, key);
-                }
+                Ok(_) => {}
+                Err(_) => {}
             }
-        }
-    } else {
-        println!("  (Linear not configured — showing local pipeline tasks only)");
-    }
-
-    // Show local pipeline tasks
-    println!("\nLocal pipeline tasks:");
-    let pipeline_stages = ["analyst", "engineer", "reviewer", "qa", "devops"];
-    for stage in &pipeline_stages {
-        let pending = db.list_tasks(Some(Status::Pending))?;
-        let running = db.list_tasks(Some(Status::Running))?;
-
-        let stage_pending: Vec<_> = pending
-            .iter()
-            .filter(|t| t.pipeline_stage == *stage)
-            .collect();
-        let stage_running: Vec<_> = running
-            .iter()
-            .filter(|t| t.pipeline_stage == *stage)
-            .collect();
-
-        if !stage_pending.is_empty() || !stage_running.is_empty() {
-            println!(
-                "  {}: {} pending, {} running",
-                stage,
-                stage_pending.len(),
-                stage_running.len()
-            );
         }
     }
 

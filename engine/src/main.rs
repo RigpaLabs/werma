@@ -137,6 +137,7 @@ struct AddParams {
     context: Option<String>,
     linear: Option<String>,
     stage: Option<String>,
+    no_linear: bool,
 }
 
 fn cmd_add(db: &Db, p: AddParams) -> Result<()> {
@@ -182,6 +183,20 @@ fn cmd_add(db: &Db, p: AddParams) -> Result<()> {
     };
 
     db.insert_task(&task)?;
+
+    // Auto-create Linear issue (best-effort) unless already provided or --no-linear
+    if !p.no_linear && task.linear_issue_id.is_empty() {
+        if let Ok(client) = linear::LinearClient::new() {
+            let title = task.prompt.lines().next().unwrap_or(&task.prompt);
+            match client.create_issue(title, &task.prompt, "todo") {
+                Ok(issue_id) => {
+                    let _ = db.set_linear_issue_id(&task.id, &issue_id);
+                    println!("  linear: {issue_id}");
+                }
+                Err(e) => eprintln!("  linear (skipped): {e}"),
+            }
+        }
+    }
 
     println!(
         "added: {id} ({}, p{}, {}, {max_turns}t)",
@@ -671,6 +686,7 @@ fn cmd_sched_trigger(db: &Db, id: &str) -> Result<()> {
             context,
             linear: None,
             stage: None,
+            no_linear: true, // scheduled tasks don't need auto-Linear
         },
     )?;
 
@@ -860,6 +876,7 @@ fn main() -> anyhow::Result<()> {
             context,
             linear,
             stage,
+            no_linear,
         } => {
             let db = open_db()?;
             cmd_add(
@@ -877,6 +894,7 @@ fn main() -> anyhow::Result<()> {
                     context,
                     linear,
                     stage,
+                    no_linear,
                 },
             )?;
         }
@@ -1018,6 +1036,13 @@ fn main() -> anyhow::Result<()> {
                 let client = linear::LinearClient::new()?;
                 client.push_all(&db)?;
             }
+            cli::LinearAction::Mirror { id } => {
+                let db = open_db()?;
+                match linear::LinearClient::new() {
+                    Ok(client) => client.mirror(&db, &id)?,
+                    Err(e) => eprintln!("linear mirror skipped (no config): {e}"),
+                }
+            }
         },
 
         cli::Commands::Pipeline { action } => match action {
@@ -1028,6 +1053,10 @@ fn main() -> anyhow::Result<()> {
             cli::PipelineAction::Status => {
                 let db = open_db()?;
                 pipeline::status(&db)?;
+            }
+            cli::PipelineAction::Callback { id } => {
+                let db = open_db()?;
+                pipeline::callback_from_db(&db, &id)?;
             }
         },
 

@@ -57,6 +57,10 @@ pub enum Commands {
         /// Pipeline stage
         #[arg(long)]
         stage: Option<String>,
+
+        /// Skip auto-creating Linear issue
+        #[arg(long)]
+        no_linear: bool,
     },
 
     /// List tasks (alias: ls)
@@ -245,6 +249,11 @@ pub enum LinearAction {
     },
     /// Push all completed tasks to Linear
     PushAll,
+    /// Mirror a task's state to Linear (create issue if needed, update status, post comment)
+    Mirror {
+        /// Task ID
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -253,4 +262,9 @@ pub enum PipelineAction {
     Poll,
     /// Show pipeline status
     Status,
+    /// Handle pipeline callback for a completed task (db-driven)
+    Callback {
+        /// Task ID
+        id: String,
+    },
 }

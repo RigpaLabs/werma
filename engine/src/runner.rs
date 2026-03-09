@@ -271,6 +271,7 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
         max_turns: task.max_turns,
         model,
         log_file: &log_file,
+        pipeline_stage: &task.pipeline_stage,
     });
 
     std::fs::write(&exec_script, &script)?;
@@ -336,6 +337,7 @@ struct ExecScriptParams<'a> {
     max_turns: i32,
     model: &'a str,
     log_file: &'a Path,
+    pipeline_stage: &'a str,
 }
 
 /// Generate a self-contained bash exec script for tmux.
@@ -350,6 +352,7 @@ fn generate_exec_script(params: &ExecScriptParams<'_>) -> String {
     let tools = params.tools;
     let max_turns = params.max_turns;
     let model = params.model;
+    let pipeline_stage = params.pipeline_stage;
 
     // Escape single quotes in task_id for SQL safety
     let safe_id = task_id.replace('\'', "''");
@@ -368,6 +371,7 @@ ALLOWED_TOOLS='{tools}'
 MAX_TURNS='{max_turns}'
 MODEL='{model}'
 LOG_FILE='{log_file_str}'
+PIPELINE_STAGE='{pipeline_stage}'
 
 cd "$WORKING_DIR"
 
@@ -380,6 +384,10 @@ RESULT_JSON=$(claude -p "$PROMPT" \
     --output-format json 2>> "$LOG_FILE") || {{
     echo "$(date): FAILED (exit $?)" >> "$LOG_FILE"
     sqlite3 "$WERMA_DB" "UPDATE tasks SET status='failed', finished_at='$(date +%Y-%m-%dT%H:%M:%S)' WHERE id='$TASK_ID';"
+    werma linear mirror "$TASK_ID" 2>/dev/null || true
+    if [ -n "$PIPELINE_STAGE" ]; then
+        werma pipeline callback "$TASK_ID" 2>/dev/null || true
+    fi
     osascript -e "display notification \"$TASK_ID FAILED\" with title \"werma\" sound name \"Basso\"" 2>/dev/null || true
     exit 1
 }}
@@ -397,6 +405,12 @@ if [ -n "$OUTPUT" ]; then
 fi
 
 sqlite3 "$WERMA_DB" "UPDATE tasks SET status='completed', finished_at='$(date +%Y-%m-%dT%H:%M:%S)', session_id='$(echo "$SESSION_ID" | sed "s/'/''/g")' WHERE id='$TASK_ID';"
+
+werma linear mirror "$TASK_ID" 2>/dev/null || true
+
+if [ -n "$PIPELINE_STAGE" ]; then
+    werma pipeline callback "$TASK_ID" 2>/dev/null || true
+fi
 
 echo "$(date): DONE (session=$SESSION_ID)" >> "$LOG_FILE"
 
@@ -714,6 +728,7 @@ mod tests {
             max_turns: 15,
             model: "claude-sonnet-4-6",
             log_file: Path::new("/home/user/.werma/logs/20260309-001.log"),
+            pipeline_stage: "",
         });
 
         // Must always write to the log-derived output path
@@ -733,6 +748,7 @@ mod tests {
             max_turns: 15,
             model: "claude-sonnet-4-6",
             log_file: Path::new("/tmp/log.log"),
+            pipeline_stage: "engineer",
         });
 
         assert!(script.contains("TASK_ID='20260308-001'"));
@@ -743,5 +759,28 @@ mod tests {
         assert!(script.contains("--output-format json"));
         assert!(script.contains("jq -r"));
         assert!(script.contains("osascript"));
+        assert!(script.contains("werma linear mirror"));
+        assert!(script.contains("PIPELINE_STAGE='engineer'"));
+        assert!(script.contains("werma pipeline callback"));
+    }
+
+    #[test]
+    fn exec_script_no_pipeline_stage_skips_callback() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "20260308-002",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/home/user/project"),
+            tools: "Read,Grep,Glob",
+            max_turns: 10,
+            model: "claude-sonnet-4-6",
+            log_file: Path::new("/tmp/log.log"),
+            pipeline_stage: "",
+        });
+
+        assert!(script.contains("PIPELINE_STAGE=''"));
+        // callback guard: only fires when PIPELINE_STAGE is non-empty
+        assert!(script.contains("if [ -n \"$PIPELINE_STAGE\" ]"));
+        assert!(script.contains("werma linear mirror"));
     }
 }

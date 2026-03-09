@@ -46,6 +46,10 @@ impl Db {
                 return Err(e).context("migration 002_repo_hash");
             }
         }
+        // Best-effort migration for new columns added in RIG-50
+        let _ = self
+            .conn
+            .execute("ALTER TABLE tasks ADD COLUMN linear_status TEXT DEFAULT ''", []);
         Ok(())
     }
 
@@ -213,6 +217,7 @@ impl Db {
             "allowed_tools",
             "model",
             "repo_hash",
+            "linear_issue_id",
         ];
         anyhow::ensure!(
             allowed.contains(&field),
@@ -221,6 +226,15 @@ impl Db {
 
         let sql = format!("UPDATE tasks SET {field} = ?1 WHERE id = ?2");
         self.conn.execute(&sql, params![value, id])?;
+        Ok(())
+    }
+
+    /// Set the Linear issue ID for a task (used after auto-creating an issue).
+    pub fn set_linear_issue_id(&self, id: &str, issue_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET linear_issue_id = ?1 WHERE id = ?2",
+            params![issue_id, id],
+        )?;
         Ok(())
     }
 
@@ -919,6 +933,35 @@ mod tests {
         db.set_linear_pushed("20260308-001", true).unwrap();
         let fetched = db.task("20260308-001").unwrap().unwrap();
         assert!(fetched.linear_pushed);
+    }
+
+    #[test]
+    fn set_linear_issue_id() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        // Initially empty
+        let fetched = db.task("20260308-001").unwrap().unwrap();
+        assert!(fetched.linear_issue_id.is_empty());
+
+        // Set it
+        db.set_linear_issue_id("20260308-001", "linear-uuid-abc123")
+            .unwrap();
+        let fetched = db.task("20260308-001").unwrap().unwrap();
+        assert_eq!(fetched.linear_issue_id, "linear-uuid-abc123");
+    }
+
+    #[test]
+    fn update_task_field_linear_issue_id_allowed() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        db.update_task_field("20260308-001", "linear_issue_id", "issue-xyz")
+            .unwrap();
+        let fetched = db.task("20260308-001").unwrap().unwrap();
+        assert_eq!(fetched.linear_issue_id, "issue-xyz");
     }
 
     #[test]
