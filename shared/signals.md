@@ -23,4 +23,6 @@ _No active signals._
 
 ## Signal History
 
+**2026-03-10 [ENGINEER] READY** — RIG-50 implemented: werma.db-first, Linear as mirror. Branch feat/RIG-50-werma-first pushed. 127 tests passing. Awaiting PR review and merge.
+
 **2026-03-09 00:01 WATCHDOG OK** — All 5 containers healthy (fathom: 180.6MB/384MB, hl:dydx:spot:perp active, ar-quant-alpha: 13d uptime, ht-tg-bot: 6w uptime)
