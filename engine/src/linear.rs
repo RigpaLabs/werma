@@ -266,6 +266,12 @@ impl LinearClient {
                 })
                 .unwrap_or_default();
 
+            // Skip manual issues — human-driven, agents must not pick up
+            if is_manual_issue(&labels) {
+                skipped += 1;
+                continue;
+            }
+
             let task_type = infer_type_from_labels(&labels);
             let working_dir = infer_working_dir(title, &labels);
 
@@ -541,6 +547,11 @@ pub fn infer_type_from_labels(labels: &[&str]) -> String {
     "code".to_string()
 }
 
+/// Check if issue has the `manual` label — human-driven, agents must skip.
+pub fn is_manual_issue(labels: &[&str]) -> bool {
+    labels.iter().any(|l| l.eq_ignore_ascii_case("manual"))
+}
+
 /// Infer working directory from title keywords and labels.
 pub fn infer_working_dir(title: &str, labels: &[&str]) -> String {
     let title_lower = title.to_lowercase();
@@ -639,6 +650,17 @@ mod tests {
             infer_working_dir("hyper liquidation fix", &[]),
             "~/projects/hyper-liq"
         );
+    }
+
+    #[test]
+    fn manual_label_detection() {
+        assert!(is_manual_issue(&["manual"]));
+        assert!(is_manual_issue(&["Manual"]));
+        assert!(is_manual_issue(&["MANUAL"]));
+        assert!(is_manual_issue(&["Feature", "manual", "repo:werma"]));
+        assert!(!is_manual_issue(&["Feature", "Bug"]));
+        assert!(!is_manual_issue(&[]));
+        assert!(!is_manual_issue(&["manually-created"])); // partial match must NOT trigger
     }
 
     #[test]

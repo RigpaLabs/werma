@@ -13,6 +13,7 @@ Agent identity, memory & orchestration for RigpaLabs pipeline. Each agent has:
 3. **Check shared/signals.md** for active signals before starting
 4. **Post signals** when completing, blocking, or failing
 5. **Respect limits.json** — model tier, max turns, timeout
+6. **Never pick up `manual` label issues** — these are human-driven work. Pipeline poll and sync skip them automatically
 
 ## Engine
 

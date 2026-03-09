@@ -140,7 +140,7 @@ pub fn poll(db: &Db) -> Result<()> {
             let agent_type = agent_for_stage(stage_config.stage);
             let model = model_for_stage(stage_config.stage);
 
-            // Get labels for working_dir inference
+            // Get labels for working_dir inference and filtering
             let labels: Vec<&str> = issue["labels"]["nodes"]
                 .as_array()
                 .map(|arr| {
@@ -149,6 +149,12 @@ pub fn poll(db: &Db) -> Result<()> {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+
+            // Skip manual issues — human-driven, agents must not pick up
+            if crate::linear::is_manual_issue(&labels) {
+                total_skipped += 1;
+                continue;
+            }
 
             let working_dir = crate::linear::infer_working_dir(title, &labels);
 
