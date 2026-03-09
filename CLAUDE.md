@@ -13,7 +13,7 @@ Agent identity, memory & orchestration for RigpaLabs pipeline. Each agent has:
 3. **Check shared/signals.md** for active signals before starting
 4. **Post signals** when completing, blocking, or failing
 5. **Respect limits.json** — model tier, max turns, timeout
-6. **Never pick up `manual` label issues** — these are human-driven work. Pipeline poll and sync skip them automatically
+6. **`manual` label = human execution, agent review.** Agents must NOT pick up manual issues for execution stages (analyst, engineer, devops). But review and QA stages SHOULD run on manual issues — agents review human code just like agent code. Pipeline poll enforces this via `is_execution_stage()`
 
 ## Engine
 

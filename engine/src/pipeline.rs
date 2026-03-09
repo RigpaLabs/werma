@@ -81,6 +81,12 @@ pub fn parse_verdict(result: &str) -> Option<String> {
     found
 }
 
+/// Whether a stage is an execution stage (human does the work for `manual` issues).
+/// Review and QA stages are NOT execution — agents should review regardless.
+fn is_execution_stage(stage: &str) -> bool {
+    matches!(stage, "analyst" | "engineer" | "devops")
+}
+
 /// Status key mappings for pipeline stages.
 struct StageConfig {
     status_key: &'static str,
@@ -150,8 +156,9 @@ pub fn poll(db: &Db) -> Result<()> {
                 })
                 .unwrap_or_default();
 
-            // Skip manual issues — human-driven, agents must not pick up
-            if crate::linear::is_manual_issue(&labels) {
+            // Manual issues: skip execution stages (analyst, engineer, devops)
+            // but allow review/qa — agents should review human code too.
+            if crate::linear::is_manual_issue(&labels) && is_execution_stage(stage_config.stage) {
                 total_skipped += 1;
                 continue;
             }
@@ -565,5 +572,18 @@ mod tests {
     fn verdict_last_match_wins() {
         let text = "VERDICT=FAILED\nAfter fixes:\nVERDICT=APPROVED";
         assert_eq!(parse_verdict(text), Some("APPROVED".to_string()));
+    }
+
+    #[test]
+    fn execution_vs_review_stages() {
+        // Execution stages: manual issues should be skipped
+        assert!(is_execution_stage("analyst"));
+        assert!(is_execution_stage("engineer"));
+        assert!(is_execution_stage("devops"));
+
+        // Review/QA stages: manual issues should NOT be skipped
+        assert!(!is_execution_stage("reviewer"));
+        assert!(!is_execution_stage("qa"));
+        assert!(!is_execution_stage("unknown"));
     }
 }
