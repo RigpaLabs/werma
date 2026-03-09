@@ -273,11 +273,29 @@ fn cmd_view(db: &Db, id: &str) -> Result<()> {
     println!("  {}", task.prompt);
     println!();
 
-    if !task.output_path.is_empty() {
+    // Check custom output path first, then fall back to default log output
+    let output_shown = if !task.output_path.is_empty() {
         let path = Path::new(&task.output_path);
         if path.exists() {
             println!("  --- output ---");
             let content = std::fs::read_to_string(path)?;
+            println!("{content}");
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if !output_shown {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        let log_output = home
+            .join(".werma/logs")
+            .join(format!("{}-output.md", task.id));
+        if log_output.exists() {
+            println!("  --- output ---");
+            let content = std::fs::read_to_string(&log_output)?;
             println!("{content}");
         }
     }

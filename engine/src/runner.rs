@@ -339,6 +339,10 @@ RESULT_JSON=$(claude -p "$PROMPT" \
 RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.result // empty' 2>/dev/null || echo "$RESULT_JSON")
 SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
 
+# Always save output to logs
+echo "$RESULT_TEXT" > "${{LOG_FILE%.log}}-output.md"
+
+# Also write to custom output path if specified
 if [ -n "$OUTPUT" ]; then
     mkdir -p "$(dirname "$OUTPUT")"
     echo "$RESULT_TEXT" > "$OUTPUT"
@@ -516,6 +520,26 @@ mod tests {
         let result = build_prompt(&task, Path::new("/tmp")).unwrap();
         // Missing files are skipped, but header is still there
         assert!(result.contains("Task:\nDo stuff"));
+    }
+
+    #[test]
+    fn exec_script_always_saves_output_to_logs() {
+        // Even without --output, RESULT_TEXT should be saved to <id>-output.md
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "20260309-001",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "", // no custom output
+            working_dir: Path::new("/home/user/project"),
+            tools: "Read,Grep,Glob",
+            max_turns: 15,
+            model: "claude-sonnet-4-6",
+            log_file: Path::new("/home/user/.werma/logs/20260309-001.log"),
+        });
+
+        // Must always write to the log-derived output path
+        assert!(script.contains(r#"> "${LOG_FILE%.log}-output.md""#));
+        // OUTPUT is empty, so the custom output block should still exist but not trigger
+        assert!(script.contains(r#"if [ -n "$OUTPUT" ]"#));
     }
 
     #[test]
