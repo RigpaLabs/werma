@@ -167,6 +167,7 @@ fn parse_task(v: &serde_json::Value) -> Task {
         pipeline_stage: v["pipeline_stage"].as_str().unwrap_or("").to_string(),
         depends_on: parse_string_array(&v["depends_on"]),
         context_files: parse_string_array(&v["context_files"]),
+        repo_hash: v["repo_hash"].as_str().unwrap_or("").to_string(),
     }
 }
 

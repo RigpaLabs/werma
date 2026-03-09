@@ -24,6 +24,40 @@ use clap::Parser;
 use crate::db::Db;
 use crate::models::{Schedule, Status, Task};
 
+/// Build a version string for clap: "0.1.0 (git-hash)".
+/// Returns &'static str because clap requires it.
+pub fn version_string() -> &'static str {
+    // Computed once at startup, leaked to get 'static lifetime.
+    // This is fine — it's a small string that lives for the process lifetime.
+    let git = option_env!("WERMA_GIT_VERSION").unwrap_or("dev");
+    let s = format!("{} ({git})", env!("CARGO_PKG_VERSION"));
+    Box::leak(s.into_boxed_str())
+}
+
+/// Get the current git HEAD hash of the werma repo at runtime.
+/// This reflects the *repo state* (agents, prompts, memory), which may differ
+/// from the compile-time binary hash.
+pub fn runtime_repo_hash() -> String {
+    let repo = std::env::var("WERMA_REPO").unwrap_or_else(|_| {
+        dirs::home_dir()
+            .map(|h| {
+                h.join("projects/rigpa/werma")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .unwrap_or_default()
+    });
+    std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(&repo)
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// Returns ~/.werma/ and creates it (+ subdirs) if needed.
 fn werma_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("cannot determine home directory")?;
@@ -143,6 +177,7 @@ fn cmd_add(db: &Db, p: AddParams) -> Result<()> {
         pipeline_stage: p.stage.unwrap_or_default(),
         depends_on: depends_on.clone(),
         context_files: context_files.clone(),
+        repo_hash: runtime_repo_hash(),
     };
 
     db.insert_task(&task)?;
@@ -265,6 +300,9 @@ fn cmd_view(db: &Db, id: &str) -> Result<()> {
     if !task.context_files.is_empty() {
         println!("  context:     {}", task.context_files.join(", "));
     }
+    if !task.repo_hash.is_empty() {
+        println!("  repo_hash:   {}", task.repo_hash);
+    }
     if !task.allowed_tools.is_empty() {
         println!("  tools:       {}", task.allowed_tools);
     }
@@ -273,11 +311,29 @@ fn cmd_view(db: &Db, id: &str) -> Result<()> {
     println!("  {}", task.prompt);
     println!();
 
-    if !task.output_path.is_empty() {
+    // Check custom output path first, then fall back to default log output
+    let output_shown = if !task.output_path.is_empty() {
         let path = Path::new(&task.output_path);
         if path.exists() {
             println!("  --- output ---");
             let content = std::fs::read_to_string(path)?;
+            println!("{content}");
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if !output_shown {
+        let home = dirs::home_dir().context("cannot determine home directory")?;
+        let log_output = home
+            .join(".werma/logs")
+            .join(format!("{}-output.md", task.id));
+        if log_output.exists() {
+            println!("  --- output ---");
+            let content = std::fs::read_to_string(&log_output)?;
             println!("{content}");
         }
     }
@@ -620,10 +676,13 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         cli::Commands::Version => {
             let pkg = env!("CARGO_PKG_VERSION");
-            let git = option_env!("WERMA_GIT_VERSION").unwrap_or("dev");
-            println!("werma {pkg} ({git})");
+            let bin_hash = option_env!("WERMA_GIT_VERSION").unwrap_or("dev");
+            let repo_hash = runtime_repo_hash();
             let dir = werma_dir()?;
-            println!("db: {}", dir.join("werma.db").display());
+            println!("werma {pkg}");
+            println!("  binary: {bin_hash} (compiled)");
+            println!("  repo:   {repo_hash} (runtime)");
+            println!("  db:     {}", dir.join("werma.db").display());
         }
 
         cli::Commands::Add {

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "werma", about = "Agent task orchestrator")]
+#[command(name = "werma", about = "Agent task orchestrator", version = crate::version_string())]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,

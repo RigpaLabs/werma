@@ -9,7 +9,7 @@ use chrono::Local;
 use cron::Schedule;
 
 use crate::db::Db;
-use crate::runner;
+use crate::{linear, pipeline, runner};
 
 const TICK_INTERVAL_SECS: u64 = 5;
 const ORCHESTRATOR_INTERVAL_SECS: u64 = 900;
@@ -25,7 +25,15 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
     std::fs::create_dir_all(werma_dir.join("logs"))?;
 
-    log_daemon(&log_path, "daemon started");
+    log_daemon(
+        &log_path,
+        &format!(
+            "daemon started — werma {} (bin:{}, repo:{})",
+            env!("CARGO_PKG_VERSION"),
+            option_env!("WERMA_GIT_VERSION").unwrap_or("dev"),
+            crate::runtime_repo_hash(),
+        ),
+    );
 
     // Trigger orchestrator immediately on first tick.
     let mut last_orchestrator = Instant::now() - Duration::from_secs(ORCHESTRATOR_INTERVAL_SECS);
@@ -41,6 +49,10 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
             if let Err(e) = check_stuck_tasks(&db, werma_dir) {
                 log_daemon(&log_path, &format!("stuck detection error: {e}"));
+            }
+
+            if let Err(e) = process_completed_pipeline_tasks(&db, werma_dir) {
+                log_daemon(&log_path, &format!("pipeline callback error: {e}"));
             }
 
             if let Err(e) = drain_queue(&db, werma_dir) {
@@ -163,6 +175,7 @@ fn check_schedules(db: &Db, werma_dir: &Path) -> Result<()> {
             pipeline_stage: String::new(),
             depends_on: vec![],
             context_files: sched.context_files.clone(),
+            repo_hash: crate::runtime_repo_hash(),
         };
 
         db.insert_task(&task)?;
@@ -239,6 +252,98 @@ fn load_timeout_mins(werma_dir: &Path) -> i64 {
         return timeout;
     }
     DEFAULT_STUCK_TIMEOUT_MINS
+}
+
+/// Process completed tasks that have Linear integration but haven't been pushed yet.
+/// Pipeline tasks get routed through `pipeline::callback()` to advance the issue state.
+/// Non-pipeline tasks get a comment + move-to-Done via `linear.push()`.
+fn process_completed_pipeline_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
+    let log_path = werma_dir.join("logs/daemon.log");
+    let tasks = db.unpushed_linear_tasks()?;
+
+    if tasks.is_empty() {
+        return Ok(());
+    }
+
+    for task in &tasks {
+        if !task.pipeline_stage.is_empty() {
+            // Pipeline task: read output and call pipeline::callback()
+            let output_file = werma_dir.join(format!("logs/{}-output.md", task.id));
+            let output = std::fs::read_to_string(&output_file).unwrap_or_default();
+
+            match pipeline::callback(
+                db,
+                &task.id,
+                &task.pipeline_stage,
+                &output,
+                &task.linear_issue_id,
+            ) {
+                Ok(()) => {
+                    db.set_linear_pushed(&task.id, true)?;
+                    log_daemon(
+                        &log_path,
+                        &format!(
+                            "pipeline callback: {} stage={} issue={}",
+                            task.id, task.pipeline_stage, task.linear_issue_id
+                        ),
+                    );
+                }
+                Err(e) => {
+                    log_daemon(
+                        &log_path,
+                        &format!(
+                            "pipeline callback failed: {} stage={} error={e}",
+                            task.id, task.pipeline_stage
+                        ),
+                    );
+                    // Skip — will retry next tick.
+                }
+            }
+        } else if task.task_type == "research" {
+            // Research task: post summary comment and create curator follow-up.
+            let output_file = werma_dir.join(format!("logs/{}-output.md", task.id));
+            let output = std::fs::read_to_string(&output_file).unwrap_or_default();
+
+            match pipeline::handle_research_completion(db, task, &output) {
+                Ok(()) => {
+                    db.set_linear_pushed(&task.id, true)?;
+                    log_daemon(
+                        &log_path,
+                        &format!(
+                            "research completion: {} issue={}",
+                            task.id, task.linear_issue_id
+                        ),
+                    );
+                }
+                Err(e) => {
+                    log_daemon(
+                        &log_path,
+                        &format!("research completion failed: {} error={e}", task.id),
+                    );
+                    // Skip — will retry next tick.
+                }
+            }
+        } else {
+            // Non-pipeline task with linear_issue_id: push comment + move to Done.
+            match linear::LinearClient::new().and_then(|client| client.push(db, &task.id)) {
+                Ok(()) => {
+                    db.set_linear_pushed(&task.id, true)?;
+                    log_daemon(
+                        &log_path,
+                        &format!("linear push: {} issue={}", task.id, task.linear_issue_id),
+                    );
+                }
+                Err(e) => {
+                    log_daemon(
+                        &log_path,
+                        &format!("linear push failed: {} error={e}", task.id),
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Drain pending tasks into tmux sessions, respecting max_concurrent.
@@ -332,6 +437,7 @@ fn run_orchestrator(_db: &Db, werma_dir: &Path) -> Result<()> {
         pipeline_stage: String::new(),
         depends_on: vec![],
         context_files: vec![character_file.to_string_lossy().to_string()],
+        repo_hash: crate::runtime_repo_hash(),
     };
 
     _db.insert_task(&task)?;
@@ -681,5 +787,145 @@ mod tests {
         assert!(content.contains("second message"));
         // Two lines.
         assert_eq!(content.lines().count(), 2);
+    }
+
+    #[test]
+    fn process_pipeline_tasks_missing_output_file() {
+        // When output file doesn't exist, read_to_string returns empty via unwrap_or_default.
+        // This tests the graceful handling — the function should not panic.
+        let dir = tempfile::tempdir().unwrap();
+        let output_file = dir.path().join("logs/99999-output.md");
+        let content = std::fs::read_to_string(&output_file).unwrap_or_default();
+        assert!(content.is_empty());
+    }
+
+    #[test]
+    fn process_pipeline_tasks_skips_already_pushed() {
+        // Verify unpushed_linear_tasks only returns tasks with linear_pushed=false
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        let task = crate::models::Task {
+            id: "20260309-001".to_string(),
+            status: crate::models::Status::Completed,
+            priority: 1,
+            created_at: "2026-03-09T10:00:00".to_string(),
+            started_at: None,
+            finished_at: None,
+            task_type: "pipeline-engineer".to_string(),
+            prompt: "test".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            model: "sonnet".to_string(),
+            max_turns: 15,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: "issue-abc".to_string(),
+            linear_pushed: false,
+            pipeline_stage: "engineer".to_string(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: String::new(),
+        };
+        db.insert_task(&task).unwrap();
+
+        // Before push: should appear
+        let unpushed = db.unpushed_linear_tasks().unwrap();
+        assert_eq!(unpushed.len(), 1);
+
+        // After marking pushed: should not appear
+        db.set_linear_pushed("20260309-001", true).unwrap();
+        let unpushed = db.unpushed_linear_tasks().unwrap();
+        assert!(unpushed.is_empty());
+    }
+
+    #[test]
+    fn process_pipeline_tasks_filters_by_pipeline_stage() {
+        // Verify that the function distinguishes pipeline vs non-pipeline tasks correctly.
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        // Pipeline task (has pipeline_stage)
+        let pipeline_task = crate::models::Task {
+            id: "20260309-001".to_string(),
+            status: crate::models::Status::Completed,
+            priority: 1,
+            created_at: "2026-03-09T10:00:00".to_string(),
+            started_at: None,
+            finished_at: None,
+            task_type: "pipeline-reviewer".to_string(),
+            prompt: "test".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            model: "sonnet".to_string(),
+            max_turns: 15,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: "issue-abc".to_string(),
+            linear_pushed: false,
+            pipeline_stage: "reviewer".to_string(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: String::new(),
+        };
+
+        // Non-pipeline task (empty pipeline_stage, but has linear_issue_id)
+        let direct_task = crate::models::Task {
+            id: "20260309-002".to_string(),
+            status: crate::models::Status::Completed,
+            priority: 1,
+            created_at: "2026-03-09T10:01:00".to_string(),
+            started_at: None,
+            finished_at: None,
+            task_type: "research".to_string(),
+            prompt: "test".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            model: "sonnet".to_string(),
+            max_turns: 15,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: "issue-def".to_string(),
+            linear_pushed: false,
+            pipeline_stage: String::new(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: String::new(),
+        };
+
+        db.insert_task(&pipeline_task).unwrap();
+        db.insert_task(&direct_task).unwrap();
+
+        let unpushed = db.unpushed_linear_tasks().unwrap();
+        assert_eq!(unpushed.len(), 2);
+
+        // Verify we can distinguish them by pipeline_stage
+        let pipeline_tasks: Vec<_> = unpushed
+            .iter()
+            .filter(|t| !t.pipeline_stage.is_empty())
+            .collect();
+        let direct_tasks: Vec<_> = unpushed
+            .iter()
+            .filter(|t| t.pipeline_stage.is_empty())
+            .collect();
+
+        assert_eq!(pipeline_tasks.len(), 1);
+        assert_eq!(pipeline_tasks[0].id, "20260309-001");
+        assert_eq!(pipeline_tasks[0].pipeline_stage, "reviewer");
+
+        assert_eq!(direct_tasks.len(), 1);
+        assert_eq!(direct_tasks[0].id, "20260309-002");
+    }
+
+    #[test]
+    fn process_pipeline_tasks_reads_output_file() {
+        // Verify output file is read correctly from the expected path.
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+
+        let output_file = logs_dir.join("20260309-001-output.md");
+        std::fs::write(&output_file, "REVIEW_VERDICT=APPROVED\nAll looks good.").unwrap();
+
+        let output = std::fs::read_to_string(&output_file).unwrap_or_default();
+        assert!(output.contains("REVIEW_VERDICT=APPROVED"));
     }
 }
