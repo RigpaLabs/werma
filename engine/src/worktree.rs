@@ -57,7 +57,13 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
 
     // Try creating with a new branch first
     let output = Command::new("git")
-        .args(["worktree", "add", &worktree_path.to_string_lossy(), "-b", branch_name])
+        .args([
+            "worktree",
+            "add",
+            &worktree_path.to_string_lossy(),
+            "-b",
+            branch_name,
+        ])
         .current_dir(working_dir)
         .output()
         .context("running git worktree add")?;
@@ -70,7 +76,12 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
     let stderr = String::from_utf8_lossy(&output.stderr);
     if stderr.contains("already exists") {
         let output2 = Command::new("git")
-            .args(["worktree", "add", &worktree_path.to_string_lossy(), branch_name])
+            .args([
+                "worktree",
+                "add",
+                &worktree_path.to_string_lossy(),
+                branch_name,
+            ])
             .current_dir(working_dir)
             .output()
             .context("running git worktree add (existing branch)")?;
@@ -95,6 +106,7 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
 }
 
 /// Remove a worktree (does NOT delete the branch).
+#[allow(dead_code)]
 pub fn cleanup_worktree(working_dir: &Path, branch_name: &str) -> Result<()> {
     let worktree_path = working_dir.join(".trees").join(branch_name);
 
@@ -144,10 +156,16 @@ fn extract_rig_id(prompt: &str) -> Option<String> {
 fn slugify_prompt(prompt: &str) -> String {
     let first_line = prompt.lines().next().unwrap_or(prompt);
 
-    // Remove common prefixes like "[RIG-XX]"
-    let cleaned = first_line
-        .trim_start_matches(|c: char| c == '[' || c.is_ascii_alphanumeric() || c == '-' || c == ']')
-        .trim();
+    // Remove bracketed prefix like "[RIG-XX]"
+    let cleaned = if first_line.starts_with('[') {
+        first_line
+            .find(']')
+            .map(|i| &first_line[i + 1..])
+            .unwrap_or(first_line)
+            .trim()
+    } else {
+        first_line.trim()
+    };
 
     let slug: String = cleaned
         .split_whitespace()
@@ -155,7 +173,7 @@ fn slugify_prompt(prompt: &str) -> String {
         .take(4)
         .map(|w| {
             w.chars()
-                .filter(|c| c.is_ascii_alphanumeric())
+                .filter(char::is_ascii_alphanumeric)
                 .collect::<String>()
                 .to_lowercase()
         })
@@ -256,11 +274,7 @@ mod tests {
 
     #[test]
     fn branch_name_linear_without_rig_id() {
-        let task = test_task(
-            "code",
-            "issue-abc-123",
-            "Add feature without issue prefix",
-        );
+        let task = test_task("code", "issue-abc-123", "Add feature without issue prefix");
         let name = generate_branch_name(&task);
         assert!(name.starts_with("feat/werma-20260310-001-"));
     }
@@ -269,7 +283,10 @@ mod tests {
 
     #[test]
     fn extract_rig_id_found() {
-        assert_eq!(extract_rig_id("[RIG-42] Something"), Some("RIG-42".to_string()));
+        assert_eq!(
+            extract_rig_id("[RIG-42] Something"),
+            Some("RIG-42".to_string())
+        );
         assert_eq!(extract_rig_id("RIG-123 stuff"), Some("RIG-123".to_string()));
     }
 
@@ -284,7 +301,7 @@ mod tests {
     #[test]
     fn slugify_basic() {
         let slug = slugify_prompt("Add worktree support for parallel agents");
-        assert_eq!(slug, "worktree-support-for-parallel");
+        assert_eq!(slug, "add-worktree-support-for");
     }
 
     #[test]

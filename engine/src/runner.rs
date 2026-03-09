@@ -117,6 +117,12 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
     }
 
     prompt.push_str(&task.prompt);
+
+    // For write tasks, instruct agents to label PRs as ai-generated
+    if crate::worktree::needs_worktree(&task.task_type) {
+        prompt.push_str("\n\nWhen creating pull requests, add the label \"ai-generated\".");
+    }
+
     Ok(prompt)
 }
 
