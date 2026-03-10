@@ -93,14 +93,14 @@ Write tasks (code, full, refactor, pipeline-engineer, pipeline-devops) run in is
 **Conventional Commits** — CI handles version bumps, CHANGELOG, tags, and GitHub Releases automatically.
 
 ```
-feat(scope): description   → minor bump (0.x.0)
-fix(scope): description    → patch bump (0.0.x)
-docs:, refactor:, chore:, test:, ci:  → patch bump
-feat!: or BREAKING CHANGE: → minor bump (pre-1.0)
+RIG-XX feat: description   → minor bump (0.x.0)
+RIG-XX fix: description    → patch bump (0.0.x)
+RIG-XX docs:, refactor:, chore:, test:, ci:  → patch bump
+RIG-XX feat!: or BREAKING CHANGE: → minor bump (pre-1.0)
 ```
 
-**PR titles** must use conventional commit format (squash merge uses PR title):
-- `feat(RIG-XX): description` or `fix(RIG-XX): description`
+**PR titles** must use the `RIG-XX type: description` format (squash merge uses PR title):
+- `RIG-XX feat: description` or `RIG-XX fix: description`
 
 **DO NOT:**
 - Bump version in `Cargo.toml` — CI does it
