@@ -117,7 +117,12 @@ pub fn cleanup_worktree(working_dir: &Path, branch_name: &str) -> Result<()> {
     }
 
     let output = Command::new("git")
-        .args(["worktree", "remove", "--force", &worktree_path.to_string_lossy()])
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            &worktree_path.to_string_lossy(),
+        ])
         .current_dir(working_dir)
         .output()
         .context("running git worktree remove")?;
