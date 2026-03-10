@@ -159,22 +159,34 @@ jobs:
           DATE=$(date +%Y-%m-%d)
           CHANGELOG="${{ steps.bump.outputs.changelog }}"
 
-          # Create CHANGELOG.md if it doesn't exist
           if [ ! -f CHANGELOG.md ]; then
             echo "# Changelog" > CHANGELOG.md
             echo "" >> CHANGELOG.md
           fi
 
-          # Prepend new version section after the header
-          {
-            head -1 CHANGELOG.md
-            echo ""
-            echo "## [${TAG}] — ${DATE}"
-            echo ""
-            printf '%s\n' "$CHANGELOG"
-            echo ""
-            tail -n +2 CHANGELOG.md
-          } > CHANGELOG.tmp
+          # Find line number of first version heading (## [)
+          INSERT_LINE=$(grep -n '^## \[' CHANGELOG.md | head -1 | cut -d: -f1)
+
+          if [ -n "$INSERT_LINE" ]; then
+            # Insert new version section before the first existing version
+            {
+              head -n $((INSERT_LINE - 1)) CHANGELOG.md
+              echo "## [${TAG}] — ${DATE}"
+              echo ""
+              printf '%s\n' "$CHANGELOG"
+              echo ""
+              tail -n +${INSERT_LINE} CHANGELOG.md
+            } > CHANGELOG.tmp
+          else
+            # No existing versions — append to end
+            {
+              cat CHANGELOG.md
+              echo ""
+              echo "## [${TAG}] — ${DATE}"
+              echo ""
+              printf '%s\n' "$CHANGELOG"
+            } > CHANGELOG.tmp
+          fi
           mv CHANGELOG.tmp CHANGELOG.md
 
           echo "Updated CHANGELOG.md with ${TAG}"
