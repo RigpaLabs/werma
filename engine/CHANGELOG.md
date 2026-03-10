@@ -2,6 +2,11 @@
 
 All notable changes to the werma engine are documented here.
 
+## [0.3.1] — 2026-03-10
+
+### Fixed
+- Clippy too_many_arguments lint in create_next_stage_task (pipeline.rs)
+
 ## [0.3.0] — 2026-03-10
 
 ### Added
