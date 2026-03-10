@@ -308,14 +308,26 @@ mod tests {
 
     #[test]
     fn extract_rig_id_prefix_found() {
-        assert_eq!(extract_rig_id_prefix("RIG-83 do stuff"), Some("RIG-83".to_string()));
-        assert_eq!(extract_rig_id_prefix("  RIG-42 something"), Some("RIG-42".to_string()));
-        assert_eq!(extract_rig_id_prefix("[RIG-100] title"), Some("RIG-100".to_string()));
+        assert_eq!(
+            extract_rig_id_prefix("RIG-83 do stuff"),
+            Some("RIG-83".to_string())
+        );
+        assert_eq!(
+            extract_rig_id_prefix("  RIG-42 something"),
+            Some("RIG-42".to_string())
+        );
+        assert_eq!(
+            extract_rig_id_prefix("[RIG-100] title"),
+            Some("RIG-100".to_string())
+        );
     }
 
     #[test]
     fn extract_rig_id_prefix_not_at_start() {
-        assert_eq!(extract_rig_id_prefix("fix the thing RIG-99 mentioned"), None);
+        assert_eq!(
+            extract_rig_id_prefix("fix the thing RIG-99 mentioned"),
+            None
+        );
         assert_eq!(extract_rig_id_prefix("no issue here"), None);
         assert_eq!(extract_rig_id_prefix("RIG- no digits"), None);
     }
