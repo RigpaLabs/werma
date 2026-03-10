@@ -121,9 +121,20 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
 
     prompt.push_str(&task.prompt);
 
-    // For write tasks, instruct agents to label PRs as ai-generated
+    // For write tasks, instruct agents to commit, push, and create PRs autonomously
     if crate::worktree::needs_worktree(&task.task_type) {
-        prompt.push_str("\n\nWhen creating pull requests, add the label \"ai-generated\".");
+        prompt.push_str(concat!(
+            "\n\nIMPORTANT — autonomous mode instructions:",
+            "\nYou are running autonomously in a git worktree (feature branch).",
+            "\nYou MUST complete the full cycle without waiting for human approval:",
+            "\n1. Write the code changes",
+            "\n2. Run `cargo test` (or equivalent) to verify",
+            "\n3. Stage and commit changes with a descriptive message (conventional commits format)",
+            "\n4. Push the branch to remote: `git push -u origin HEAD`",
+            "\n5. Create a PR: `gh pr create --title \"RIG-XX type: description\" --body \"...\" --label ai-generated`",
+            "\nDo NOT ask for permission to commit or push. Do NOT stop and wait for review.",
+            "\nYou are in a worktree — commits here are safe and isolated from main.",
+        ));
     }
 
     Ok(prompt)
