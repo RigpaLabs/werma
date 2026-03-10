@@ -93,6 +93,16 @@ jobs:
             done <<< "$PERFS"
           fi
 
+          # Squash merge fallback: "RIG-XX: description" without conventional prefix → patch bump
+          # GitHub squash merges use PR title as commit message; this catches old-style titles
+          SQUASH_RIGS=$(echo "$COMMITS" | grep -E '^RIG-[0-9]+:' | grep -vE '^(feat|fix|refactor|perf|docs|chore|ci|test|style)(\(.+\))?:' || true)
+          if [ -n "$SQUASH_RIGS" ]; then
+            [ "$BUMP" = "none" ] && BUMP="patch"
+            while IFS= read -r line; do
+              [ -n "$line" ] && CHANGELOG="${CHANGELOG}\n- ${line}"
+            done <<< "$SQUASH_RIGS"
+          fi
+
           # Other conventional commits (docs, refactor, chore, ci, test) — no version bump
           OTHERS=$(echo "$COMMITS" | grep -E '^(docs|refactor|chore|ci|test|style)(\(.+\))?:' || true)
           if [ -n "$OTHERS" ]; then
