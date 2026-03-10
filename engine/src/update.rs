@@ -2,6 +2,17 @@ use anyhow::{Context, Result, bail};
 
 const GITHUB_REPO: &str = "RigpaLabs/werma";
 
+/// Read GitHub token from GITHUB_TOKEN or GH_TOKEN (gh CLI convention).
+fn github_token() -> Result<String> {
+    std::env::var("GITHUB_TOKEN")
+        .or_else(|_| std::env::var("GH_TOKEN"))
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "no GitHub token found — set GITHUB_TOKEN or GH_TOKEN for private repo access"
+            )
+        })
+}
+
 /// Platform target triple for the current binary.
 fn current_target() -> &'static str {
     if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
@@ -16,7 +27,7 @@ fn current_target() -> &'static str {
 }
 
 /// Fetch the latest release tag from GitHub API.
-fn latest_release_tag() -> Result<(String, String)> {
+fn latest_release_tag(token: &str) -> Result<(String, String)> {
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
 
     let client = reqwest::blocking::Client::builder()
@@ -26,6 +37,7 @@ fn latest_release_tag() -> Result<(String, String)> {
 
     let resp = client
         .get(&url)
+        .header("Authorization", format!("Bearer {token}"))
         .send()
         .context("failed to fetch latest release")?;
 
@@ -55,7 +67,9 @@ pub fn update() -> Result<()> {
     println!("Current version: v{current}");
     println!("Checking for updates...");
 
-    let (latest_tag, _release_notes) = latest_release_tag()?;
+    let token = github_token()?;
+
+    let (latest_tag, _release_notes) = latest_release_tag(&token)?;
     let latest_version = latest_tag.strip_prefix('v').unwrap_or(&latest_tag);
 
     if latest_version == current {
@@ -76,7 +90,6 @@ pub fn update() -> Result<()> {
     );
 
     println!("Downloading {artifact_name}...");
-
     let client = reqwest::blocking::Client::builder()
         .user_agent("werma-updater")
         .build()
@@ -84,6 +97,8 @@ pub fn update() -> Result<()> {
 
     let resp = client
         .get(&download_url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/octet-stream")
         .send()
         .context("failed to download release")?;
 
@@ -153,6 +168,24 @@ pub fn update() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_token_reads_from_env() {
+        // Can't mutate env in tests — std::env::set_var requires unsafe since Rust 1.80
+        // (soundness with multi-threaded access). Just verify the function
+        // returns Ok when a token env var is set (CI sets GITHUB_TOKEN)
+        // or Err with a helpful message when neither is set.
+        match github_token() {
+            Ok(token) => assert!(!token.is_empty(), "token should not be empty"),
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("GITHUB_TOKEN") && msg.contains("GH_TOKEN"),
+                    "error should mention both env vars, got: {msg}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn current_target_is_known() {
