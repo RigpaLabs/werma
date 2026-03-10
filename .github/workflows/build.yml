@@ -12,20 +12,8 @@ env:
 
 jobs:
   build:
-    name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            artifact: werma-aarch64-apple-darwin
-          - target: x86_64-apple-darwin
-            os: macos-13
-            artifact: werma-x86_64-apple-darwin
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact: werma-x86_64-unknown-linux-gnu
+    name: Build (aarch64-apple-darwin)
+    runs-on: macos-latest
     defaults:
       run:
         working-directory: engine
@@ -34,7 +22,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -43,26 +31,22 @@ jobs:
       - name: Build release binary
         run: |
           GIT_HASH=$(git rev-parse --short HEAD)
-          WERMA_GIT_VERSION="${GITHUB_REF_NAME:-$GIT_HASH}" cargo build --release --target ${{ matrix.target }}
+          WERMA_GIT_VERSION="${GITHUB_REF_NAME:-$GIT_HASH}" cargo build --release --target aarch64-apple-darwin
 
       - name: Package binary
         working-directory: .
         run: |
-          cp engine/target/${{ matrix.target }}/release/werma werma
-          tar czf ${{ matrix.artifact }}.tar.gz werma
-          if command -v sha256sum &>/dev/null; then
-            sha256sum ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
-          else
-            shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
-          fi
+          cp engine/target/aarch64-apple-darwin/release/werma werma
+          tar czf werma-aarch64-apple-darwin.tar.gz werma
+          shasum -a 256 werma-aarch64-apple-darwin.tar.gz > werma-aarch64-apple-darwin.tar.gz.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: werma-aarch64-apple-darwin
           path: |
-            ${{ matrix.artifact }}.tar.gz
-            ${{ matrix.artifact }}.tar.gz.sha256
+            werma-aarch64-apple-darwin.tar.gz
+            werma-aarch64-apple-darwin.tar.gz.sha256
 
   release:
     name: Create GitHub Release
@@ -101,14 +85,6 @@ jobs:
             echo '```bash'
             echo "# macOS (Apple Silicon)"
             echo "curl -sSL https://github.com/RigpaLabs/werma/releases/download/${TAG}/werma-aarch64-apple-darwin.tar.gz | tar xz"
-            echo "mv werma ~/.local/bin/"
-            echo ""
-            echo "# macOS (Intel)"
-            echo "curl -sSL https://github.com/RigpaLabs/werma/releases/download/${TAG}/werma-x86_64-apple-darwin.tar.gz | tar xz"
-            echo "mv werma ~/.local/bin/"
-            echo ""
-            echo "# Linux (x86_64)"
-            echo "curl -sSL https://github.com/RigpaLabs/werma/releases/download/${TAG}/werma-x86_64-unknown-linux-gnu.tar.gz | tar xz"
             echo "mv werma ~/.local/bin/"
             echo '```'
             echo ""
