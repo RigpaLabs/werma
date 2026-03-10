@@ -505,7 +505,10 @@ impl LinearClient {
             .filter(|s| !s.is_empty())
             .with_context(|| format!("issue {identifier} has no id"))?
             .to_string();
-        let ident = issue["identifier"].as_str().unwrap_or(identifier).to_string();
+        let ident = issue["identifier"]
+            .as_str()
+            .unwrap_or(identifier)
+            .to_string();
         let title = issue["title"].as_str().unwrap_or("").to_string();
         let description = issue["description"].as_str().unwrap_or("").to_string();
         let labels = issue["labels"]["nodes"]

@@ -1087,7 +1087,11 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
         bail!(
             "unknown stage '{}'. Available: {}",
             stage,
-            available.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            available
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 
@@ -1110,7 +1114,10 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
         let existing = db.tasks_by_linear_issue(&issue_id, Some(stage), true)?;
         if !existing.is_empty() {
             let active_id = &existing[0].id;
-            eprintln!("  ~ {} already has active {} task ({})", ident, stage, active_id);
+            eprintln!(
+                "  ~ {} already has active {} task ({})",
+                ident, stage, active_id
+            );
             skipped += 1;
             continue;
         }
@@ -1119,7 +1126,10 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
         if let Some(stage_cfg) = config.stage(stage) {
             let active_count = db.count_active_tasks_for_stage(stage)?;
             if active_count >= stage_cfg.max_concurrent as i64 {
-                eprintln!("  ~ {} skipped: stage '{}' at max_concurrent ({})", ident, stage, stage_cfg.max_concurrent);
+                eprintln!(
+                    "  ~ {} skipped: stage '{}' at max_concurrent ({})",
+                    ident, stage, stage_cfg.max_concurrent
+                );
                 skipped += 1;
                 continue;
             }
@@ -1145,10 +1155,7 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
         created += 1;
     }
 
-    println!(
-        "\nPipeline run: {} created, {} skipped",
-        created, skipped
-    );
+    println!("\nPipeline run: {} created, {} skipped", created, skipped);
     Ok(())
 }
 
