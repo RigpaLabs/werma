@@ -43,14 +43,18 @@ jobs:
       - name: Build release binary
         run: |
           GIT_HASH=$(git rev-parse --short HEAD)
-          WERMA_GIT_VERSION="$GIT_HASH" cargo build --release --target ${{ matrix.target }}
+          WERMA_GIT_VERSION="${GITHUB_REF_NAME:-$GIT_HASH}" cargo build --release --target ${{ matrix.target }}
 
       - name: Package binary
+        working-directory: .
         run: |
-          cp target/${{ matrix.target }}/release/werma ../werma
-          cd ..
+          cp engine/target/${{ matrix.target }}/release/werma werma
           tar czf ${{ matrix.artifact }}.tar.gz werma
-          shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
+          if command -v sha256sum &>/dev/null; then
+            sha256sum ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
+          else
+            shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

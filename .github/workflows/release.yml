@@ -17,7 +17,9 @@ jobs:
   version:
     name: Auto-version & Tag
     runs-on: ubuntu-latest
-    # Skip CI commits from this workflow to avoid infinite loops
+    # Guard: the "Commit version bump" step below creates a "chore: bump version to vX.Y.Z"
+    # commit and pushes to main, which re-triggers this workflow. Without this guard the
+    # workflow would loop forever: push → bump → push → bump → …
     if: "!startsWith(github.event.head_commit.message, 'chore: bump version')"
     outputs:
       new_version: ${{ steps.bump.outputs.new_version }}
