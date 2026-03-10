@@ -708,6 +708,7 @@ fn infer_working_dir_from_issue(db: &Db, linear_issue_id: &str) -> String {
 }
 
 /// Create a task for the next pipeline stage with handoff context.
+#[allow(clippy::too_many_arguments)]
 fn create_next_stage_task(
     db: &Db,
     linear_issue_id: &str,
