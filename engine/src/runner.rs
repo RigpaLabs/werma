@@ -29,7 +29,7 @@ pub fn tools_for_type(task_type: &str, has_output: bool) -> String {
         "research" => "Read,Grep,Glob,WebSearch,WebFetch,Write".to_string(),
         "research-curator" => "Read,Grep,Glob".to_string(),
         "review" | "analyze" => "Read,Grep,Glob".to_string(),
-        "code" | "refactor" => "Read,Edit,Write,Glob,Grep".to_string(),
+        "code" | "refactor" => "Read,Edit,Write,Bash,Glob,Grep".to_string(),
         "full" => format!("Read,Edit,Write,Bash,Glob,Grep,{SLACK_READ},{SLACK_WRITE}"),
         "pipeline-analyst" => format!(
             "Read,Grep,Glob,Bash,WebSearch,WebFetch,{LINEAR_READ},{LINEAR_COMMENT},{LINEAR_LABEL}"
@@ -339,7 +339,7 @@ struct ExecScriptParams<'a> {
 }
 
 /// Generate a self-contained bash exec script for tmux.
-/// Uses sqlite3 CLI for DB updates (no circular dependency on werma binary).
+/// Uses `werma complete`/`werma fail` for DB updates and pipeline callbacks.
 fn generate_exec_script(params: &ExecScriptParams<'_>) -> String {
     let prompt_file_str = params.prompt_file.display();
     let working_dir_str = params.working_dir.display();
@@ -351,16 +351,12 @@ fn generate_exec_script(params: &ExecScriptParams<'_>) -> String {
     let max_turns = params.max_turns;
     let model = params.model;
 
-    // Escape single quotes in task_id for SQL safety
-    let safe_id = task_id.replace('\'', "''");
-
     format!(
         r##"#!/bin/bash
 set -euo pipefail
 unset CLAUDECODE
 
-TASK_ID='{safe_id}'
-WERMA_DB="$HOME/.werma/werma.db"
+TASK_ID='{task_id}'
 PROMPT_FILE='{prompt_file_str}'
 OUTPUT='{output}'
 WORKING_DIR='{working_dir_str}'
@@ -368,6 +364,7 @@ ALLOWED_TOOLS='{tools}'
 MAX_TURNS='{max_turns}'
 MODEL='{model}'
 LOG_FILE='{log_file_str}'
+RESULT_FILE="${{LOG_FILE%.log}}-output.md"
 
 cd "$WORKING_DIR"
 
@@ -379,8 +376,7 @@ RESULT_JSON=$(claude -p "$PROMPT" \
     --model "$MODEL" \
     --output-format json 2>> "$LOG_FILE") || {{
     echo "$(date): FAILED (exit $?)" >> "$LOG_FILE"
-    sqlite3 "$WERMA_DB" "UPDATE tasks SET status='failed', finished_at='$(date +%Y-%m-%dT%H:%M:%S)' WHERE id='$TASK_ID';"
-    osascript -e "display notification \"$TASK_ID FAILED\" with title \"werma\" sound name \"Basso\"" 2>/dev/null || true
+    werma fail "$TASK_ID"
     exit 1
 }}
 
@@ -388,7 +384,7 @@ RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.result // empty' 2>/dev/null || echo
 SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
 
 # Always save output to logs
-echo "$RESULT_TEXT" > "${{LOG_FILE%.log}}-output.md"
+echo "$RESULT_TEXT" > "$RESULT_FILE"
 
 # Also write to custom output path if specified
 if [ -n "$OUTPUT" ]; then
@@ -396,11 +392,9 @@ if [ -n "$OUTPUT" ]; then
     echo "$RESULT_TEXT" > "$OUTPUT"
 fi
 
-sqlite3 "$WERMA_DB" "UPDATE tasks SET status='completed', finished_at='$(date +%Y-%m-%dT%H:%M:%S)', session_id='$(echo "$SESSION_ID" | sed "s/'/''/g")' WHERE id='$TASK_ID';"
+werma complete "$TASK_ID" --session "$SESSION_ID" --result-file "$RESULT_FILE"
 
 echo "$(date): DONE (session=$SESSION_ID)" >> "$LOG_FILE"
-
-osascript -e "display notification \"$TASK_ID done\" with title \"werma\" sound name \"Glass\"" 2>/dev/null || true
 "##
     )
 }
@@ -436,7 +430,7 @@ mod tests {
         let tools = tools_for_type("code", false);
         assert!(tools.contains("Edit"));
         assert!(tools.contains("Write"));
-        assert!(!tools.contains("Bash"));
+        assert!(tools.contains("Bash"));
     }
 
     #[test]
@@ -704,11 +698,10 @@ mod tests {
 
     #[test]
     fn exec_script_always_saves_output_to_logs() {
-        // Even without --output, RESULT_TEXT should be saved to <id>-output.md
         let script = generate_exec_script(&ExecScriptParams {
             task_id: "20260309-001",
             prompt_file: Path::new("/tmp/prompt.txt"),
-            output: "", // no custom output
+            output: "",
             working_dir: Path::new("/home/user/project"),
             tools: "Read,Grep,Glob",
             max_turns: 15,
@@ -716,9 +709,7 @@ mod tests {
             log_file: Path::new("/home/user/.werma/logs/20260309-001.log"),
         });
 
-        // Must always write to the log-derived output path
-        assert!(script.contains(r#"> "${LOG_FILE%.log}-output.md""#));
-        // OUTPUT is empty, so the custom output block should still exist but not trigger
+        assert!(script.contains(r#"> "$RESULT_FILE""#));
         assert!(script.contains(r#"if [ -n "$OUTPUT" ]"#));
     }
 
@@ -736,12 +727,15 @@ mod tests {
         });
 
         assert!(script.contains("TASK_ID='20260308-001'"));
-        assert!(script.contains("WERMA_DB="));
         assert!(script.contains("claude -p"));
-        assert!(script.contains("sqlite3"));
+        assert!(script.contains("werma complete"));
+        assert!(script.contains("werma fail"));
         assert!(script.contains("unset CLAUDECODE"));
         assert!(script.contains("--output-format json"));
         assert!(script.contains("jq -r"));
-        assert!(script.contains("osascript"));
+        assert!(script.contains("--result-file"));
+        // No more raw sqlite3 or osascript — handled by werma complete/fail
+        assert!(!script.contains("sqlite3"));
+        assert!(!script.contains("osascript"));
     }
 }

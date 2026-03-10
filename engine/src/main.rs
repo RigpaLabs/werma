@@ -374,6 +374,92 @@ fn cmd_kill(db: &Db, id: &str) -> Result<()> {
     Ok(())
 }
 
+fn cmd_complete(db: &Db, id: &str, session: Option<&str>, result_file: Option<&str>) -> Result<()> {
+    let task = db.task(id)?.context(format!("task not found: {id}"))?;
+
+    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    db.set_task_status(id, Status::Completed)?;
+    db.update_task_field(id, "finished_at", &now)?;
+    if let Some(sid) = session {
+        db.update_task_field(id, "session_id", sid)?;
+    }
+
+    db.increment_usage(&task.model)?;
+
+    // Read result text for pipeline callback
+    let result_text = result_file
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+
+    // Pipeline callback: trigger stage transitions
+    if !task.pipeline_stage.is_empty()
+        && !task.linear_issue_id.is_empty()
+        && let Err(e) = pipeline::callback(
+            db,
+            id,
+            &task.pipeline_stage,
+            &result_text,
+            &task.linear_issue_id,
+            &task.working_dir,
+        )
+    {
+        eprintln!("pipeline callback error for {id}: {e}");
+    }
+
+    // Research completion: curator follow-up + Linear update
+    if task.task_type == "research"
+        && !task.linear_issue_id.is_empty()
+        && let Err(e) = pipeline::handle_research_completion(db, &task, &result_text)
+    {
+        eprintln!("research completion error for {id}: {e}");
+    }
+
+    // Notifications
+    notify::notify_macos("werma", &format!("{id} done"), "Glass");
+    notify::notify_slack(
+        "#werma",
+        &format!(
+            ":white_check_mark: Task `{id}` completed ({})",
+            task.task_type
+        ),
+    );
+
+    println!("completed: {id}");
+    Ok(())
+}
+
+fn cmd_fail(db: &Db, id: &str) -> Result<()> {
+    let task = db.task(id)?.context(format!("task not found: {id}"))?;
+
+    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    db.set_task_status(id, Status::Failed)?;
+    db.update_task_field(id, "finished_at", &now)?;
+
+    // Post failure comment to Linear for pipeline tasks
+    if !task.pipeline_stage.is_empty()
+        && !task.linear_issue_id.is_empty()
+        && let Ok(linear) = linear::LinearClient::new()
+    {
+        let _ = linear.comment(
+            &task.linear_issue_id,
+            &format!(
+                "**Task `{id}` FAILED** (stage: {}). Manual intervention needed.",
+                task.pipeline_stage,
+            ),
+        );
+    }
+
+    // Notifications
+    notify::notify_macos("werma", &format!("{id} FAILED"), "Basso");
+    notify::notify_slack(
+        "#werma",
+        &format!(":x: Task `{id}` failed ({})", task.task_type),
+    );
+
+    println!("failed: {id}");
+    Ok(())
+}
+
 fn cmd_clean(db: &Db) -> Result<()> {
     let tasks = db.clean_completed()?;
 
@@ -904,6 +990,20 @@ fn main() -> anyhow::Result<()> {
         cli::Commands::Kill { id } => {
             let db = open_db()?;
             cmd_kill(&db, &id)?;
+        }
+
+        cli::Commands::Complete {
+            id,
+            session,
+            result_file,
+        } => {
+            let db = open_db()?;
+            cmd_complete(&db, &id, session.as_deref(), result_file.as_deref())?;
+        }
+
+        cli::Commands::Fail { id } => {
+            let db = open_db()?;
+            cmd_fail(&db, &id)?;
         }
 
         cli::Commands::Clean => {

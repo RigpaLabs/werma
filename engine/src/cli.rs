@@ -103,6 +103,26 @@ pub enum Commands {
         id: String,
     },
 
+    /// Mark task as completed (called by exec script)
+    Complete {
+        /// Task ID
+        id: String,
+
+        /// Claude session ID
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Path to file containing result text
+        #[arg(long)]
+        result_file: Option<String>,
+    },
+
+    /// Mark task as failed (called by exec script)
+    Fail {
+        /// Task ID
+        id: String,
+    },
+
     /// Archive completed tasks
     Clean,
 
