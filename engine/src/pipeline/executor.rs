@@ -364,7 +364,9 @@ fn format_callback_comment(
             )
         }
         _ => {
-            format!("**{stage_label}** completed (task: `{task_id}`), verdict: {verdict}.{spawn_note}")
+            format!(
+                "**{stage_label}** completed (task: `{task_id}`), verdict: {verdict}.{spawn_note}"
+            )
         }
     }
 }
@@ -447,9 +449,7 @@ fn build_handoff_prompt(
     };
 
     // For engineer spawned from reviewer/qa rejection: include rejection feedback inline
-    let feedback = if next_stage == "engineer"
-        && (prev_stage == "reviewer" || prev_stage == "qa")
-    {
+    let feedback = if next_stage == "engineer" && (prev_stage == "reviewer" || prev_stage == "qa") {
         Some(extract_rejection_feedback(previous_output))
     } else {
         None
@@ -468,7 +468,10 @@ fn build_handoff_prompt(
     let mut runtime: HashMap<String, String> = HashMap::new();
     runtime.insert("issue_id".to_string(), linear_issue_id.to_string());
     runtime.insert("issue_title".to_string(), issue_title.to_string());
-    runtime.insert("issue_description".to_string(), issue_description.to_string());
+    runtime.insert(
+        "issue_description".to_string(),
+        issue_description.to_string(),
+    );
     runtime.insert("previous_output".to_string(), previous_output.to_string());
     runtime.insert(
         "rejection_feedback".to_string(),
@@ -481,7 +484,8 @@ fn build_handoff_prompt(
 
     // For rejection flows: inject feedback section if the prompt doesn't already use it
     if let Some(fb) = feedback
-        && !rendered.contains(&fb) && !fb.is_empty()
+        && !rendered.contains(&fb)
+        && !fb.is_empty()
     {
         let from_label = if prev_stage == "reviewer" {
             "Reviewer Feedback"
@@ -627,11 +631,7 @@ mod tests {
     use crate::pipeline::loader::load_from_str;
 
     fn test_config() -> PipelineConfig {
-        load_from_str(
-            include_str!("../../pipelines/default.yaml"),
-            "<test>",
-        )
-        .unwrap()
+        load_from_str(include_str!("../../pipelines/default.yaml"), "<test>").unwrap()
     }
 
     #[test]
@@ -812,8 +812,7 @@ mod tests {
 
     #[test]
     fn format_callback_comment_rejected_with_spawn() {
-        let comment =
-            format_callback_comment("task-456", "reviewer", "rejected", Some("engineer"));
+        let comment = format_callback_comment("task-456", "reviewer", "rejected", Some("engineer"));
         assert!(comment.contains("REJECTED"));
         assert!(comment.contains("engineer"));
     }
@@ -848,7 +847,13 @@ mod tests {
         let reviewer_output =
             "## Findings\n- blocker: missing error handling\nREVIEW_VERDICT=REJECTED";
         let prompt = build_handoff_prompt(
-            &config, "engineer", "reviewer", "issue-123", "Title", "Desc", reviewer_output,
+            &config,
+            "engineer",
+            "reviewer",
+            "issue-123",
+            "Title",
+            "Desc",
+            reviewer_output,
         );
         // Feedback should be present somewhere in the prompt
         assert!(

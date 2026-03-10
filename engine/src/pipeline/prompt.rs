@@ -87,7 +87,10 @@ mod tests {
     #[test]
     fn build_vars_runtime_overrides_templates() {
         let mut templates = IndexMap::new();
-        templates.insert("verdict_instruction".to_string(), "default text".to_string());
+        templates.insert(
+            "verdict_instruction".to_string(),
+            "default text".to_string(),
+        );
         templates.insert("shared_key".to_string(), "from template".to_string());
 
         let runtime = vars(&[

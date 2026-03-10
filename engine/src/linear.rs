@@ -456,10 +456,7 @@ impl LinearClient {
             }"#,
             &json!({"id": issue_id}),
         )?;
-        let title = data["issue"]["title"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let title = data["issue"]["title"].as_str().unwrap_or("").to_string();
         let description = data["issue"]["description"]
             .as_str()
             .unwrap_or("")
