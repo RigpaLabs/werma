@@ -534,7 +534,7 @@ fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         prev_task_id,
         prev_stage,
         working_dir,
-        estimate,
+        estimate: _,
     } = p;
     let stage_cfg = config
         .stage(next_stage)
