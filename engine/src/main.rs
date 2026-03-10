@@ -247,6 +247,7 @@ fn cmd_status(db: &Db, watch: bool) -> Result<()> {
     if watch {
         loop {
             print!("\x1b[2J\x1b[H");
+            std::io::Write::flush(&mut std::io::stdout()).ok();
             render_status(db)?;
             std::thread::sleep(std::time::Duration::from_secs(5));
         }
@@ -256,24 +257,25 @@ fn cmd_status(db: &Db, watch: bool) -> Result<()> {
     Ok(())
 }
 
+fn parse_timestamp(s: &str) -> Option<chrono::NaiveDateTime> {
+    // DB stores as "YYYY-MM-DDTHH:MM:SS" or "YYYY-MM-DD HH:MM:SS"
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+        .ok()
+}
+
 fn format_duration_between(start: &str, end: &str) -> String {
-    let Ok(s) = chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%d %H:%M:%S") else {
+    let (Some(s), Some(e)) = (parse_timestamp(start), parse_timestamp(end)) else {
         return String::new();
     };
-    let Ok(e) = chrono::NaiveDateTime::parse_from_str(end, "%Y-%m-%d %H:%M:%S") else {
-        return String::new();
-    };
-    let secs = (e - s).num_seconds().max(0);
-    format_duration_secs(secs)
+    format_duration_secs((e - s).num_seconds().max(0))
 }
 
 fn format_elapsed_since(start: &str) -> String {
-    let Ok(s) = chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%d %H:%M:%S") else {
+    let Some(s) = parse_timestamp(start) else {
         return String::new();
     };
-    let now = Utc::now().naive_utc();
-    let secs = (now - s).num_seconds().max(0);
-    format_duration_secs(secs)
+    format_duration_secs((Utc::now().naive_utc() - s).num_seconds().max(0))
 }
 
 fn format_duration_secs(secs: i64) -> String {
