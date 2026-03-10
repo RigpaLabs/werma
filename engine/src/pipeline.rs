@@ -4,6 +4,37 @@ use crate::db::Db;
 use crate::linear::LinearClient;
 use crate::models::{Status, Task};
 
+/// Story point thresholds for track routing.
+const HEAVY_TRACK_THRESHOLD: i32 = 8;
+#[allow(dead_code)]
+const MUST_DECOMPOSE_THRESHOLD: i32 = 13;
+
+/// Returns true if the task estimate qualifies for heavy track processing.
+pub fn is_heavy_track(estimate: i32) -> bool {
+    estimate >= HEAVY_TRACK_THRESHOLD
+}
+
+/// Extract ESTIMATE=X from result text. Returns 0 if not found.
+pub fn parse_estimate(result: &str) -> i32 {
+    for line in result.lines().rev() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("ESTIMATE=").or_else(|| {
+            line.find("ESTIMATE=")
+                .map(|pos| &line[pos + "ESTIMATE=".len()..])
+        }) {
+            let value_str = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(|c: char| !c.is_ascii_digit());
+            if let Ok(v) = value_str.parse::<i32>() {
+                return v;
+            }
+        }
+    }
+    0
+}
+
 /// Pipeline stages and their corresponding agent types.
 pub fn agent_for_stage(stage: &str) -> &str {
     match stage {
@@ -199,6 +230,7 @@ pub fn poll(db: &Db) -> Result<()> {
             depends_on: vec![],
             context_files: vec![],
             repo_hash: crate::runtime_repo_hash(),
+            estimate: 0,
         };
 
         db.insert_task(&task)?;
@@ -269,6 +301,7 @@ pub fn poll(db: &Db) -> Result<()> {
 
             let max_turns = crate::default_turns(agent_type);
             let allowed_tools = crate::runner::tools_for_type(agent_type, false);
+            let estimate = issue["estimate"].as_i64().unwrap_or(0) as i32;
 
             let task = Task {
                 id: task_id.clone(),
@@ -291,6 +324,7 @@ pub fn poll(db: &Db) -> Result<()> {
                 depends_on: vec![],
                 context_files: vec![],
                 repo_hash: crate::runtime_repo_hash(),
+                estimate,
             };
 
             db.insert_task(&task)?;
@@ -342,17 +376,38 @@ pub fn callback(
 
     match stage {
         "analyst" => {
+            // Parse estimate from analyst output and route to light/heavy track
+            let estimate = parse_estimate(result);
+
+            // Write estimate back to Linear and update task in DB
+            if estimate > 0 {
+                if let Err(e) = linear.update_estimate(linear_issue_id, estimate) {
+                    eprintln!("warn: failed to update estimate on Linear: {e}");
+                }
+                if let Err(e) = db.update_task_field(task_id, "estimate", &estimate.to_string()) {
+                    eprintln!("warn: failed to update estimate in DB: {e}");
+                }
+            }
+
+            let track_label = if is_heavy_track(estimate) {
+                format!("Heavy Track ({estimate} SP)")
+            } else if estimate > 0 {
+                format!("Light Track ({estimate} SP)")
+            } else {
+                "Light Track (unestimated)".to_string()
+            };
+
             // Analyst completed → move to In Progress, create engineer task
             linear.move_issue_by_name(linear_issue_id, "in_progress")?;
             linear.comment(
                 linear_issue_id,
                 &format!(
-                    "**Analyst completed** (task: `{}`). Spec posted. Moving to In Progress.",
-                    task_id
+                    "**Analyst completed** (task: `{}`). Spec posted. Moving to In Progress.\n\nTrack: **{}**",
+                    task_id, track_label
                 ),
             )?;
 
-            // Create engineer task with analyst's output as handoff
+            // Pass estimate so engineer turns are adjusted for track
             create_next_stage_task(
                 db,
                 linear_issue_id,
@@ -361,6 +416,7 @@ pub fn callback(
                 task_id,
                 stage,
                 working_dir,
+                estimate,
             )?;
         }
 
@@ -384,6 +440,7 @@ pub fn callback(
                 task_id,
                 stage,
                 working_dir,
+                0, // estimate not needed for reviewer turns
             )?;
         }
 
@@ -412,6 +469,7 @@ pub fn callback(
                     task_id,
                     stage,
                     working_dir,
+                    0, // estimate not tracked at reviewer stage
                 )?;
             }
             _ => {
@@ -448,6 +506,7 @@ pub fn callback(
                     task_id,
                     stage,
                     working_dir,
+                    0, // estimate not tracked at qa stage
                 )?;
             }
             _ => {
@@ -657,13 +716,19 @@ fn create_next_stage_task(
     prev_task_id: &str,
     prev_stage: &str,
     working_dir: &str,
+    estimate: i32,
 ) -> Result<()> {
     let agent_type = agent_for_stage(next_stage);
     let model = model_for_stage(next_stage);
     let task_id = db.next_task_id()?;
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
 
-    let max_turns = crate::default_turns(agent_type);
+    // Engineer turns vary by track: heavy track gets more budget for complex work
+    let max_turns = if next_stage == "engineer" {
+        if is_heavy_track(estimate) { 45 } else { 30 }
+    } else {
+        crate::default_turns(agent_type)
+    };
     let allowed_tools = crate::runner::tools_for_type(agent_type, false);
 
     let prompt = build_stage_prompt(next_stage, prev_stage, linear_issue_id, previous_output);
@@ -715,6 +780,7 @@ fn create_next_stage_task(
         depends_on: vec![],
         context_files: vec![handoff_path.to_string_lossy().to_string()],
         repo_hash: crate::runtime_repo_hash(),
+        estimate,
     };
 
     db.insert_task(&task)?;
@@ -804,6 +870,7 @@ pub fn handle_research_completion(db: &Db, task: &Task, output: &str) -> Result<
             depends_on: vec![task.id.clone()],
             context_files: vec![output_file],
             repo_hash: crate::runtime_repo_hash(),
+            estimate: 0,
         };
 
         db.insert_task(&curator_task)?;
@@ -1190,6 +1257,7 @@ mod tests {
             depends_on: vec![],
             context_files: vec![],
             repo_hash: String::new(),
+            estimate: 0,
         };
         db.insert_task(&analyst_task).unwrap();
 
@@ -1204,6 +1272,7 @@ mod tests {
             "20260310-001",
             "analyst",
             "~/projects/rigpa/werma",
+            0,
         )
         .unwrap();
 
@@ -1237,6 +1306,7 @@ mod tests {
             "20260310-002",
             "reviewer",
             "",
+            0,
         )
         .unwrap();
 
@@ -1290,6 +1360,7 @@ mod tests {
             depends_on: vec![],
             context_files: vec![],
             repo_hash: String::new(),
+            estimate: 0,
         };
         db.insert_task(&task).unwrap();
 
@@ -1299,5 +1370,117 @@ mod tests {
         // Unknown issue falls back to default
         let dir = infer_working_dir_from_issue(&db, "unknown-issue");
         assert_eq!(dir, "~/projects/ar");
+    }
+
+    #[test]
+    fn parse_estimate_from_result() {
+        assert_eq!(parse_estimate("ESTIMATE=5"), 5);
+        assert_eq!(parse_estimate("Some output\nESTIMATE=8\nDone."), 8);
+        assert_eq!(parse_estimate("prefix ESTIMATE=13 suffix"), 13);
+        assert_eq!(parse_estimate("No estimate here"), 0);
+        assert_eq!(parse_estimate(""), 0);
+    }
+
+    #[test]
+    fn parse_estimate_last_match_wins() {
+        // Lines are searched in reverse (last match wins)
+        assert_eq!(parse_estimate("ESTIMATE=3\nESTIMATE=8"), 8);
+    }
+
+    #[test]
+    fn is_heavy_track_routing() {
+        assert!(!is_heavy_track(0)); // unset → light
+        assert!(!is_heavy_track(1));
+        assert!(!is_heavy_track(3));
+        assert!(!is_heavy_track(5));
+        assert!(!is_heavy_track(7));
+        assert!(is_heavy_track(8)); // threshold
+        assert!(is_heavy_track(13));
+        assert!(is_heavy_track(21));
+    }
+
+    #[test]
+    fn engineer_turns_light_track() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        create_next_stage_task(
+            &db,
+            "issue-light",
+            "engineer",
+            "spec",
+            "prev-001",
+            "analyst",
+            "/tmp",
+            5, // light track
+        )
+        .unwrap();
+
+        let tasks = db
+            .tasks_by_linear_issue("issue-light", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].max_turns, 30);
+    }
+
+    #[test]
+    fn engineer_turns_heavy_track() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        create_next_stage_task(
+            &db,
+            "issue-heavy",
+            "engineer",
+            "spec",
+            "prev-002",
+            "analyst",
+            "/tmp",
+            8, // heavy track threshold
+        )
+        .unwrap();
+
+        let tasks = db
+            .tasks_by_linear_issue("issue-heavy", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].max_turns, 45);
+    }
+
+    #[test]
+    fn task_serialization_includes_estimate() {
+        let task = Task {
+            id: "test-001".to_string(),
+            status: Status::Pending,
+            priority: 1,
+            created_at: "2026-03-10T10:00:00".to_string(),
+            started_at: None,
+            finished_at: None,
+            task_type: "pipeline-engineer".to_string(),
+            prompt: "implement".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            model: "opus".to_string(),
+            max_turns: 45,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: "issue-abc".to_string(),
+            linear_pushed: false,
+            pipeline_stage: "engineer".to_string(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: String::new(),
+            estimate: 8,
+        };
+
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(json.contains("\"estimate\":8"));
+
+        let deserialized: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.estimate, 8);
+    }
+
+    #[test]
+    fn task_deserialization_estimate_default_zero() {
+        // Old JSON without estimate field should deserialize with estimate=0
+        let json = r#"{"id":"old-001","status":"pending","priority":1,"created_at":"2026-01-01T00:00:00","started_at":null,"finished_at":null,"type":"research","prompt":"test","output_path":"","working_dir":"/tmp","model":"sonnet","max_turns":15,"allowed_tools":"","session_id":"","linear_issue_id":"","linear_pushed":false,"pipeline_stage":"","depends_on":[],"context_files":[]}"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert_eq!(task.estimate, 0)
     }
 }

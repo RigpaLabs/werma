@@ -6,6 +6,7 @@ use crate::models::{DailyUsage, Schedule, Status, Task};
 
 const MIGRATION_SQL: &str = include_str!("../migrations/001_init.sql");
 const MIGRATION_002_SQL: &str = include_str!("../migrations/002_repo_hash.sql");
+const MIGRATION_003_SQL: &str = include_str!("../migrations/003_estimate.sql");
 
 pub struct Db {
     conn: Connection,
@@ -44,6 +45,13 @@ impl Db {
             let msg = e.to_string();
             if !msg.contains("duplicate column") {
                 return Err(e).context("migration 002_repo_hash");
+            }
+        }
+        // 003: add estimate column (idempotent — ignore "duplicate column" error)
+        if let Err(e) = self.conn.execute_batch(MIGRATION_003_SQL) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(e).context("migration 003_estimate");
             }
         }
         Ok(())
@@ -88,12 +96,12 @@ impl Db {
                 id, status, priority, created_at, started_at, finished_at,
                 type, prompt, output_path, working_dir, model, max_turns,
                 allowed_tools, session_id, linear_issue_id, linear_pushed,
-                pipeline_stage, depends_on, context_files, repo_hash
+                pipeline_stage, depends_on, context_files, repo_hash, estimate
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
                 ?7, ?8, ?9, ?10, ?11, ?12,
                 ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20
+                ?17, ?18, ?19, ?20, ?21
             )",
             params![
                 task.id,
@@ -116,6 +124,7 @@ impl Db {
                 depends_on,
                 context_files,
                 task.repo_hash,
+                task.estimate,
             ],
         )?;
         Ok(())
@@ -127,7 +136,7 @@ impl Db {
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files, repo_hash
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate
              FROM tasks WHERE id = ?1",
             params![id],
             |row| Ok(task_from_row(row)),
@@ -149,7 +158,7 @@ impl Db {
                 "SELECT id, status, priority, created_at, started_at, finished_at,
                         type, prompt, output_path, working_dir, model, max_turns,
                         allowed_tools, session_id, linear_issue_id, linear_pushed,
-                        pipeline_stage, depends_on, context_files, repo_hash
+                        pipeline_stage, depends_on, context_files, repo_hash, estimate
                  FROM tasks WHERE status = ?1
                  ORDER BY priority ASC, created_at ASC",
             )?;
@@ -162,7 +171,7 @@ impl Db {
                 "SELECT id, status, priority, created_at, started_at, finished_at,
                         type, prompt, output_path, working_dir, model, max_turns,
                         allowed_tools, session_id, linear_issue_id, linear_pushed,
-                        pipeline_stage, depends_on, context_files, repo_hash
+                        pipeline_stage, depends_on, context_files, repo_hash, estimate
                  FROM tasks ORDER BY priority ASC, created_at ASC",
             )?;
             let rows = stmt.query_map([], |row| Ok(task_from_row(row)))?;
@@ -213,6 +222,7 @@ impl Db {
             "allowed_tools",
             "model",
             "repo_hash",
+            "estimate",
         ];
         anyhow::ensure!(
             allowed.contains(&field),
@@ -240,7 +250,7 @@ impl Db {
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files, repo_hash
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate
              FROM tasks
              WHERE status = 'pending'
                AND NOT EXISTS (
@@ -311,7 +321,7 @@ impl Db {
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files, repo_hash
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate
              FROM tasks
              WHERE status = 'pending'
                AND NOT EXISTS (
@@ -467,7 +477,7 @@ impl Db {
         let base_sql = "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files, repo_hash
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate
              FROM tasks WHERE linear_issue_id = ?1";
         let stage_clause = if stage.is_some() {
             " AND pipeline_stage = ?2"
@@ -503,7 +513,7 @@ impl Db {
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files, repo_hash
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate
              FROM tasks
              WHERE linear_issue_id != '' AND linear_pushed = 0 AND status = 'completed'
              ORDER BY created_at ASC",
@@ -615,6 +625,7 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         depends_on,
         context_files,
         repo_hash: row.get(19)?,
+        estimate: row.get(20).unwrap_or(0),
     })
 }
 
@@ -640,6 +651,7 @@ fn make_test_task(id: &str) -> Task {
         depends_on: vec![],
         context_files: vec![],
         repo_hash: String::new(),
+        estimate: 0,
     }
 }
 
@@ -664,6 +676,7 @@ mod tests {
         assert_eq!(fetched.id, "20260308-001");
         assert_eq!(fetched.status, Status::Pending);
         assert_eq!(fetched.prompt, "test prompt");
+        assert_eq!(fetched.estimate, 0);
     }
 
     #[test]
@@ -898,6 +911,18 @@ mod tests {
             .unwrap();
         let fetched = db.task("20260308-001").unwrap().unwrap();
         assert_eq!(fetched.session_id, "abc-123");
+    }
+
+    #[test]
+    fn update_task_field_estimate() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        db.update_task_field("20260308-001", "estimate", "8")
+            .unwrap();
+        let fetched = db.task("20260308-001").unwrap().unwrap();
+        assert_eq!(fetched.estimate, 8);
     }
 
     #[test]

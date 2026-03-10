@@ -184,6 +184,7 @@ fn check_schedules(db: &Db, werma_dir: &Path) -> Result<()> {
             depends_on: vec![],
             context_files: sched.context_files.clone(),
             repo_hash: crate::runtime_repo_hash(),
+            estimate: 0,
         };
 
         db.insert_task(&task)?;
@@ -447,6 +448,7 @@ fn run_orchestrator(_db: &Db, werma_dir: &Path) -> Result<()> {
         depends_on: vec![],
         context_files: vec![character_file.to_string_lossy().to_string()],
         repo_hash: crate::runtime_repo_hash(),
+        estimate: 0,
     };
 
     _db.insert_task(&task)?;
@@ -834,6 +836,7 @@ mod tests {
             depends_on: vec![],
             context_files: vec![],
             repo_hash: String::new(),
+            estimate: 0,
         };
         db.insert_task(&task).unwrap();
 
@@ -874,6 +877,7 @@ mod tests {
             depends_on: vec![],
             context_files: vec![],
             repo_hash: String::new(),
+            estimate: 0,
         };
 
         // Non-pipeline task (empty pipeline_stage, but has linear_issue_id)
@@ -898,6 +902,7 @@ mod tests {
             depends_on: vec![],
             context_files: vec![],
             repo_hash: String::new(),
+            estimate: 0,
         };
 
         db.insert_task(&pipeline_task).unwrap();
