@@ -168,6 +168,10 @@ pub enum Commands {
         /// Repository directory (defaults to current dir)
         #[arg(short, long)]
         dir: Option<String>,
+
+        /// Force review even if one is already running for this target
+        #[arg(short, long)]
+        force: bool,
     },
 
     /// Dashboard (stub)

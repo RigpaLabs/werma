@@ -527,6 +527,20 @@ impl Db {
         Ok(tasks)
     }
 
+    /// Check if a review task for the same target is already running or pending.
+    pub fn has_active_review_task(&self, working_dir: &str, target_label: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE type = 'pipeline-reviewer'
+               AND status IN ('pending', 'running')
+               AND working_dir = ?1
+               AND prompt LIKE ?2",
+            params![working_dir, format!("%Code Review: {target_label}%")],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     // --- PR Reviewed ---
 
     pub fn is_pr_reviewed(&self, pr_key: &str) -> Result<bool> {
@@ -875,6 +889,55 @@ mod tests {
         assert!(!db.is_pr_reviewed("repo/123").unwrap());
         db.mark_pr_reviewed("repo/123").unwrap();
         assert!(db.is_pr_reviewed("repo/123").unwrap());
+    }
+
+    #[test]
+    fn has_active_review_task_dedup() {
+        let db = Db::open_in_memory().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        // No tasks yet — no active review
+        assert!(!db.has_active_review_task("/repo", "PR #8").unwrap());
+
+        // Insert a pending review task
+        let task = crate::models::Task {
+            id: "20260310-001".to_string(),
+            status: crate::models::Status::Pending,
+            priority: 1,
+            created_at: now.clone(),
+            started_at: None,
+            finished_at: None,
+            task_type: "pipeline-reviewer".to_string(),
+            prompt: "# Code Review: PR #8\n\nReview the diff.".to_string(),
+            output_path: String::new(),
+            working_dir: "/repo".to_string(),
+            model: "sonnet".to_string(),
+            max_turns: 10,
+            allowed_tools: "Read,Glob,Grep".to_string(),
+            session_id: String::new(),
+            linear_issue_id: String::new(),
+            linear_pushed: false,
+            pipeline_stage: String::new(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: String::new(),
+            estimate: 0,
+        };
+        db.insert_task(&task).unwrap();
+
+        // Now detected as active
+        assert!(db.has_active_review_task("/repo", "PR #8").unwrap());
+
+        // Different target — not detected
+        assert!(!db.has_active_review_task("/repo", "PR #9").unwrap());
+
+        // Different working_dir — not detected
+        assert!(!db.has_active_review_task("/other-repo", "PR #8").unwrap());
+
+        // Complete the task — no longer active
+        db.set_task_status("20260310-001", crate::models::Status::Completed)
+            .unwrap();
+        assert!(!db.has_active_review_task("/repo", "PR #8").unwrap());
     }
 
     #[test]

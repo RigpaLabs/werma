@@ -941,6 +941,7 @@ fn cmd_review(
     werma_dir: &std::path::Path,
     target: Option<&str>,
     dir: Option<&str>,
+    force: bool,
 ) -> Result<()> {
     let working_dir = match dir {
         Some(d) => expand_tilde(d),
@@ -952,13 +953,18 @@ fn cmd_review(
         None => (None, "current changes".to_string()),
     };
 
-    // Dedup: check if this PR was already reviewed
+    // Dedup: block if a review for this target is already running/pending
+    if !force && db.has_active_review_task(&working_dir, &label)? {
+        println!("review already active for {label} — skipping");
+        println!("  (use --force to create another)");
+        return Ok(());
+    }
+
+    // Info: mention if this PR was previously reviewed (completed)
     if let Some(n) = pr_number {
         let pr_key = format!("{}:{}", working_dir, n);
         if db.is_pr_reviewed(&pr_key)? {
-            println!("already reviewed: {label} in {working_dir}");
-            println!("  (use `werma review {n} --force` to re-review)");
-            // Don't block — just inform. Still create the task.
+            println!("note: {label} was previously reviewed — creating new review");
         }
     }
 
@@ -998,6 +1004,17 @@ fn cmd_review(
     }
 
     // Build review prompt
+    let gh_post = if let Some(n) = pr_number {
+        format!(
+            "6. **Post review as PR comment:**\n\
+             ```\n\
+             gh pr comment {n} --body \"<your review markdown>\"\n\
+             ```\n\
+             Include all findings, verdict, and summary in the comment."
+        )
+    } else {
+        String::new()
+    };
     let prompt = format!(
         "# Code Review: {label}\n\n\
          Review the code diff provided in the context file.\n\n\
@@ -1005,7 +1022,9 @@ fn cmd_review(
          1. Read the diff carefully\n\
          2. Check for bugs, security issues, missing tests, style violations\n\
          3. Classify each finding as **blocker** or **nit**\n\
-         4. APPROVE if no blockers, REJECT only on blockers\n\n\
+         4. APPROVE if no blockers, REJECT only on blockers\n\
+         5. Read the full source files for important findings — the diff alone may lack context\n\
+         {gh_post}\n\n\
          ## Output Format\n\
          - Each finding: `file:line — [blocker|nit] description`\n\
          - End with: REVIEW_VERDICT=APPROVED or REVIEW_VERDICT=REJECTED\n\
@@ -1276,10 +1295,10 @@ fn main() -> anyhow::Result<()> {
             update::update()?;
         }
 
-        cli::Commands::Review { target, dir } => {
+        cli::Commands::Review { target, dir, force } => {
             let db = open_db()?;
             let wdir = werma_dir()?;
-            cmd_review(&db, &wdir, target.as_deref(), dir.as_deref())?;
+            cmd_review(&db, &wdir, target.as_deref(), dir.as_deref(), force)?;
         }
         cli::Commands::Dash => {
             let db = open_db()?;
