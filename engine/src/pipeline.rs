@@ -555,11 +555,16 @@ fn build_stage_prompt(
              Linear issue: {linear_issue_id}\n\n\
              The engineer has completed implementation. Review the code changes.\n\n\
              ## Review Protocol\n\
-             1. Run `git diff main...HEAD` to see the actual code diff\n\
-             2. Run `gh pr view` if a PR exists\n\
+             1. Run `gh pr view` to find the open PR (if none, skip step 6)\n\
+             2. Run `git diff main...HEAD` to see the actual code diff\n\
              3. Review the DIFF for correctness, security, missing tests, and style\n\
              4. Classify issues as **blocker** or **nit**\n\
-             5. APPROVE with nits, REJECT only on blockers\n\n\
+             5. APPROVE with nits, REJECT only on blockers\n\
+             6. **Post review as PR comment:** format your review in markdown and run:\n\
+             ```\n\
+             gh pr comment --body \"<your review markdown>\"\n\
+             ```\n\
+             Include all findings, verdict, and summary in the comment.\n\n\
              ## Output Format\n\
              - List each finding with `file:line` references\n\
              - End with: REVIEW_VERDICT=APPROVED or REVIEW_VERDICT=REJECTED\n\

@@ -264,6 +264,8 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
 
     let script = generate_exec_script(&ExecScriptParams {
         task_id,
+        task_type: &task.task_type,
+        linear_issue_id: &task.linear_issue_id,
         prompt_file: &prompt_file,
         output: &output,
         working_dir: &effective_dir,
@@ -329,6 +331,8 @@ fn resolve_home(path: &str) -> PathBuf {
 /// Parameters for exec script generation — avoids too-many-arguments.
 struct ExecScriptParams<'a> {
     task_id: &'a str,
+    task_type: &'a str,
+    linear_issue_id: &'a str,
     prompt_file: &'a Path,
     output: &'a str,
     working_dir: &'a Path,
@@ -336,6 +340,11 @@ struct ExecScriptParams<'a> {
     max_turns: i32,
     model: &'a str,
     log_file: &'a Path,
+}
+
+/// Extract short task number from full task ID (e.g. "20260309-001" → "001").
+fn short_task_num(task_id: &str) -> &str {
+    task_id.rsplit('-').next().unwrap_or(task_id)
 }
 
 /// Generate a self-contained bash exec script for tmux.
@@ -346,10 +355,20 @@ fn generate_exec_script(params: &ExecScriptParams<'_>) -> String {
     let log_file_str = params.log_file.display();
 
     let task_id = params.task_id;
+    let task_type = params.task_type;
     let output = params.output;
     let tools = params.tools;
     let max_turns = params.max_turns;
     let model = params.model;
+
+    // Build human-readable notification label: "RIG-34 #001 analyst" or "#001 research"
+    let short_num = short_task_num(task_id);
+    let notify_label = if params.linear_issue_id.is_empty() {
+        format!("#{short_num} {task_type}")
+    } else {
+        format!("{} #{short_num} {task_type}", params.linear_issue_id)
+    };
+    let notify_label_failed = format!("{notify_label} FAILED");
 
     format!(
         r##"#!/bin/bash
@@ -357,6 +376,7 @@ set -euo pipefail
 unset CLAUDECODE
 
 TASK_ID='{task_id}'
+NOTIFY_LABEL='{notify_label}'
 PROMPT_FILE='{prompt_file_str}'
 OUTPUT='{output}'
 WORKING_DIR='{working_dir_str}'
@@ -700,6 +720,8 @@ mod tests {
     fn exec_script_always_saves_output_to_logs() {
         let script = generate_exec_script(&ExecScriptParams {
             task_id: "20260309-001",
+            task_type: "research",
+            linear_issue_id: "",
             prompt_file: Path::new("/tmp/prompt.txt"),
             output: "",
             working_dir: Path::new("/home/user/project"),
@@ -717,6 +739,8 @@ mod tests {
     fn exec_script_contains_key_elements() {
         let script = generate_exec_script(&ExecScriptParams {
             task_id: "20260308-001",
+            task_type: "code",
+            linear_issue_id: "RIG-1",
             prompt_file: Path::new("/tmp/prompt.txt"),
             output: "/tmp/output.md",
             working_dir: Path::new("/home/user/project"),
