@@ -107,6 +107,7 @@ pub fn resolve_prompt(prompt_source: &str) -> String {
 /// These are compiled into the binary via include_str!.
 fn builtin_prompt(rel_path: &str) -> Option<&'static str> {
     match rel_path {
+        "prompts/engineer.md" => Some(include_str!("../../pipelines/prompts/engineer.md")),
         "prompts/reviewer.md" => Some(include_str!("../../pipelines/prompts/reviewer.md")),
         "prompts/qa.md" => Some(include_str!("../../pipelines/prompts/qa.md")),
         "prompts/devops.md" => Some(include_str!("../../pipelines/prompts/devops.md")),
@@ -130,6 +131,10 @@ pub fn eject() -> Result<()> {
 
     // Write each builtin prompt file.
     let prompts: &[(&str, &str)] = &[
+        (
+            "prompts/engineer.md",
+            include_str!("../../pipelines/prompts/engineer.md"),
+        ),
         (
             "prompts/reviewer.md",
             include_str!("../../pipelines/prompts/reviewer.md"),

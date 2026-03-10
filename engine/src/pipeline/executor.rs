@@ -10,6 +10,9 @@ use crate::db::Db;
 use crate::linear::LinearClient;
 use crate::models::{Status, Task};
 
+/// Maximum number of review cycles before auto-approving to prevent infinite loops.
+const MAX_REVIEW_CYCLES: i64 = 3;
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /// Check if an issue is a research issue (has `research` label).
@@ -155,6 +158,13 @@ pub fn poll(db: &Db) -> Result<()> {
                     Some(s) => s,
                     None => continue,
                 };
+
+                // Enforce max_concurrent: skip if stage already has enough active tasks
+                let active_count = db.count_active_tasks_for_stage(stage_name)?;
+                if active_count >= stage_cfg.max_concurrent as i64 {
+                    total_skipped += 1;
+                    continue;
+                }
 
                 // Skip if active task already exists for this issue + stage
                 let existing = db.tasks_by_linear_issue(issue_id, Some(stage_name), true)?;
@@ -306,6 +316,30 @@ pub fn callback(
 
             // Spawn next stage if configured
             if let Some(ref next_stage) = t.spawn {
+                // Check review cycle limit: if reviewer has rejected too many times,
+                // force-approve instead to prevent infinite loops.
+                if stage == "reviewer" && next_stage == "engineer" {
+                    let review_count =
+                        db.count_completed_tasks_for_issue_stage(linear_issue_id, "reviewer")?;
+                    if review_count >= MAX_REVIEW_CYCLES {
+                        eprintln!(
+                            "review cycle limit ({MAX_REVIEW_CYCLES}) reached for issue {}, \
+                             force-approving",
+                            linear_issue_id
+                        );
+                        linear.move_issue_by_name(linear_issue_id, "ready")?;
+                        linear.comment(
+                            linear_issue_id,
+                            &format!(
+                                "**Review cycle limit reached** ({MAX_REVIEW_CYCLES} cycles). \
+                                 Auto-moving to Ready. Manual review recommended."
+                            ),
+                        )?;
+                        // Don't spawn another engineer cycle
+                        return Ok(());
+                    }
+                }
+
                 create_next_stage_task(&NextStageParams {
                     db,
                     config: &config,

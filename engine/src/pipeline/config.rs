@@ -14,6 +14,9 @@ pub struct PipelineConfig {
     pub stages: IndexMap<String, StageConfig>,
 }
 
+/// Default max concurrent tasks per stage.
+const DEFAULT_MAX_CONCURRENT: u32 = 2;
+
 /// Configuration for a single pipeline stage.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StageConfig {
@@ -25,19 +28,22 @@ pub struct StageConfig {
     pub agent: String,
     /// Model short name: "opus" | "sonnet" | "haiku".
     pub model: String,
+    /// Maximum concurrent tasks for this stage (default: 2).
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent: u32,
     /// How to handle issues with the `manual` label.
     #[serde(default)]
     pub manual: ManualBehavior,
-    /// Maximum number of concurrent active tasks for this stage.
-    /// TODO: enforced in executor poll() — not yet wired
-    #[serde(default)]
-    pub max_concurrent: Option<u32>,
     /// Prompt: inline (contains '\n') or file path relative to pipelines dir.
     #[serde(default)]
     pub prompt: Option<String>,
     /// Verdict → transition mapping.
     #[serde(default)]
     pub transitions: IndexMap<String, Transition>,
+}
+
+fn default_max_concurrent() -> u32 {
+    DEFAULT_MAX_CONCURRENT
 }
 
 /// Behavior when processing an issue that has the `manual` label.

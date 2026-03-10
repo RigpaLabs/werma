@@ -507,6 +507,34 @@ impl Db {
         Ok(tasks)
     }
 
+    /// Count active (pending + running) tasks for a given pipeline stage.
+    pub fn count_active_tasks_for_stage(&self, stage: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE pipeline_stage = ?1
+               AND status IN ('pending', 'running')",
+            params![stage],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Count completed tasks for a given Linear issue and pipeline stage.
+    /// Used to track review cycles (how many times reviewer has run for an issue).
+    pub fn count_completed_tasks_for_issue_stage(
+        &self,
+        issue_id: &str,
+        stage: &str,
+    ) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE linear_issue_id = ?1
+               AND pipeline_stage = ?2
+               AND status = 'completed'",
+            params![issue_id, stage],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Find all completed tasks with a linear_issue_id where linear_pushed=false.
     pub fn unpushed_linear_tasks(&self) -> Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(

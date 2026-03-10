@@ -13,7 +13,9 @@ use crate::db::Db;
 use crate::{linear, pipeline, runner};
 
 const TICK_INTERVAL_SECS: u64 = 5;
+const PIPELINE_POLL_INTERVAL_SECS: u64 = 30;
 const ORCHESTRATOR_INTERVAL_SECS: u64 = 900;
+const MERGE_CHECK_INTERVAL_SECS: u64 = 60;
 const MAX_CONCURRENT_AGENTS: usize = 3;
 const DEFAULT_STUCK_TIMEOUT_MINS: i64 = 30;
 const MAX_LOG_SIZE_BYTES: u64 = 5 * 1024 * 1024;
@@ -43,8 +45,10 @@ pub fn run(werma_dir: &Path) -> Result<()> {
         );
     }
 
-    // Trigger orchestrator immediately on first tick.
+    // Trigger orchestrator and pipeline poll immediately on first tick.
     let mut last_orchestrator = Instant::now() - Duration::from_secs(ORCHESTRATOR_INTERVAL_SECS);
+    let mut last_pipeline_poll = Instant::now() - Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS);
+    let mut last_merge_check = Instant::now() - Duration::from_secs(MERGE_CHECK_INTERVAL_SECS);
 
     loop {
         let tick_start = Instant::now();
@@ -69,6 +73,22 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
             if let Err(e) = rotate_logs(werma_dir) {
                 log_daemon(&log_path, &format!("log rotation error: {e}"));
+            }
+
+            // Pipeline poll: check Linear for new issues at pipeline-relevant statuses.
+            if last_pipeline_poll.elapsed() >= Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS) {
+                if let Err(e) = pipeline::poll(&db) {
+                    log_daemon(&log_path, &format!("pipeline poll error: {e}"));
+                }
+                last_pipeline_poll = Instant::now();
+            }
+
+            // Post-merge detection: check if PRs for "ready" issues have been merged.
+            if last_merge_check.elapsed() >= Duration::from_secs(MERGE_CHECK_INTERVAL_SECS) {
+                if let Err(e) = check_merged_prs(&db, werma_dir) {
+                    log_daemon(&log_path, &format!("merge check error: {e}"));
+                }
+                last_merge_check = Instant::now();
             }
 
             if last_orchestrator.elapsed() >= Duration::from_secs(ORCHESTRATOR_INTERVAL_SECS) {
@@ -375,6 +395,94 @@ fn drain_queue(db: &Db, werma_dir: &Path) -> Result<()> {
                 let log_path = werma_dir.join("logs/daemon.log");
                 log_daemon(&log_path, &format!("launch error: {e}"));
                 break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Check for merged PRs on issues in "ready" status.
+/// When a PR is merged, move the issue to Done in Linear and trigger auto-update.
+fn check_merged_prs(_db: &Db, werma_dir: &Path) -> Result<()> {
+    let log_path = werma_dir.join("logs/daemon.log");
+
+    let linear = match linear::LinearClient::new() {
+        Ok(c) => c,
+        Err(_) => return Ok(()), // No Linear API key — skip silently.
+    };
+
+    let ready_issues = match linear.get_issues_by_status("ready") {
+        Ok(issues) => issues,
+        Err(_) => return Ok(()),
+    };
+
+    for issue in &ready_issues {
+        let issue_id = issue["id"].as_str().unwrap_or("");
+        let identifier = issue["identifier"].as_str().unwrap_or("");
+
+        if issue_id.is_empty() {
+            continue;
+        }
+
+        // Find the branch name from the issue identifier (e.g., RIG-97)
+        // Check if there's a merged PR for this issue using gh
+        let check_cmd = std::process::Command::new("gh")
+            .args([
+                "pr", "list",
+                "--search", identifier,
+                "--state", "merged",
+                "--json", "number,title,mergedAt",
+                "--limit", "1",
+            ])
+            .output();
+
+        let merged = match check_cmd {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let json: serde_json::Value =
+                    serde_json::from_str(&stdout).unwrap_or(serde_json::Value::Null);
+                json.as_array().is_some_and(|arr| !arr.is_empty())
+            }
+            _ => false,
+        };
+
+        if merged {
+            log_daemon(
+                &log_path,
+                &format!("merge detected: {identifier} — moving to Done"),
+            );
+
+            if let Err(e) = linear.move_issue_by_name(issue_id, "done") {
+                log_daemon(
+                    &log_path,
+                    &format!("failed to move {identifier} to Done: {e}"),
+                );
+                continue;
+            }
+
+            linear
+                .comment(
+                    issue_id,
+                    &format!("**PR merged** — issue moved to Done automatically by werma daemon."),
+                )
+                .ok();
+
+            // Trigger auto-update: pull latest binary after merge.
+            log_daemon(&log_path, "triggering auto-update after merge");
+            match crate::update::update() {
+                Ok(()) => {
+                    log_daemon(&log_path, "auto-update: binary updated, restarting daemon");
+                    // Exit cleanly — launchd will restart us with the new binary (KeepAlive=true).
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    log_daemon(
+                        &log_path,
+                        &format!("auto-update failed (non-fatal): {e}"),
+                    );
+                    // Continue running — update failure shouldn't block the daemon.
+                }
             }
         }
     }
