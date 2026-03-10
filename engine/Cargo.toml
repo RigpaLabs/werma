@@ -15,6 +15,7 @@ chrono = { version = "0.4", features = ["serde"] }
 cron = "0.15"
 anyhow = "1"
 dirs = "6"
+colored = "2"
 tempfile = "3"
 
 [lints.rust]

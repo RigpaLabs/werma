@@ -20,8 +20,11 @@ mod worktree;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use chrono::Utc;
 use clap::Parser;
+use colored::Colorize;
 
+use crate::dashboard::truncate_line;
 use crate::db::Db;
 use crate::models::{Schedule, Status, Task};
 
@@ -240,30 +243,135 @@ fn cmd_list(db: &Db, status_filter: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_status(db: &Db) -> Result<()> {
-    let (p, r, c, f) = db.task_counts()?;
-
-    println!();
-    println!(" ○ pending:   {p}");
-    println!(" ◉ running:   {r}");
-    println!(" ✓ completed: {c}");
-    println!(" ✗ failed:    {f}");
-    println!();
-
-    let output = std::process::Command::new("tmux").args(["ls"]).output();
-
-    if let Ok(out) = output {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let sessions: Vec<&str> = stdout.lines().filter(|l| l.starts_with("werma-")).collect();
-        if !sessions.is_empty() {
-            println!(" tmux sessions:");
-            for s in sessions {
-                println!("   {s}");
-            }
-            println!();
+fn cmd_status(db: &Db, watch: bool) -> Result<()> {
+    if watch {
+        loop {
+            print!("\x1b[2J\x1b[H");
+            render_status(db)?;
+            std::thread::sleep(std::time::Duration::from_secs(5));
         }
+    } else {
+        render_status(db)?;
+    }
+    Ok(())
+}
+
+fn format_duration_between(start: &str, end: &str) -> String {
+    let Ok(s) = chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%d %H:%M:%S") else {
+        return String::new();
+    };
+    let Ok(e) = chrono::NaiveDateTime::parse_from_str(end, "%Y-%m-%d %H:%M:%S") else {
+        return String::new();
+    };
+    let secs = (e - s).num_seconds().max(0);
+    format_duration_secs(secs)
+}
+
+fn format_elapsed_since(start: &str) -> String {
+    let Ok(s) = chrono::NaiveDateTime::parse_from_str(start, "%Y-%m-%d %H:%M:%S") else {
+        return String::new();
+    };
+    let now = Utc::now().naive_utc();
+    let secs = (now - s).num_seconds().max(0);
+    format_duration_secs(secs)
+}
+
+fn format_duration_secs(secs: i64) -> String {
+    let hours = secs / 3600;
+    let mins = (secs % 3600) / 60;
+    if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else if mins > 0 {
+        format!("{mins}m")
+    } else {
+        "<1m".to_string()
+    }
+}
+
+fn format_task_line(task: &Task, time_str: &str) -> String {
+    let linear = if task.linear_issue_id.is_empty() {
+        String::new()
+    } else {
+        format!("  [{}]", task.linear_issue_id.cyan())
+    };
+    let preview = truncate_line(&task.prompt, 45);
+    format!(
+        "   {}  {}{}  {}  {}",
+        task.id,
+        task.task_type.blue(),
+        linear,
+        time_str.dimmed(),
+        preview,
+    )
+}
+
+fn render_status(db: &Db) -> Result<()> {
+    let running = db.list_tasks(Some(Status::Running))?;
+    let pending = db.list_tasks(Some(Status::Pending))?;
+    let completed = db.list_tasks(Some(Status::Completed))?;
+    let failed = db.list_tasks(Some(Status::Failed))?;
+
+    println!();
+
+    // Running
+    println!(
+        " {} {}",
+        "◉".green().bold(),
+        format!("running ({})", running.len()).green().bold()
+    );
+    for task in &running {
+        let elapsed = task
+            .started_at
+            .as_deref()
+            .map(format_elapsed_since)
+            .unwrap_or_default();
+        println!("{}", format_task_line(task, &elapsed));
     }
 
+    // Pending
+    println!(
+        " {} {}",
+        "○".yellow(),
+        format!("pending ({})", pending.len()).yellow()
+    );
+    for task in pending.iter().take(5) {
+        let prio = format!("p{}", task.priority);
+        println!("{}", format_task_line(task, &prio));
+    }
+    if pending.len() > 5 {
+        println!("   {}", format!("... +{} more", pending.len() - 5).dimmed());
+    }
+
+    // Completed + Failed
+    println!(
+        " {} {}     {} {}",
+        "✓".dimmed(),
+        format!("completed ({})", completed.len()).dimmed(),
+        "✗".red(),
+        format!("failed ({})", failed.len()).red(),
+    );
+
+    // Show newest first: reverse order (DB returns oldest first typically)
+    let recent: Vec<&Task> = completed.iter().rev().take(5).collect();
+    let failed_recent: Vec<&Task> = failed.iter().rev().take(5).collect();
+
+    for task in &recent {
+        let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
+            (Some(s), Some(e)) => format_duration_between(s, e),
+            _ => String::new(),
+        };
+        println!("{}", format_task_line(task, &dur));
+    }
+
+    for task in &failed_recent {
+        let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
+            (Some(s), Some(e)) => format_duration_between(s, e),
+            _ => String::new(),
+        };
+        println!("{}", format_task_line(task, &dur));
+    }
+
+    println!();
     Ok(())
 }
 
@@ -991,9 +1099,9 @@ fn main() -> anyhow::Result<()> {
             cmd_list(&db, status.as_deref())?;
         }
 
-        cli::Commands::Status => {
+        cli::Commands::Status { watch } => {
             let db = open_db()?;
-            cmd_status(&db)?;
+            cmd_status(&db, watch)?;
         }
 
         cli::Commands::View { id } => {
