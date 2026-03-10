@@ -1,8 +1,12 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "werma", about = "Agent task orchestrator", version = crate::version_string())]
+#[command(name = "werma", about = "Agent task orchestrator", version = crate::version_string(), disable_version_flag = true)]
 pub struct Cli {
+    /// Print version
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    _version: (),
+
     #[command(subcommand)]
     pub command: Commands,
 }
