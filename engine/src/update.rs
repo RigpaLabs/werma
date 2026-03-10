@@ -27,8 +27,7 @@ fn current_target() -> &'static str {
 }
 
 /// Fetch the latest release tag from GitHub API.
-fn latest_release_tag() -> Result<(String, String)> {
-    let token = github_token()?;
+fn latest_release_tag(token: &str) -> Result<(String, String)> {
     let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
 
     let client = reqwest::blocking::Client::builder()
@@ -68,7 +67,9 @@ pub fn update() -> Result<()> {
     println!("Current version: v{current}");
     println!("Checking for updates...");
 
-    let (latest_tag, _release_notes) = latest_release_tag()?;
+    let token = github_token()?;
+
+    let (latest_tag, _release_notes) = latest_release_tag(&token)?;
     let latest_version = latest_tag.strip_prefix('v').unwrap_or(&latest_tag);
 
     if latest_version == current {
@@ -89,8 +90,6 @@ pub fn update() -> Result<()> {
     );
 
     println!("Downloading {artifact_name}...");
-
-    let token = github_token()?;
     let client = reqwest::blocking::Client::builder()
         .user_agent("werma-updater")
         .build()
@@ -172,7 +171,8 @@ mod tests {
 
     #[test]
     fn github_token_reads_from_env() {
-        // Can't mutate env (unsafe_code = forbid), so just verify the function
+        // Can't mutate env in tests — std::env::set_var requires unsafe since Rust 1.80
+        // (soundness with multi-threaded access). Just verify the function
         // returns Ok when a token env var is set (CI sets GITHUB_TOKEN)
         // or Err with a helpful message when neither is set.
         match github_token() {
