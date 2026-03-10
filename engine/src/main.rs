@@ -432,14 +432,9 @@ fn cmd_complete(db: &Db, id: &str, session: Option<&str>, result_file: Option<&s
     }
 
     // Notifications
-    notify::notify_macos("werma", &format!("{id} done"), "Glass");
-    notify::notify_slack(
-        "#werma",
-        &format!(
-            ":white_check_mark: Task `{id}` completed ({})",
-            task.task_type
-        ),
-    );
+    let label = notify::format_notify_label(id, &task.task_type, &task.linear_issue_id);
+    notify::notify_macos("werma", &format!("{label} done"), "Glass");
+    notify::notify_slack("#werma", &format!(":white_check_mark: {label} done"));
 
     println!("completed: {id}");
     Ok(())
@@ -473,11 +468,9 @@ fn cmd_fail(db: &Db, id: &str) -> Result<()> {
     }
 
     // Notifications
-    notify::notify_macos("werma", &format!("{id} FAILED"), "Basso");
-    notify::notify_slack(
-        "#werma",
-        &format!(":x: Task `{id}` failed ({})", task.task_type),
-    );
+    let label = notify::format_notify_label(id, &task.task_type, &task.linear_issue_id);
+    notify::notify_macos("werma", &format!("{label} FAILED"), "Basso");
+    notify::notify_slack("#werma", &format!(":x: {label} FAILED"));
 
     println!("failed: {id}");
     Ok(())
@@ -597,6 +590,9 @@ fn cmd_continue(db: &Db, id: &str, prompt: Option<String>) -> Result<()> {
         working_dir.clone()
     };
 
+    // Build human-readable label for notification
+    let notify_label = notify::format_notify_label(id, &task.task_type, &task.linear_issue_id);
+
     // Generate safe exec script
     let script = format!(
         r##"#!/bin/bash
@@ -609,7 +605,7 @@ claude -p "$PROMPT" \
     --allowedTools '{tools}' \
     --model {model_id} \
     2>> '{log_file}'
-osascript -e 'display notification "{id} continue done" with title "werma" sound name "Glass"' 2>/dev/null || true
+osascript -e 'display notification "{notify_label} ↻" with title "werma" sound name "Glass"' 2>/dev/null || true
 "##,
         effective_dir = effective_dir,
         prompt_file = prompt_file.display(),
@@ -617,7 +613,7 @@ osascript -e 'display notification "{id} continue done" with title "werma" sound
         tools = tools.replace('\'', "'\\''"),
         model_id = model_id,
         log_file = log_file.display(),
-        id = id,
+        notify_label = notify_label.replace('"', "\\\""),
     );
 
     std::fs::write(&exec_script, &script)?;
