@@ -560,9 +560,10 @@ fn build_stage_prompt(
              3. Review the DIFF for correctness, security, missing tests, and style\n\
              4. Classify issues as **blocker** or **nit**\n\
              5. APPROVE with nits, REJECT only on blockers\n\
-             6. **Post review as PR comment:** format your review in markdown and run:\n\
+             6. **Post review as PR comment:** find the PR number first, then post:\n\
              ```\n\
-             gh pr comment --body \"<your review markdown>\"\n\
+             PR_NUM=$(gh pr view --json number -q .number 2>/dev/null)\n\
+             gh pr comment \"$PR_NUM\" --body \"<your review markdown>\"\n\
              ```\n\
              Include all findings, verdict, and summary in the comment.\n\n\
              ## Output Format\n\
