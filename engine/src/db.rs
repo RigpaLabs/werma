@@ -528,14 +528,18 @@ impl Db {
     }
 
     /// Check if a review task for the same target is already running or pending.
+    /// NOTE: dedup is coupled to the prompt format "# Code Review: {label}" in cmd_review().
+    /// If that format changes, this query must be updated too.
     pub fn has_active_review_task(&self, working_dir: &str, target_label: &str) -> Result<bool> {
+        // Escape SQL LIKE wildcards in target_label to prevent over-matching
+        let escaped = target_label.replace('%', "\\%").replace('_', "\\_");
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM tasks
              WHERE type = 'pipeline-reviewer'
                AND status IN ('pending', 'running')
                AND working_dir = ?1
-               AND prompt LIKE ?2",
-            params![working_dir, format!("%Code Review: {target_label}%")],
+               AND prompt LIKE ?2 ESCAPE '\\'",
+            params![working_dir, format!("%Code Review: {escaped}%")],
             |row| row.get(0),
         )?;
         Ok(count > 0)

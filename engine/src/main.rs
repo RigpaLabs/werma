@@ -1003,7 +1003,7 @@ fn cmd_review(
         Err(e) => bail!("failed to run diff command: {e}"),
     }
 
-    // Build review prompt
+    // Build review prompt (gh_post is injected into the LLM prompt, not executed directly)
     let gh_post = if let Some(n) = pr_number {
         format!(
             "6. **Post review as PR comment:**\n\

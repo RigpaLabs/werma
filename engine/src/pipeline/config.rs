@@ -29,6 +29,7 @@ pub struct StageConfig {
     #[serde(default)]
     pub manual: ManualBehavior,
     /// Maximum number of concurrent active tasks for this stage.
+    /// TODO: enforced in executor poll() — not yet wired
     #[serde(default)]
     pub max_concurrent: Option<u32>,
     /// Prompt: inline (contains '\n') or file path relative to pipelines dir.
