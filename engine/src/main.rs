@@ -1135,7 +1135,7 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
             }
         }
 
-        let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         let working_dir = linear::infer_working_dir(&title, &label_refs);
         let estimate = 0; // Will be set by analyst if applicable
 

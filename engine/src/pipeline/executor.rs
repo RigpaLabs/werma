@@ -367,6 +367,7 @@ pub fn callback(
 
 /// Create a pipeline task for an initial stage (no previous output).
 /// Used by `werma pipeline run` to manually trigger a stage.
+#[allow(clippy::too_many_arguments)]
 pub fn create_initial_stage_task(
     db: &Db,
     config: &PipelineConfig,
