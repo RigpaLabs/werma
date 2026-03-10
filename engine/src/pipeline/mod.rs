@@ -150,14 +150,12 @@ pub fn status(db: &Db) -> Result<()> {
     if let Some(ref linear) = linear {
         let stages = [
             ("backlog", "Backlog"),
+            ("blocked", "Blocked"),
             ("todo", "Todo"),
             ("in_progress", "In Progress"),
             ("review", "In Review"),
-            ("qa", "QA"),
-            ("ready", "Ready for Deploy"),
-            ("deploy", "Deploying"),
+            ("ready", "Ready (awaiting merge)"),
             ("done", "Done"),
-            ("failed", "Deploy Failed"),
         ];
 
         for (key, label) in &stages {
