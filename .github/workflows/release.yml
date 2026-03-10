@@ -137,7 +137,7 @@ jobs:
           echo "skipped=false" >> "$GITHUB_OUTPUT"
 
           # Write changelog to file for multi-line output
-          printf '%b' "$CHANGELOG" > /tmp/changelog.md
+          printf '%b\n' "$CHANGELOG" > /tmp/changelog.md
           {
             echo 'changelog<<CHANGELOG_EOF'
             cat /tmp/changelog.md
