@@ -57,6 +57,15 @@ echo "→ Creating runtime directories..."
 mkdir -p "$HOME/.werma/logs" "$HOME/.werma/backups" "$HOME/.werma/completed"
 echo "  ✓ ~/.werma/ ready"
 
+# --- Step 3.5: Restart daemon (if running) ---
+DAEMON_LABEL="io.rigpalabs.werma.daemon"
+if launchctl list "$DAEMON_LABEL" &>/dev/null; then
+    echo ""
+    echo "→ Restarting daemon..."
+    launchctl kickstart -k "gui/$(id -u)/$DAEMON_LABEL"
+    echo "  ✓ Daemon restarted"
+fi
+
 # --- Step 4: Daemon (optional) ---
 echo ""
 echo "To install the daemon (heartbeat + scheduler):"
