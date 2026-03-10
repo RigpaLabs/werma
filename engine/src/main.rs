@@ -1115,6 +1115,16 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
             continue;
         }
 
+        // Enforce max_concurrent from stage config
+        if let Some(stage_cfg) = config.stage(stage) {
+            let active_count = db.count_active_tasks_for_stage(stage)?;
+            if active_count >= stage_cfg.max_concurrent as i64 {
+                eprintln!("  ~ {} skipped: stage '{}' at max_concurrent ({})", ident, stage, stage_cfg.max_concurrent);
+                skipped += 1;
+                continue;
+            }
+        }
+
         let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
         let working_dir = linear::infer_working_dir(&title, &label_refs);
         let estimate = 0; // Will be set by analyst if applicable

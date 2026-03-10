@@ -602,7 +602,7 @@ fn build_handoff_prompt(
 }
 
 /// Parameters for creating the next pipeline stage task.
-pub struct NextStageParams<'a> {
+pub(crate) struct NextStageParams<'a> {
     pub db: &'a Db,
     pub config: &'a PipelineConfig,
     pub linear: Option<&'a LinearClient>,
@@ -616,7 +616,7 @@ pub struct NextStageParams<'a> {
 }
 
 /// Create a task for the next pipeline stage with handoff context.
-pub fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
+pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
     let NextStageParams {
         db,
         config,
