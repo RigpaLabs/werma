@@ -365,8 +365,7 @@ pub fn callback(
         }
 
         "engineer" => {
-            // Engineer completed → move to In Review
-            // DON'T create another engineer task (bug fix from bash version)
+            // Engineer completed → move to In Review, create reviewer task
             linear.move_issue_by_name(linear_issue_id, "review")?;
             linear.comment(
                 linear_issue_id,
@@ -374,6 +373,17 @@ pub fn callback(
                     "**Engineer completed** (task: `{}`). Moving to In Review.",
                     task_id
                 ),
+            )?;
+
+            // Create reviewer task for automated code review
+            create_next_stage_task(
+                db,
+                linear_issue_id,
+                "reviewer",
+                result,
+                task_id,
+                stage,
+                working_dir,
             )?;
         }
 
@@ -545,11 +555,17 @@ fn build_stage_prompt(
              Linear issue: {linear_issue_id}\n\n\
              The engineer has completed implementation. Review the code changes.\n\n\
              ## Review Protocol\n\
-             1. Run `git diff main...HEAD` to see the actual code diff\n\
-             2. Run `gh pr view` if a PR exists\n\
+             1. Run `gh pr view` to find the open PR (if none, skip step 6)\n\
+             2. Run `git diff main...HEAD` to see the actual code diff\n\
              3. Review the DIFF for correctness, security, missing tests, and style\n\
              4. Classify issues as **blocker** or **nit**\n\
-             5. APPROVE with nits, REJECT only on blockers\n\n\
+             5. APPROVE with nits, REJECT only on blockers\n\
+             6. **Post review as PR comment:** find the PR number first, then post:\n\
+             ```\n\
+             PR_NUM=$(gh pr view --json number -q .number 2>/dev/null)\n\
+             gh pr comment \"$PR_NUM\" --body \"<your review markdown>\"\n\
+             ```\n\
+             Include all findings, verdict, and summary in the comment.\n\n\
              ## Output Format\n\
              - List each finding with `file:line` references\n\
              - End with: REVIEW_VERDICT=APPROVED or REVIEW_VERDICT=REJECTED\n\
