@@ -2,6 +2,16 @@
 
 All notable changes to the werma engine are documented here.
 
+## [0.3.1] — 2026-03-10
+
+### Added
+- Human-readable task notifications: `RIG-34 #001 analyst done` format (RIG-40)
+- `format_notify_label()` for macOS and Slack notifications
+- Continue notifications show `↻` suffix
+
+### Fixed
+- Clippy too_many_arguments lint in create_next_stage_task (pipeline.rs)
+
 ## [0.3.0] — 2026-03-10
 
 ### Added
