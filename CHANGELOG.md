@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.5.0] — 2026-03-10
+
+- feat(RIG-65): pipeline-as-config — YAML-driven pipeline definitions (#20)
+
+
 ## [v0.4.2] — 2026-03-10
 
 - fix: leading blank line in changelog + backfill old releases
