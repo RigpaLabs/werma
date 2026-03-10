@@ -1,0 +1,107 @@
+pipeline: default
+description: Standard dev pipeline (analyst → engineer → reviewer → qa → devops)
+
+templates:
+  verdict_instruction: "Output your verdict on the LAST line of your response"
+
+stages:
+  analyst:
+    linear_status: todo
+    agent: pipeline-analyst
+    model: opus
+    manual: skip
+    prompt: |
+      # Pipeline: Analyst Stage
+      Linear issue: {issue_id}
+
+      [{issue_id}] {issue_title}
+
+      {issue_description}
+
+      ## Instructions
+      1. Read the issue description carefully
+      2. Clarify requirements and identify ambiguities
+      3. Write a detailed implementation spec
+      4. Include acceptance criteria
+      5. Identify risks and dependencies
+
+      Save the spec to a markdown file in docs/specs/ if applicable.
+
+      {verdict_instruction}. Example: `VERDICT=DONE`
+    transitions:
+      done:
+        status: in_progress
+        spawn: engineer
+
+  engineer:
+    agent: pipeline-engineer
+    model: opus
+    manual: skip
+    prompt: |
+      # Pipeline: Engineer Stage
+      Linear issue: {issue_id}
+
+      The analyst has completed the spec for this issue.
+      Read the handoff context file for the full spec.
+
+      ## Instructions
+      1. Read the analyst's spec from the handoff file
+      2. Implement the changes described in the spec
+      3. Run tests and fix any failures
+      4. Create a git branch and commit your changes
+      5. Create a PR with `gh pr create`
+
+      {verdict_instruction}. Example: `VERDICT=DONE`
+    transitions:
+      done:
+        status: review
+
+  reviewer:
+    linear_status: review
+    agent: pipeline-reviewer
+    model: sonnet
+    manual: process
+    prompt: prompts/reviewer.md
+    transitions:
+      approved:
+        status: qa
+      passed:
+        status: qa
+      rejected:
+        status: in_progress
+        spawn: engineer
+      request_changes:
+        status: in_progress
+        spawn: engineer
+
+  qa:
+    linear_status: qa
+    agent: pipeline-qa
+    model: sonnet
+    manual: process
+    prompt: prompts/qa.md
+    transitions:
+      approved:
+        status: ready
+      passed:
+        status: ready
+      rejected:
+        status: in_progress
+        spawn: engineer
+      failed:
+        status: in_progress
+        spawn: engineer
+
+  devops:
+    linear_status: [ready, deploy]
+    agent: pipeline-devops
+    model: sonnet
+    manual: skip
+    prompt: prompts/devops.md
+    transitions:
+      done:
+        status: done
+      ok:
+        status: done
+      failed:
+        status: failed

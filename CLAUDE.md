@@ -13,7 +13,26 @@ Agent identity, memory & orchestration for RigpaLabs pipeline. Each agent has:
 3. **Check shared/signals.md** for active signals before starting
 4. **Post signals** when completing, blocking, or failing
 5. **Respect limits.json** — model tier, max turns, timeout
-6. **`manual` label = human execution, agent review.** Agents must NOT pick up manual issues for execution stages (analyst, engineer, devops). But review and QA stages SHOULD run on manual issues — agents review human code just like agent code. Pipeline poll enforces this via `is_execution_stage()`
+6. **`manual` label = human execution, agent review.** Agents must NOT pick up manual issues for execution stages (analyst, engineer, devops). But review and QA stages SHOULD run on manual issues — agents review human code just like agent code. Configured via `manual: skip | process` per stage in `engine/pipelines/default.yaml`
+
+## Pipeline Configuration
+
+Pipeline stages, transitions, and prompts are defined in YAML (`engine/pipelines/default.yaml`), compiled into the binary via `include_str!`. Runtime overrides go to `~/.werma/pipelines/`.
+
+```bash
+werma pipeline show              # display current pipeline stages/transitions
+werma pipeline validate          # validate YAML config
+werma pipeline eject             # export builtin config to ~/.werma/pipelines/ for editing
+```
+
+**Config format** — see `engine/pipelines/default.yaml` for full example. Key fields per stage:
+- `linear_status` — Linear status(es) to poll (absent = spawned-only stage)
+- `agent` / `model` — agent type and model
+- `manual: skip | process` — how to handle `manual`-labeled issues
+- `prompt` — inline (multiline string) or file path relative to `pipelines/`
+- `transitions` — verdict → `{status, spawn?}` mapping
+
+**Prompt template variables:** `{issue_id}`, `{issue_title}`, `{issue_description}`, `{previous_output}`, `{rejection_feedback}`, `{working_dir}`, plus custom `templates:` from config
 
 ## Engine
 
@@ -23,7 +42,7 @@ The werma CLI (`engine/`) is a Rust binary that manages the agent queue, schedul
 - `werma daemon` — heartbeat + scheduler (replaces heartbeat.sh)
 - `werma sched` — cron-based scheduling
 - `werma linear` — Linear issue integration
-- `werma pipeline` — automated CI/CD pipeline
+- `werma pipeline show/validate/eject` — YAML-driven CI/CD pipeline management
 - `werma dash` — status dashboard
 - `werma migrate` — import from old aq system
 
@@ -68,6 +87,30 @@ Write tasks (code, full, refactor, pipeline-engineer, pipeline-devops) run in is
 | **Always OK** | Read files, run tests, commit to feature branch, create branches, create PRs with `ai-generated` label |
 | **Ask first** | Add dependencies, modify CI/CD, architectural changes |
 | **Never** | Force push, delete branches, commit secrets, push to main, merge PRs |
+
+## Versioning (CI-driven, DO NOT do manually)
+
+**Conventional Commits** — CI handles version bumps, CHANGELOG, tags, and GitHub Releases automatically.
+
+```
+feat(scope): description   → minor bump (0.x.0)
+fix(scope): description    → patch bump (0.0.x)
+docs:, refactor:, chore:, test:, ci:  → patch bump
+feat!: or BREAKING CHANGE: → minor bump (pre-1.0)
+```
+
+**PR titles** must use conventional commit format (squash merge uses PR title):
+- `feat(RIG-XX): description` or `fix(RIG-XX): description`
+
+**DO NOT:**
+- Bump version in `Cargo.toml` — CI does it
+- Update `CHANGELOG.md` — CI generates it
+- Create git tags — CI creates them
+- Create GitHub Releases — CI creates them
+
+**Flow:** merge PR → `release.yml` parses commits → bumps version → creates tag `vX.Y.Z` → `build.yml` builds binary → GitHub Release with binary and changelog
+
+**Update binary:** `werma update` (or `cargo build --release` from `engine/`)
 
 ## Conventions
 

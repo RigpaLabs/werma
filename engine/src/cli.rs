@@ -276,4 +276,14 @@ pub enum PipelineAction {
     Poll,
     /// Show pipeline status
     Status,
+    /// Show pipeline config (stages, transitions)
+    Show {
+        /// Show only this stage
+        #[arg(long)]
+        stage: Option<String>,
+    },
+    /// Validate pipeline YAML config
+    Validate,
+    /// Export builtin pipeline config to ~/.werma/pipelines/
+    Eject,
 }
