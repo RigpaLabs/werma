@@ -27,7 +27,7 @@ stages:
 
       Save the spec to a markdown file in docs/specs/ if applicable.
 
-      {verdict_instruction}: VERDICT=DONE
+      {verdict_instruction}. Example: `VERDICT=DONE`
     transitions:
       done:
         status: in_progress
@@ -51,7 +51,7 @@ stages:
       4. Create a git branch and commit your changes
       5. Create a PR with `gh pr create`
 
-      {verdict_instruction}: VERDICT=DONE
+      {verdict_instruction}. Example: `VERDICT=DONE`
     transitions:
       done:
         status: review
