@@ -99,7 +99,7 @@ jobs:
           fi
 
           # Squash merge fallback: "RIG-XX: description" without conventional prefix → patch bump
-          SQUASH_RIGS=$(echo "$COMMITS" | grep -E '^RIG-[0-9]+:' | grep -vE '^RIG-[0-9]+ (feat|fix|refactor|perf|docs|chore|ci|test|style)(\(.+\))?:' || true)
+          SQUASH_RIGS=$(echo "$COMMITS" | grep -E '^RIG-[0-9]+:' || true)
           if [ -n "$SQUASH_RIGS" ]; then
             [ "$BUMP" = "none" ] && BUMP="patch"
             while IFS= read -r line; do
