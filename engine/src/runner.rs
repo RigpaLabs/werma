@@ -31,9 +31,12 @@ pub fn tools_for_type(task_type: &str, has_output: bool) -> String {
         "review" | "analyze" => "Read,Grep,Glob".to_string(),
         "code" | "refactor" => "Read,Edit,Write,Bash,Glob,Grep".to_string(),
         "full" => format!("Read,Edit,Write,Bash,Glob,Grep,{SLACK_READ},{SLACK_WRITE}"),
-        "pipeline-analyst" => format!(
-            "Read,Grep,Glob,Bash,WebSearch,WebFetch,{LINEAR_READ},{LINEAR_COMMENT},{LINEAR_LABEL}"
-        ),
+        "pipeline-analyst" => {
+            const LINEAR_WRITE: &str = "mcp__plugin_linear_linear__save_issue";
+            format!(
+                "Read,Grep,Glob,Bash,WebSearch,WebFetch,{LINEAR_READ},{LINEAR_COMMENT},{LINEAR_LABEL},{LINEAR_WRITE}"
+            )
+        }
         "pipeline-engineer" => {
             format!("Read,Edit,Write,Bash,Glob,Grep,{LINEAR_READ},{LINEAR_COMMENT}")
         }
@@ -508,6 +511,7 @@ mod tests {
             depends_on: vec![],
             context_files: vec![],
             repo_hash: String::new(),
+            estimate: 0,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -541,6 +545,7 @@ mod tests {
             depends_on: vec![],
             context_files: vec!["ctx.txt".to_string()],
             repo_hash: String::new(),
+            estimate: 0,
         };
 
         let result = build_prompt(&task, dir.path(), dir.path()).unwrap();
@@ -572,6 +577,7 @@ mod tests {
             depends_on: vec![],
             context_files: vec!["/nonexistent/file.txt".to_string()],
             repo_hash: String::new(),
+            estimate: 0,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -611,6 +617,7 @@ mod tests {
             depends_on: vec!["dep-001".to_string()],
             context_files: vec![],
             repo_hash: String::new(),
+            estimate: 0,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -654,6 +661,7 @@ mod tests {
             depends_on: vec!["dep-002".to_string()],
             context_files: vec![],
             repo_hash: String::new(),
+            estimate: 0,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -688,6 +696,7 @@ mod tests {
             depends_on: vec!["nonexistent-dep".to_string()],
             context_files: vec![],
             repo_hash: String::new(),
+            estimate: 0,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();

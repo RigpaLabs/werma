@@ -60,6 +60,8 @@ pub struct Task {
     pub context_files: Vec<String>,
     #[serde(default)]
     pub repo_hash: String,
+    #[serde(default)]
+    pub estimate: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

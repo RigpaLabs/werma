@@ -186,6 +186,7 @@ fn cmd_add(db: &Db, p: AddParams) -> Result<()> {
         depends_on: depends_on.clone(),
         context_files: context_files.clone(),
         repo_hash: runtime_repo_hash(),
+        estimate: 0,
     };
 
     db.insert_task(&task)?;
@@ -918,6 +919,7 @@ fn cmd_review(
         depends_on: vec![],
         context_files: vec![diff_path.to_string_lossy().to_string()],
         repo_hash: crate::runtime_repo_hash(),
+        estimate: 0,
     };
 
     db.insert_task(&task)?;

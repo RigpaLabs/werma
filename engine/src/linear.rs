@@ -274,6 +274,7 @@ impl LinearClient {
 
             let task_type = infer_type_from_labels(&labels);
             let working_dir = infer_working_dir(title, &labels);
+            let estimate = issue["estimate"].as_i64().unwrap_or(0) as i32;
 
             // Build prompt
             let prompt = if description.is_empty() {
@@ -309,6 +310,7 @@ impl LinearClient {
                 depends_on: vec![],
                 context_files: vec![],
                 repo_hash: crate::runtime_repo_hash(),
+                estimate,
             };
 
             db.insert_task(&task)?;
@@ -431,6 +433,17 @@ impl LinearClient {
                 commentCreate(input: { issueId: $issueId, body: $body }) { success }
             }"#,
             &json!({"issueId": issue_id, "body": body}),
+        )?;
+        Ok(())
+    }
+
+    /// Update the estimate (story points) of a Linear issue.
+    pub fn update_estimate(&self, issue_id: &str, estimate: i32) -> Result<()> {
+        self.query(
+            r#"mutation($id: ID!, $estimate: Int) {
+                issueUpdate(id: $id, input: { estimate: $estimate }) { success }
+            }"#,
+            &json!({"id": issue_id, "estimate": estimate}),
         )?;
         Ok(())
     }

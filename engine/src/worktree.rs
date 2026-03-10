@@ -222,6 +222,7 @@ mod tests {
             depends_on: vec![],
             context_files: vec![],
             repo_hash: String::new(),
+            estimate: 0,
         }
     }
 
