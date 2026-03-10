@@ -309,6 +309,7 @@ pub fn callback(
                 create_next_stage_task(&NextStageParams {
                     db,
                     config: &config,
+                    linear: Some(&linear),
                     linear_issue_id,
                     next_stage,
                     previous_output: result,
@@ -318,44 +319,6 @@ pub fn callback(
                     estimate,
                 })?;
             }
-        }
-        None if stage == "analyst" => {
-            // Legacy fallback: analyst has no explicit "done" transition in old format
-            linear.move_issue_by_name(linear_issue_id, "in_progress")?;
-            linear.comment(
-                linear_issue_id,
-                &format!("**Analyst completed** (task: `{task_id}`). Moving to In Progress."),
-            )?;
-            create_next_stage_task(&NextStageParams {
-                db,
-                config: &config,
-                linear_issue_id,
-                next_stage: "engineer",
-                previous_output: result,
-                prev_task_id: task_id,
-                prev_stage: stage,
-                working_dir,
-                estimate,
-            })?;
-        }
-        None if stage == "engineer" => {
-            // Legacy fallback: engineer moves to review
-            linear.move_issue_by_name(linear_issue_id, "review")?;
-            linear.comment(
-                linear_issue_id,
-                &format!("**Engineer completed** (task: `{task_id}`). Moving to In Review."),
-            )?;
-            create_next_stage_task(&NextStageParams {
-                db,
-                config: &config,
-                linear_issue_id,
-                next_stage: "reviewer",
-                previous_output: result,
-                prev_task_id: task_id,
-                prev_stage: stage,
-                working_dir,
-                estimate: 0,
-            })?;
         }
         None => {
             eprintln!(
@@ -469,6 +432,8 @@ fn build_handoff_prompt(
     next_stage: &str,
     prev_stage: &str,
     linear_issue_id: &str,
+    issue_title: &str,
+    issue_description: &str,
     previous_output: &str,
 ) -> String {
     let stage_cfg = match config.stage(next_stage) {
@@ -502,8 +467,8 @@ fn build_handoff_prompt(
 
     let mut runtime: HashMap<String, String> = HashMap::new();
     runtime.insert("issue_id".to_string(), linear_issue_id.to_string());
-    runtime.insert("issue_title".to_string(), String::new());
-    runtime.insert("issue_description".to_string(), String::new());
+    runtime.insert("issue_title".to_string(), issue_title.to_string());
+    runtime.insert("issue_description".to_string(), issue_description.to_string());
     runtime.insert("previous_output".to_string(), previous_output.to_string());
     runtime.insert(
         "rejection_feedback".to_string(),
@@ -543,6 +508,7 @@ fn build_handoff_prompt(
 struct NextStageParams<'a> {
     db: &'a Db,
     config: &'a PipelineConfig,
+    linear: Option<&'a LinearClient>,
     linear_issue_id: &'a str,
     next_stage: &'a str,
     previous_output: &'a str,
@@ -557,6 +523,7 @@ fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
     let NextStageParams {
         db,
         config,
+        linear,
         linear_issue_id,
         next_stage,
         previous_output,
@@ -580,11 +547,18 @@ fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
     };
     let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
 
+    // Fetch issue title/description from Linear for template vars
+    let (issue_title, issue_description) = linear
+        .and_then(|l| l.get_issue(linear_issue_id).ok())
+        .unwrap_or_default();
+
     let prompt = build_handoff_prompt(
         config,
         next_stage,
         prev_stage,
         linear_issue_id,
+        &issue_title,
+        &issue_description,
         previous_output,
     );
 
@@ -705,6 +679,7 @@ mod tests {
         create_next_stage_task(&NextStageParams {
             db: &db,
             config: &config,
+            linear: None,
             linear_issue_id: "test-issue-abc",
             next_stage: "engineer",
             previous_output: analyst_output,
@@ -737,6 +712,7 @@ mod tests {
         create_next_stage_task(&NextStageParams {
             db: &db,
             config: &config,
+            linear: None,
             linear_issue_id: "test-issue-def",
             next_stage: "engineer",
             previous_output: reviewer_output,
@@ -859,6 +835,8 @@ mod tests {
             "engineer",
             "analyst",
             "issue-123",
+            "Test Issue Title",
+            "Test description",
             "spec output",
         );
         assert!(prompt.contains("issue-123"));
@@ -869,8 +847,9 @@ mod tests {
         let config = test_config();
         let reviewer_output =
             "## Findings\n- blocker: missing error handling\nREVIEW_VERDICT=REJECTED";
-        let prompt =
-            build_handoff_prompt(&config, "engineer", "reviewer", "issue-123", reviewer_output);
+        let prompt = build_handoff_prompt(
+            &config, "engineer", "reviewer", "issue-123", "Title", "Desc", reviewer_output,
+        );
         // Feedback should be present somewhere in the prompt
         assert!(
             prompt.contains("blocker")

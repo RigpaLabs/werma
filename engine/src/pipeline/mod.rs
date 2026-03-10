@@ -180,31 +180,7 @@ pub fn status(db: &Db) -> Result<()> {
     }
 
     println!("\nLocal pipeline tasks:");
-    let config = loader::load_default().unwrap_or_else(|_| {
-        // Fallback: use hardcoded stage names if config load fails
-        PipelineConfig {
-            pipeline: "default".to_string(),
-            description: String::new(),
-            templates: indexmap::IndexMap::new(),
-            stages: {
-                let mut m = indexmap::IndexMap::new();
-                for name in &["analyst", "engineer", "reviewer", "qa", "devops"] {
-                    m.insert(
-                        name.to_string(),
-                        config::StageConfig {
-                            linear_status: None,
-                            agent: format!("pipeline-{name}"),
-                            model: "sonnet".to_string(),
-                            manual: config::ManualBehavior::Skip,
-                            prompt: None,
-                            transitions: indexmap::IndexMap::new(),
-                        },
-                    );
-                }
-                m
-            },
-        }
-    });
+    let config = loader::load_default()?;
 
     let pending = db.list_tasks(Some(Status::Pending))?;
     let running = db.list_tasks(Some(Status::Running))?;
@@ -359,6 +335,3 @@ mod tests {
         assert!(tldr.contains("First line"));
     }
 }
-
-// Re-export PipelineConfig for use in status() above
-use config::PipelineConfig;

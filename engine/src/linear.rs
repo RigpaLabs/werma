@@ -448,6 +448,25 @@ impl LinearClient {
         Ok(())
     }
 
+    /// Fetch a single issue by ID (title + description).
+    pub fn get_issue(&self, issue_id: &str) -> Result<(String, String)> {
+        let data = self.query(
+            r#"query($id: ID!) {
+                issue(id: $id) { title description }
+            }"#,
+            &json!({"id": issue_id}),
+        )?;
+        let title = data["issue"]["title"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let description = data["issue"]["description"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        Ok((title, description))
+    }
+
     /// Get issues filtered by team and status name.
     pub fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<Value>> {
         let config = load_config()?;
