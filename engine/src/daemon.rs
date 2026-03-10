@@ -469,7 +469,7 @@ fn check_merged_prs(_db: &Db, werma_dir: &Path) -> Result<()> {
             linear
                 .comment(
                     issue_id,
-                    &format!("**PR merged** — issue moved to Done automatically by werma daemon."),
+                    "**PR merged** — issue moved to Done automatically by werma daemon.",
                 )
                 .ok();
 

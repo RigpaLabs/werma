@@ -473,8 +473,8 @@ impl LinearClient {
         let config = load_config()?;
         // Parse "RIG-95" → number 95
         let number: i64 = identifier
-            .split('-')
-            .last()
+            .rsplit('-')
+            .next()
             .and_then(|n| n.parse().ok())
             .with_context(|| format!("invalid identifier: {identifier}"))?;
 
