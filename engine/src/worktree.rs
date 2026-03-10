@@ -17,26 +17,19 @@ pub fn needs_worktree(task_type: &str) -> bool {
 }
 
 /// Generate a branch name from a task.
-/// With linear_issue_id → feat/RIG-XX-slugified-title
-/// Without → {type}/werma-{task_id}
+/// With linear_issue_id → RIG-XX/slugified-title
+/// Without → werma-{task_id}
 pub fn generate_branch_name(task: &Task) -> String {
     if !task.linear_issue_id.is_empty() {
         let slug = slugify_prompt(&task.prompt);
-        // Extract RIG-XX from the prompt or linear_issue_id
         let rig_id = extract_rig_id(&task.prompt).unwrap_or_default();
         if rig_id.is_empty() {
-            format!("feat/werma-{}-{}", task.id, slug)
+            format!("werma-{}/{}", task.id, slug)
         } else {
-            format!("feat/{}-{}", rig_id, slug)
+            format!("{}/{}", rig_id, slug)
         }
     } else {
-        let prefix = match task.task_type.as_str() {
-            "code" | "pipeline-engineer" => "feat",
-            "refactor" => "refactor",
-            "full" | "pipeline-devops" => "feat",
-            _ => "feat",
-        };
-        format!("{}/werma-{}", prefix, task.id)
+        format!("werma-{}", task.id)
     }
 }
 
@@ -262,7 +255,7 @@ mod tests {
             "[RIG-42] Add worktree support for parallel agents",
         );
         let name = generate_branch_name(&task);
-        assert!(name.starts_with("feat/RIG-42-"));
+        assert!(name.starts_with("RIG-42/"), "expected RIG-42/ prefix, got: {name}");
         assert!(name.contains("worktree"));
     }
 
@@ -270,21 +263,21 @@ mod tests {
     fn branch_name_without_linear() {
         let task = test_task("code", "", "Fix something broken");
         let name = generate_branch_name(&task);
-        assert_eq!(name, "feat/werma-20260310-001");
+        assert_eq!(name, "werma-20260310-001");
     }
 
     #[test]
     fn branch_name_refactor_type() {
         let task = test_task("refactor", "", "Cleanup module structure");
         let name = generate_branch_name(&task);
-        assert!(name.starts_with("refactor/werma-"));
+        assert_eq!(name, "werma-20260310-001");
     }
 
     #[test]
     fn branch_name_linear_without_rig_id() {
         let task = test_task("code", "issue-abc-123", "Add feature without issue prefix");
         let name = generate_branch_name(&task);
-        assert!(name.starts_with("feat/werma-20260310-001-"));
+        assert!(name.starts_with("werma-20260310-001/"), "expected werma- prefix, got: {name}");
     }
 
     // --- extract_rig_id ---
@@ -343,12 +336,12 @@ mod tests {
             .output()
             .unwrap();
 
-        let branch = "feat/test-branch";
+        let branch = "RIG-99/test-branch";
 
         // First call: creates worktree
         let path = setup_worktree(repo_dir, branch).unwrap();
         assert!(path.exists());
-        assert!(path.ends_with(".trees/feat--test-branch"));
+        assert!(path.ends_with(".trees/RIG-99--test-branch"));
 
         // Second call: returns same path (resume)
         let path2 = setup_worktree(repo_dir, branch).unwrap();
