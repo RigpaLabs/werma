@@ -74,7 +74,11 @@ pub enum Commands {
 
     /// Show task status summary
     #[command(alias = "st")]
-    Status,
+    Status {
+        /// Watch mode: refresh every 5s
+        #[arg(short, long)]
+        watch: bool,
+    },
 
     /// Show task details + output
     View {

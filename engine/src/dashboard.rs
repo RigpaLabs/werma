@@ -132,7 +132,7 @@ fn check_daemon_status() -> &'static str {
     }
 }
 
-fn truncate_line(s: &str, max: usize) -> String {
+pub fn truncate_line(s: &str, max: usize) -> String {
     let first_line = s.lines().next().unwrap_or(s);
     if first_line.len() <= max {
         first_line.to_string()
