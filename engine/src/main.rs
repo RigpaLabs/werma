@@ -25,7 +25,7 @@ use clap::Parser;
 use crate::db::Db;
 use crate::models::{Schedule, Status, Task};
 
-/// Build a version string for clap: "0.1.0 (git-hash)".
+/// Build a version string for clap: "0.2.0 (git-hash)".
 /// Returns &'static str because clap requires it.
 pub fn version_string() -> &'static str {
     // Computed once at startup, leaked to get 'static lifetime.
@@ -942,8 +942,7 @@ fn main() -> anyhow::Result<()> {
             let bin_hash = option_env!("WERMA_GIT_VERSION").unwrap_or("dev");
             let repo_hash = runtime_repo_hash();
             let dir = werma_dir()?;
-            println!("werma {pkg}");
-            println!("  binary: {bin_hash} (compiled)");
+            println!("werma {pkg} ({bin_hash})");
             println!("  repo:   {repo_hash} (runtime)");
             println!("  db:     {}", dir.join("werma.db").display());
         }
