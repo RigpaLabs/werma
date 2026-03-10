@@ -561,4 +561,25 @@ mod tests {
         assert!(script.contains("LINEAR_ID='RIG-34'"));
         assert!(script.contains("NOTIFY_LABEL"));
     }
+
+    #[test]
+    fn exec_script_no_hyphen_task_id() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "099",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "/tmp/output.md",
+            working_dir: Path::new("/home/user/project"),
+            tools: "Read,Grep,Glob",
+            max_turns: 15,
+            model: "claude-sonnet-4-6",
+            log_file: Path::new("/tmp/log.log"),
+            task_type: "research",
+            linear_issue_id: "",
+        });
+
+        // sed 's/.*-//' on "099" (no hyphen) leaves "099" unchanged
+        assert!(script.contains("TASK_ID='099'"));
+        assert!(script.contains("LINEAR_ID=''"));
+        assert!(script.contains("NOTIFY_LABEL"));
+    }
 }

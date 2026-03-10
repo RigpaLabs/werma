@@ -422,7 +422,8 @@ fn cmd_continue(db: &Db, id: &str, prompt: Option<String>) -> Result<()> {
     } else {
         format!("{} ", task.linear_issue_id)
     };
-    let notify_label = format!("{linear_prefix}#{short_num} {}", task.task_type);
+    let notify_label = format!("{linear_prefix}#{short_num} {}", task.task_type)
+        .replace('\'', "");
 
     // Generate safe exec script
     let script = format!(
