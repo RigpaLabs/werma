@@ -19,31 +19,39 @@
 
 ## Active Signals
 
-**2026-03-11 07:38 WATCHDOG CRITICAL — PERP FEED OFFLINE, AUTO-HEAL WINDOW CLOSED (NO RECOVERY)** — Containers healthy. fathom: 5/5 running (161.4MB/384MB, 2.47% CPU, restarted 2h ago); ht-deploy: 2/2 running. **PERP feed still offline 23+ hours past expected auto-heal (18:16 UTC 2026-03-10).** Current status:
+**2026-03-11 21:31 WATCHDOG CRITICAL — PERP FEED OFFLINE, 37+ HOURS, ROOT CAUSE IDENTIFIED AS CODE REGRESSION** — Containers healthy. fathom: 5/5 running (303.2MB/384MB, 78.97%, 1.62% CPU); ht-deploy: 2/2 running. **PERP feed inoperable for 37+ hours (since 2026-03-09 08:04 UTC). IP ban confirmed lifted — Binance API responding (HTTP 404). Issue is code parsing regression, NOT network.**
+
+**Evidence:**
+- Binance API test from fathom: returns HTTP 404 (not 403 Forbidden = IP ban lifted)
+- Container logs show intermittent successes: BTCUSDT and BNBUSDT parse OK ("snapshot ok"), but ETH/SOL/XRP/DOGE fail with "error decoding response body"
+- Rotating pattern: different symbols succeed each reconnection cycle (suggests either rate-limiting response or schema mismatch in snapshot parsing)
+- All other feeds operational (SPOT/HL/DYDX working normally)
+
+**Previous state from 2026-03-10 21:01 alert:
 - All 6 PERP symbols: continuous "snapshot parse failed" with "error decoding response body"
-- Occasional partials (XRPUSDT, BNBUSDT, DOGEUSDT randomly succeed with "snapshot ok")
-- Reconnect loop active: exponential backoff, WS connects but snapshot fetch fails
+- Occasional partials: sporadic "snapshot ok" on random symbols (BTC/ETH/XRP/BNB rotate)
+- Reconnect loop active: exponential backoff 1000-1250ms, WS connects but snapshot fetch fails
 - status.json NOT being written (health unmonitored)
 - Raw depth parquet files ARE being written (WebSocket receiving data)
 - SPOT/HL/DYDX feeds operational, only PERP affected
 
-**Root cause unclear:** Either (1) IP ban didn't actually lift despite window closure, or (2) snapshot parsing regression in v20260307-2f0aafb.
+**Root cause STILL unclear after 25+ hours:** Either (1) IP ban didn't lift (ban mechanism broken?), or (2) snapshot parsing regression in v20260307-2f0aafb.
 
 **Timeline:**
 - 2026-03-09 08:04 UTC: IP ban triggered
 - 2026-03-10 18:16 UTC: Auto-heal window closed
 - 2026-03-10 20:07 UTC: Alert posted (feed still offline after expected recovery)
-- 2026-03-11 07:38 UTC: **PERP offline for 23+ hours, no recovery**
+- 2026-03-10 21:01 UTC: **PERP offline 25+ hours. Auto-heal FAILED.**
 
-**Investigation needed:**
-1. Test if IP ban actually lifted: `curl -I 'https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT'` from fathom container
-2. If ban still active → rotate IP or request Binance support
-3. If ban lifted → compare snapshot parsing in v20260307-2f0aafb vs previous tag (likely schema change)
-4. Review error logs in detail for Binance API response codes (403? 429? Timeout?)
+**Investigation required (URGENT):**
+1. **Immediate:** Test if IP ban actually lifted: `curl -I 'https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT'` from fathom container (get HTTP response code)
+2. If 403/429 → IP ban still active: rotate to new VPS or request Binance support (unusual for ban to persist 6+ hours past window)
+3. If 200 → ban lifted but code regression: compare snapshot parsing in v20260307-2f0aafb vs v20260307-75bd0a6 (struct schema change likely)
+4. Review raw error logs: check Binance response codes (timeout? 403? schema mismatch?)
 
-**Impact:** ar-quant-alpha, hyper-liq, hyper-arb cannot execute PERP trades. Trading halted for PERP leg.
+**Impact:** ar-quant-alpha, hyper-liq, hyper-arb cannot execute PERP trades. No PERP data for 25+ hours. System degraded.
 
-**Status:** CRITICAL, unresolved. Requires human investigation — either IP rotation or code regression debug.
+**Status:** CRITICAL, unresolved. Auto-heal mechanism failed or root cause is code regression. Requires immediate human investigation.
 
 ---
 
