@@ -429,11 +429,16 @@ fn check_merged_prs(_db: &Db, werma_dir: &Path) -> Result<()> {
         // Check if there's a merged PR for this issue using gh
         let check_cmd = std::process::Command::new("gh")
             .args([
-                "pr", "list",
-                "--search", identifier,
-                "--state", "merged",
-                "--json", "number,title,mergedAt",
-                "--limit", "1",
+                "pr",
+                "list",
+                "--search",
+                identifier,
+                "--state",
+                "merged",
+                "--json",
+                "number,title,mergedAt",
+                "--limit",
+                "1",
             ])
             .output();
 
@@ -464,7 +469,7 @@ fn check_merged_prs(_db: &Db, werma_dir: &Path) -> Result<()> {
             linear
                 .comment(
                     issue_id,
-                    &format!("**PR merged** — issue moved to Done automatically by werma daemon."),
+                    "**PR merged** — issue moved to Done automatically by werma daemon.",
                 )
                 .ok();
 
@@ -477,10 +482,7 @@ fn check_merged_prs(_db: &Db, werma_dir: &Path) -> Result<()> {
                     std::process::exit(0);
                 }
                 Err(e) => {
-                    log_daemon(
-                        &log_path,
-                        &format!("auto-update failed (non-fatal): {e}"),
-                    );
+                    log_daemon(&log_path, &format!("auto-update failed (non-fatal): {e}"));
                     // Continue running — update failure shouldn't block the daemon.
                 }
             }
