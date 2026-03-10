@@ -71,7 +71,7 @@ jobs:
           if [ -n "$FEATS" ]; then
             BUMP="minor"
             while IFS= read -r line; do
-              [ -n "$line" ] && CHANGELOG="${CHANGELOG}\n- ${line}"
+              [ -n "$line" ] && CHANGELOG="${CHANGELOG:+${CHANGELOG}\n}- ${line}"
             done <<< "$FEATS"
           fi
 
@@ -80,7 +80,7 @@ jobs:
           if [ -n "$FIXES" ]; then
             [ "$BUMP" = "none" ] && BUMP="patch"
             while IFS= read -r line; do
-              [ -n "$line" ] && CHANGELOG="${CHANGELOG}\n- ${line}"
+              [ -n "$line" ] && CHANGELOG="${CHANGELOG:+${CHANGELOG}\n}- ${line}"
             done <<< "$FIXES"
           fi
 
@@ -89,7 +89,7 @@ jobs:
           if [ -n "$PERFS" ]; then
             [ "$BUMP" = "none" ] && BUMP="patch"
             while IFS= read -r line; do
-              [ -n "$line" ] && CHANGELOG="${CHANGELOG}\n- ${line}"
+              [ -n "$line" ] && CHANGELOG="${CHANGELOG:+${CHANGELOG}\n}- ${line}"
             done <<< "$PERFS"
           fi
 
@@ -99,7 +99,7 @@ jobs:
           if [ -n "$SQUASH_RIGS" ]; then
             [ "$BUMP" = "none" ] && BUMP="patch"
             while IFS= read -r line; do
-              [ -n "$line" ] && CHANGELOG="${CHANGELOG}\n- ${line}"
+              [ -n "$line" ] && CHANGELOG="${CHANGELOG:+${CHANGELOG}\n}- ${line}"
             done <<< "$SQUASH_RIGS"
           fi
 
@@ -107,7 +107,7 @@ jobs:
           OTHERS=$(echo "$COMMITS" | grep -E '^(docs|refactor|chore|ci|test|style)(\(.+\))?:' || true)
           if [ -n "$OTHERS" ]; then
             while IFS= read -r line; do
-              [ -n "$line" ] && CHANGELOG="${CHANGELOG}\n- ${line}"
+              [ -n "$line" ] && CHANGELOG="${CHANGELOG:+${CHANGELOG}\n}- ${line}"
             done <<< "$OTHERS"
           fi
 
