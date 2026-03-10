@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.5.1] — 2026-03-10
+
+- fix(RIG-80): changelog formatting in release workflow (#25)
+- fix(RIG-59): add GitHub token auth to werma update (#24)
+
 ## [v0.5.0] — 2026-03-10
 
 - feat(RIG-65): pipeline-as-config — YAML-driven pipeline definitions (#20)
