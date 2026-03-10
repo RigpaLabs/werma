@@ -175,6 +175,9 @@ pub enum Commands {
     /// Run database migrations (stub)
     Migrate,
 
+    /// Self-update from GitHub Releases
+    Update,
+
     /// Show version info
     Version,
 }
