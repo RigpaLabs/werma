@@ -28,14 +28,23 @@ use crate::dashboard::truncate_line;
 use crate::db::Db;
 use crate::models::{Schedule, Status, Task};
 
-/// Build a version string for clap: "0.2.0 (git-hash)".
+/// Build a version string for display.
 /// Returns &'static str because clap requires it.
 pub fn version_string() -> &'static str {
     // Computed once at startup, leaked to get 'static lifetime.
     // This is fine — it's a small string that lives for the process lifetime.
-    let git = option_env!("WERMA_GIT_VERSION").unwrap_or("dev");
-    let s = format!("{} ({git})", env!("CARGO_PKG_VERSION"));
-    Box::leak(s.into_boxed_str())
+    let version = match option_env!("WERMA_GIT_VERSION") {
+        Some(tag) => {
+            // Release build: WERMA_GIT_VERSION is set to "vX.Y.Z" by CI
+            let v = tag.strip_prefix('v').unwrap_or(tag);
+            v.to_string()
+        }
+        None => {
+            // Dev build: show cargo version + dev suffix
+            format!("{}-dev", env!("CARGO_PKG_VERSION"))
+        }
+    };
+    Box::leak(version.into_boxed_str())
 }
 
 /// Get the current git HEAD hash of the werma repo at runtime.
@@ -1053,13 +1062,7 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         cli::Commands::Version => {
-            let pkg = env!("CARGO_PKG_VERSION");
-            let bin_hash = option_env!("WERMA_GIT_VERSION").unwrap_or("dev");
-            let repo_hash = runtime_repo_hash();
-            let dir = werma_dir()?;
-            println!("werma {pkg} ({bin_hash})");
-            println!("  repo:   {repo_hash} (runtime)");
-            println!("  db:     {}", dir.join("werma.db").display());
+            println!("werma {}", version_string());
         }
 
         cli::Commands::Add {
