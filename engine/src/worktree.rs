@@ -128,6 +128,24 @@ pub fn cleanup_worktree(working_dir: &Path, branch_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Extract RIG-XX from the beginning of a string.
+/// Matches patterns like "RIG-42 ...", "  RIG-42 ...", "[RIG-42] ..."
+pub fn extract_rig_id_prefix(s: &str) -> Option<String> {
+    let trimmed = s.trim_start();
+    let trimmed = trimmed.strip_prefix('[').unwrap_or(trimmed);
+    if let Some(digits) = trimmed.strip_prefix("RIG-") {
+        // Collect digits after "RIG-"
+        let digit_end = digits
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(digits.len());
+        let id = &trimmed[..4 + digit_end]; // "RIG-" + digits
+        if id.len() > 4 {
+            return Some(id.to_string());
+        }
+    }
+    None
+}
+
 /// Extract RIG-XX identifier from a prompt string.
 fn extract_rig_id(prompt: &str) -> Option<String> {
     let re_pattern = "RIG-";
@@ -278,6 +296,22 @@ mod tests {
         let task = test_task("code", "issue-abc-123", "Add feature without issue prefix");
         let name = generate_branch_name(&task);
         assert!(name.starts_with("werma-20260310-001/"), "expected werma- prefix, got: {name}");
+    }
+
+    // --- extract_rig_id_prefix ---
+
+    #[test]
+    fn extract_rig_id_prefix_found() {
+        assert_eq!(extract_rig_id_prefix("RIG-83 do stuff"), Some("RIG-83".to_string()));
+        assert_eq!(extract_rig_id_prefix("  RIG-42 something"), Some("RIG-42".to_string()));
+        assert_eq!(extract_rig_id_prefix("[RIG-100] title"), Some("RIG-100".to_string()));
+    }
+
+    #[test]
+    fn extract_rig_id_prefix_not_at_start() {
+        assert_eq!(extract_rig_id_prefix("fix the thing RIG-99 mentioned"), None);
+        assert_eq!(extract_rig_id_prefix("no issue here"), None);
+        assert_eq!(extract_rig_id_prefix("RIG- no digits"), None);
     }
 
     // --- extract_rig_id ---

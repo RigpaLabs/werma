@@ -180,7 +180,9 @@ fn cmd_add(db: &Db, p: AddParams) -> Result<()> {
         max_turns,
         allowed_tools,
         session_id: String::new(),
-        linear_issue_id: p.linear.unwrap_or_default(),
+        linear_issue_id: p.linear.unwrap_or_else(|| {
+            crate::worktree::extract_rig_id_prefix(&p.prompt).unwrap_or_default()
+        }),
         linear_pushed: false,
         pipeline_stage: p.stage.unwrap_or_default(),
         depends_on: depends_on.clone(),
