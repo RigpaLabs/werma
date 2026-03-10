@@ -12,7 +12,6 @@ mod migrate;
 mod models;
 #[allow(dead_code)]
 mod notify;
-#[allow(dead_code)]
 mod pipeline;
 mod runner;
 mod update;
@@ -1146,6 +1145,15 @@ fn main() -> anyhow::Result<()> {
             cli::PipelineAction::Status => {
                 let db = open_db()?;
                 pipeline::status(&db)?;
+            }
+            cli::PipelineAction::Show { stage } => {
+                pipeline::cmd_show(stage.as_deref())?;
+            }
+            cli::PipelineAction::Validate => {
+                pipeline::cmd_validate()?;
+            }
+            cli::PipelineAction::Eject => {
+                pipeline::cmd_eject()?;
             }
         },
 
