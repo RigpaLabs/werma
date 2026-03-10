@@ -17,10 +17,6 @@ jobs:
   version:
     name: Auto-version & Tag
     runs-on: ubuntu-latest
-    # Guard: the "Commit version bump" step below creates a "chore: bump version to vX.Y.Z"
-    # commit and pushes to main, which re-triggers this workflow. Without this guard the
-    # workflow would loop forever: push → bump → push → bump → …
-    if: "!startsWith(github.event.head_commit.message, 'chore: bump version')"
     outputs:
       new_version: ${{ steps.bump.outputs.new_version }}
       tag: ${{ steps.bump.outputs.tag }}
@@ -144,63 +140,6 @@ jobs:
             echo 'CHANGELOG_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Update Cargo.toml version
-        if: steps.bump.outputs.skipped != 'true'
-        run: |
-          NEW_VERSION="${{ steps.bump.outputs.new_version }}"
-          sed -i "s/^version = \".*\"/version = \"${NEW_VERSION}\"/" engine/Cargo.toml
-          echo "Updated engine/Cargo.toml to ${NEW_VERSION}"
-          grep '^version' engine/Cargo.toml
-
-      - name: Update CHANGELOG.md
-        if: steps.bump.outputs.skipped != 'true'
-        run: |
-          TAG="${{ steps.bump.outputs.tag }}"
-          DATE=$(date +%Y-%m-%d)
-          CHANGELOG="${{ steps.bump.outputs.changelog }}"
-
-          if [ ! -f CHANGELOG.md ]; then
-            echo "# Changelog" > CHANGELOG.md
-            echo "" >> CHANGELOG.md
-          fi
-
-          # Find line number of first version heading (## [)
-          INSERT_LINE=$(grep -n '^## \[' CHANGELOG.md | head -1 | cut -d: -f1)
-
-          if [ -n "$INSERT_LINE" ]; then
-            # Insert new version section before the first existing version
-            {
-              head -n $((INSERT_LINE - 1)) CHANGELOG.md
-              echo "## [${TAG}] — ${DATE}"
-              echo ""
-              printf '%s\n' "$CHANGELOG"
-              echo ""
-              tail -n +${INSERT_LINE} CHANGELOG.md
-            } > CHANGELOG.tmp
-          else
-            # No existing versions — append to end
-            {
-              cat CHANGELOG.md
-              echo ""
-              echo "## [${TAG}] — ${DATE}"
-              echo ""
-              printf '%s\n' "$CHANGELOG"
-            } > CHANGELOG.tmp
-          fi
-          mv CHANGELOG.tmp CHANGELOG.md
-
-          echo "Updated CHANGELOG.md with ${TAG}"
-
-      - name: Commit version bump
-        if: steps.bump.outputs.skipped != 'true'
-        run: |
-          TAG="${{ steps.bump.outputs.tag }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add engine/Cargo.toml CHANGELOG.md
-          git commit -m "chore: bump version to ${TAG}"
-          git push
-
       - name: Create tag
         if: steps.bump.outputs.skipped != 'true'
         run: |
@@ -208,6 +147,45 @@ jobs:
           git tag "$TAG"
           git push origin "$TAG"
           echo "Created and pushed tag: $TAG"
+
+      - name: Create GitHub Release
+        if: steps.bump.outputs.skipped != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.bump.outputs.tag }}"
+          AUTO_CHANGELOG="${{ steps.bump.outputs.changelog }}"
+
+          # Find the merged PR number from the squash-merge commit message
+          PR_NUM=$(git log -1 --pretty=format:'%s' | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+
+          RELEASE_NOTES=""
+
+          if [ -n "$PR_NUM" ]; then
+            echo "Found PR #${PR_NUM}, checking for custom changelog..."
+            PR_BODY=$(gh pr view "$PR_NUM" --json body --jq .body 2>/dev/null || true)
+
+            if [ -n "$PR_BODY" ]; then
+              # Extract ## Changelog section from PR body
+              CUSTOM_NOTES=$(echo "$PR_BODY" | sed -n '/^## Changelog/,/^## /{ /^## Changelog/d; /^## /d; p; }')
+              # Trim leading/trailing whitespace
+              CUSTOM_NOTES=$(echo "$CUSTOM_NOTES" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | sed '/^$/d')
+
+              if [ -n "$CUSTOM_NOTES" ]; then
+                echo "Using custom changelog from PR body"
+                RELEASE_NOTES="$CUSTOM_NOTES"
+              fi
+            fi
+          fi
+
+          # Fall back to auto-generated changelog from commits
+          if [ -z "$RELEASE_NOTES" ]; then
+            echo "Using auto-generated changelog from commits"
+            RELEASE_NOTES="$AUTO_CHANGELOG"
+          fi
+
+          gh release create "$TAG" --title "$TAG" --notes "$RELEASE_NOTES"
+          echo "Created GitHub Release: $TAG"
 
       - name: Extract Linear issue references
         if: steps.bump.outputs.skipped != 'true'
