@@ -15,6 +15,7 @@ mod notify;
 #[allow(dead_code)]
 mod pipeline;
 mod runner;
+mod update;
 mod worktree;
 
 use std::path::{Path, PathBuf};
@@ -1147,6 +1148,10 @@ fn main() -> anyhow::Result<()> {
                 pipeline::status(&db)?;
             }
         },
+
+        cli::Commands::Update => {
+            update::update()?;
+        }
 
         cli::Commands::Review { target, dir } => {
             let db = open_db()?;
