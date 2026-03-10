@@ -38,6 +38,14 @@ jobs:
       - name: Parse commits & determine bump
         id: bump
         run: |
+          # Skip if this is a version bump commit (prevent re-trigger loop)
+          HEAD_MSG=$(git log -1 --pretty=format:"%s")
+          if [[ "$HEAD_MSG" == "chore: bump version"* ]]; then
+            echo "Version bump commit detected, skipping"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           LATEST_TAG="${{ steps.latest_tag.outputs.tag }}"
           echo "Analyzing commits since $LATEST_TAG..."
 
@@ -145,52 +153,30 @@ jobs:
             echo 'CHANGELOG_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Create tag
+      - name: Bump Cargo.toml, commit, tag, and push
         if: steps.bump.outputs.skipped != 'true'
         run: |
+          NEW_VERSION="${{ steps.bump.outputs.new_version }}"
           TAG="${{ steps.bump.outputs.tag }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Update version in Cargo.toml
+          sed -i "s/^version = .*/version = \"$NEW_VERSION\"/" engine/Cargo.toml
+
+          # Regenerate Cargo.lock with the new version
+          cd engine && cargo generate-lockfile && cd ..
+
+          git add engine/Cargo.toml engine/Cargo.lock
+          git commit -m "chore: bump version to $TAG"
+
+          # Tag points to the bump commit (correct ordering)
           git tag "$TAG"
-          git push origin "$TAG"
-          echo "Created and pushed tag: $TAG"
 
-      - name: Create GitHub Release
-        if: steps.bump.outputs.skipped != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ steps.bump.outputs.tag }}"
-          AUTO_CHANGELOG="${{ steps.bump.outputs.changelog }}"
-
-          # Find the merged PR number from the squash-merge commit message
-          PR_NUM=$(git log -1 --pretty=format:'%s' | grep -oE '#[0-9]+' | head -1 | tr -d '#')
-
-          RELEASE_NOTES=""
-
-          if [ -n "$PR_NUM" ]; then
-            echo "Found PR #${PR_NUM}, checking for custom changelog..."
-            PR_BODY=$(gh pr view "$PR_NUM" --json body --jq .body 2>/dev/null || true)
-
-            if [ -n "$PR_BODY" ]; then
-              # Extract ## Changelog section from PR body
-              CUSTOM_NOTES=$(echo "$PR_BODY" | sed -n '/^## Changelog/,/^## /{ /^## Changelog/d; /^## /d; p; }')
-              # Trim leading/trailing whitespace
-              CUSTOM_NOTES=$(echo "$CUSTOM_NOTES" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | sed '/^$/d')
-
-              if [ -n "$CUSTOM_NOTES" ]; then
-                echo "Using custom changelog from PR body"
-                RELEASE_NOTES="$CUSTOM_NOTES"
-              fi
-            fi
-          fi
-
-          # Fall back to auto-generated changelog from commits
-          if [ -z "$RELEASE_NOTES" ]; then
-            echo "Using auto-generated changelog from commits"
-            RELEASE_NOTES="$AUTO_CHANGELOG"
-          fi
-
-          gh release create "$TAG" --title "$TAG" --notes "$RELEASE_NOTES"
-          echo "Created GitHub Release: $TAG"
+          # Push commit and tag atomically
+          git push origin main --tags
+          echo "Pushed bump commit and tag: $TAG"
 
       - name: Extract Linear issue references
         if: steps.bump.outputs.skipped != 'true'
