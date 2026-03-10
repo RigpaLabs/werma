@@ -2,15 +2,30 @@ use anyhow::{Context, Result, bail};
 
 const GITHUB_REPO: &str = "RigpaLabs/werma";
 
-/// Read GitHub token from GITHUB_TOKEN or GH_TOKEN (gh CLI convention).
+/// Read GitHub token from GITHUB_TOKEN, GH_TOKEN, or `gh auth token` fallback.
 fn github_token() -> Result<String> {
-    std::env::var("GITHUB_TOKEN")
-        .or_else(|_| std::env::var("GH_TOKEN"))
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "no GitHub token found — set GITHUB_TOKEN or GH_TOKEN for private repo access"
-            )
-        })
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        return Ok(token);
+    }
+    if let Ok(token) = std::env::var("GH_TOKEN") {
+        return Ok(token);
+    }
+
+    // Fallback: ask gh CLI for its stored token
+    let output = std::process::Command::new("gh")
+        .args(["auth", "token"])
+        .output();
+
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !token.is_empty() {
+            return Ok(token);
+        }
+    }
+
+    bail!("no GitHub token found — set GITHUB_TOKEN, GH_TOKEN, or log in with `gh auth login`")
 }
 
 /// Platform target triple for the current binary.
@@ -26,14 +41,26 @@ fn current_target() -> &'static str {
     }
 }
 
-/// Fetch the latest release tag from GitHub API.
-fn latest_release_tag(token: &str) -> Result<(String, String)> {
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
+struct ReleaseInfo {
+    tag: String,
+    /// API URL for downloading the matching asset (if found).
+    asset_api_url: Option<String>,
+}
 
-    let client = reqwest::blocking::Client::builder()
+/// Build a shared HTTP client with auth.
+fn api_client() -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
         .user_agent("werma-updater")
         .build()
-        .context("failed to build HTTP client")?;
+        .context("failed to build HTTP client")
+}
+
+/// Fetch the latest release info from GitHub API.
+/// Finds the asset matching `werma-{target}.tar.gz` and returns its API URL.
+fn latest_release(token: &str, target: &str) -> Result<ReleaseInfo> {
+    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
+
+    let client = api_client()?;
 
     let resp = client
         .get(&url)
@@ -56,9 +83,21 @@ fn latest_release_tag(token: &str) -> Result<(String, String)> {
         .context("no tag_name in release")?
         .to_string();
 
-    let body = json["body"].as_str().unwrap_or("").to_string();
+    // Find asset by name pattern: werma-{target}.tar.gz
+    let expected_name = format!("werma-{target}.tar.gz");
+    let asset_api_url = json["assets"].as_array().and_then(|assets| {
+        assets.iter().find_map(|a| {
+            let name = a["name"].as_str()?;
+            if name == expected_name {
+                // Use the "url" field (api.github.com/...assets/{id}), NOT browser_download_url
+                a["url"].as_str().map(std::string::ToString::to_string)
+            } else {
+                None
+            }
+        })
+    });
 
-    Ok((tag, body))
+    Ok(ReleaseInfo { tag, asset_api_url })
 }
 
 /// Self-update werma binary from GitHub Releases.
@@ -69,8 +108,14 @@ pub fn update() -> Result<()> {
 
     let token = github_token()?;
 
-    let (latest_tag, _release_notes) = latest_release_tag(&token)?;
-    let latest_version = latest_tag.strip_prefix('v').unwrap_or(&latest_tag);
+    let target = current_target();
+    if target == "unknown" {
+        bail!("unsupported platform — download manually from GitHub Releases");
+    }
+
+    let release = latest_release(&token, target)?;
+    let latest_tag = &release.tag;
+    let latest_version = latest_tag.strip_prefix('v').unwrap_or(latest_tag);
 
     if latest_version == current {
         println!("Already up to date (v{current})");
@@ -79,31 +124,26 @@ pub fn update() -> Result<()> {
 
     println!("New version available: {latest_tag} (current: v{current})");
 
-    let target = current_target();
-    if target == "unknown" {
-        bail!("unsupported platform — download manually from GitHub Releases");
-    }
+    let asset_url = release.asset_api_url.context(format!(
+        "no asset werma-{target}.tar.gz found in release {latest_tag}",
+    ))?;
 
     let artifact_name = format!("werma-{target}");
-    let download_url = format!(
-        "https://github.com/{GITHUB_REPO}/releases/download/{latest_tag}/{artifact_name}.tar.gz"
-    );
-
     println!("Downloading {artifact_name}...");
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("werma-updater")
-        .build()
-        .context("failed to build HTTP client")?;
+
+    // Download via API URL — works for both public and private repos.
+    // GitHub returns 302 → signed S3 URL for the actual binary.
+    let client = api_client()?;
 
     let resp = client
-        .get(&download_url)
+        .get(&asset_url)
         .header("Authorization", format!("Bearer {token}"))
         .header("Accept", "application/octet-stream")
         .send()
         .context("failed to download release")?;
 
     if !resp.status().is_success() {
-        bail!("download failed ({}): {}", resp.status(), download_url);
+        bail!("download failed ({}): {}", resp.status(), asset_url);
     }
 
     let bytes = resp.bytes().context("failed to read download")?;
@@ -180,8 +220,8 @@ mod tests {
             Err(e) => {
                 let msg = e.to_string();
                 assert!(
-                    msg.contains("GITHUB_TOKEN") && msg.contains("GH_TOKEN"),
-                    "error should mention both env vars, got: {msg}"
+                    msg.contains("GITHUB_TOKEN") || msg.contains("gh auth login"),
+                    "error should mention env vars or gh auth, got: {msg}"
                 );
             }
         }
