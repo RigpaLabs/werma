@@ -273,7 +273,10 @@ mod tests {
             "[RIG-42] Add worktree support for parallel agents",
         );
         let name = generate_branch_name(&task);
-        assert!(name.starts_with("RIG-42/"), "expected RIG-42/ prefix, got: {name}");
+        assert!(
+            name.starts_with("RIG-42/"),
+            "expected RIG-42/ prefix, got: {name}"
+        );
         assert!(name.contains("worktree"));
     }
 
@@ -295,7 +298,10 @@ mod tests {
     fn branch_name_linear_without_rig_id() {
         let task = test_task("code", "issue-abc-123", "Add feature without issue prefix");
         let name = generate_branch_name(&task);
-        assert!(name.starts_with("werma-20260310-001/"), "expected werma- prefix, got: {name}");
+        assert!(
+            name.starts_with("werma-20260310-001/"),
+            "expected werma- prefix, got: {name}"
+        );
     }
 
     // --- extract_rig_id_prefix ---
