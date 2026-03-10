@@ -1076,6 +1076,72 @@ fn cmd_review(
     Ok(())
 }
 
+fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
+    let db = open_db()?;
+    let linear = linear::LinearClient::new()?;
+    let config = pipeline::loader::load_default()?;
+
+    // Validate stage exists
+    if config.stage(stage).is_none() {
+        let available: Vec<_> = config.stages.keys().collect();
+        bail!(
+            "unknown stage '{}'. Available: {}",
+            stage,
+            available.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
+
+    let mut created = 0;
+    let mut skipped = 0;
+
+    for identifier in identifiers {
+        // Fetch issue from Linear
+        let (issue_id, ident, title, description, labels) =
+            match linear.get_issue_by_identifier(identifier) {
+                Ok(data) => data,
+                Err(e) => {
+                    eprintln!("  ! {}: {}", identifier, e);
+                    skipped += 1;
+                    continue;
+                }
+            };
+
+        // Skip if active task already exists for this issue + stage
+        let existing = db.tasks_by_linear_issue(&issue_id, Some(stage), true)?;
+        if !existing.is_empty() {
+            let active_id = &existing[0].id;
+            eprintln!("  ~ {} already has active {} task ({})", ident, stage, active_id);
+            skipped += 1;
+            continue;
+        }
+
+        let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+        let working_dir = linear::infer_working_dir(&title, &label_refs);
+        let estimate = 0; // Will be set by analyst if applicable
+
+        let task_id = pipeline::create_initial_stage_task(
+            &db,
+            &config,
+            stage,
+            &issue_id,
+            &ident,
+            &title,
+            &description,
+            &working_dir,
+            estimate,
+        )?;
+
+        println!("  + {} [{}] stage={}", task_id, ident, stage);
+        created += 1;
+    }
+
+    println!(
+        "\nPipeline run: {} created, {} skipped",
+        created, skipped
+    );
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
 
@@ -1288,6 +1354,9 @@ fn main() -> anyhow::Result<()> {
             }
             cli::PipelineAction::Eject => {
                 pipeline::cmd_eject()?;
+            }
+            cli::PipelineAction::Run { issues, stage } => {
+                cmd_pipeline_run(&issues, &stage)?;
             }
         },
 

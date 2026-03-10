@@ -464,6 +464,58 @@ impl LinearClient {
         Ok((title, description))
     }
 
+    /// Fetch a single issue by identifier (e.g. "RIG-95").
+    /// Returns (uuid, identifier, title, description, labels).
+    pub fn get_issue_by_identifier(
+        &self,
+        identifier: &str,
+    ) -> Result<(String, String, String, String, Vec<String>)> {
+        let config = load_config()?;
+        // Parse "RIG-95" → number 95
+        let number: i64 = identifier
+            .split('-')
+            .last()
+            .and_then(|n| n.parse().ok())
+            .with_context(|| format!("invalid identifier: {identifier}"))?;
+
+        let data = self.query(
+            r#"query($teamId: ID!, $number: Float!) {
+                issues(filter: {
+                    team: { id: { eq: $teamId } },
+                    number: { eq: $number }
+                }) {
+                    nodes {
+                        id identifier title description
+                        labels { nodes { name } }
+                    }
+                }
+            }"#,
+            &json!({"teamId": config.team_id, "number": number}),
+        )?;
+
+        let nodes = data["issues"]["nodes"]
+            .as_array()
+            .context("unexpected response")?;
+        let issue = nodes
+            .first()
+            .with_context(|| format!("issue {identifier} not found"))?;
+
+        let id = issue["id"].as_str().unwrap_or("").to_string();
+        let ident = issue["identifier"].as_str().unwrap_or("").to_string();
+        let title = issue["title"].as_str().unwrap_or("").to_string();
+        let description = issue["description"].as_str().unwrap_or("").to_string();
+        let labels = issue["labels"]["nodes"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|l| l["name"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok((id, ident, title, description, labels))
+    }
+
     /// Get issues filtered by team and status name.
     pub fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<Value>> {
         let config = load_config()?;

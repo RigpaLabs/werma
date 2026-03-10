@@ -294,4 +294,13 @@ pub enum PipelineAction {
     Validate,
     /// Export builtin pipeline config to ~/.werma/pipelines/
     Eject,
+    /// Manually trigger a pipeline stage for Linear issues
+    Run {
+        /// Linear issue identifiers (e.g. RIG-95 RIG-100)
+        issues: Vec<String>,
+
+        /// Pipeline stage to run (default: analyst)
+        #[arg(short, long, default_value = "analyst")]
+        stage: String,
+    },
 }

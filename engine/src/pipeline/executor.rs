@@ -365,6 +365,65 @@ pub fn callback(
     Ok(())
 }
 
+/// Create a pipeline task for an initial stage (no previous output).
+/// Used by `werma pipeline run` to manually trigger a stage.
+pub fn create_initial_stage_task(
+    db: &Db,
+    config: &PipelineConfig,
+    stage_name: &str,
+    linear_issue_id: &str,
+    identifier: &str,
+    title: &str,
+    description: &str,
+    working_dir: &str,
+    estimate: i32,
+) -> Result<String> {
+    let stage_cfg = config
+        .stage(stage_name)
+        .with_context(|| format!("unknown pipeline stage: {stage_name}"))?;
+
+    let task_id = db.next_task_id()?;
+    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+
+    let max_turns = crate::default_turns(&stage_cfg.agent);
+    let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
+
+    let prompt = build_poll_prompt(config, stage_cfg, identifier, title, description);
+
+    let effective_working_dir = if working_dir.is_empty() || working_dir == "~/projects/ar" {
+        infer_working_dir_from_issue(db, linear_issue_id)
+    } else {
+        working_dir.to_string()
+    };
+
+    let task = Task {
+        id: task_id.clone(),
+        status: Status::Pending,
+        priority: 1,
+        created_at: now,
+        started_at: None,
+        finished_at: None,
+        task_type: stage_cfg.agent.clone(),
+        prompt,
+        output_path: String::new(),
+        working_dir: effective_working_dir,
+        model: stage_cfg.model.clone(),
+        max_turns,
+        allowed_tools,
+        session_id: String::new(),
+        linear_issue_id: linear_issue_id.to_string(),
+        linear_pushed: false,
+        pipeline_stage: stage_name.to_string(),
+        depends_on: vec![],
+        context_files: vec![],
+        repo_hash: crate::runtime_repo_hash(),
+        estimate,
+    };
+
+    db.insert_task(&task)?;
+    Ok(task_id)
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 /// Build a comment string for a pipeline callback.
@@ -543,21 +602,21 @@ fn build_handoff_prompt(
 }
 
 /// Parameters for creating the next pipeline stage task.
-struct NextStageParams<'a> {
-    db: &'a Db,
-    config: &'a PipelineConfig,
-    linear: Option<&'a LinearClient>,
-    linear_issue_id: &'a str,
-    next_stage: &'a str,
-    previous_output: &'a str,
-    prev_task_id: &'a str,
-    prev_stage: &'a str,
-    working_dir: &'a str,
-    estimate: i32,
+pub struct NextStageParams<'a> {
+    pub db: &'a Db,
+    pub config: &'a PipelineConfig,
+    pub linear: Option<&'a LinearClient>,
+    pub linear_issue_id: &'a str,
+    pub next_stage: &'a str,
+    pub previous_output: &'a str,
+    pub prev_task_id: &'a str,
+    pub prev_stage: &'a str,
+    pub working_dir: &'a str,
+    pub estimate: i32,
 }
 
 /// Create a task for the next pipeline stage with handoff context.
-fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
+pub fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
     let NextStageParams {
         db,
         config,

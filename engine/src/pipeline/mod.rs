@@ -5,7 +5,7 @@ pub mod prompt;
 pub mod verdict;
 
 // Re-export the public API that daemon.rs and main.rs call.
-pub use executor::{callback, poll};
+pub use executor::{callback, create_initial_stage_task, poll};
 
 // ─── Research pipeline (unchanged from old pipeline.rs) ──────────────────────
 

@@ -25,18 +25,21 @@ stages:
       3. **Cross-link related issues:** find issues that share code areas, dependencies, or context. Add Linear relations (blocks, related)
       4. Clarify requirements and identify ambiguities
       5. **If critical info is missing or requirements are contradictory:** set the issue status to `Blocked` in Linear, add a comment listing specific questions for the human, and output `VERDICT=BLOCKED`
-      6. Write a detailed implementation spec
-      7. Include acceptance criteria
-      8. Identify risks and dependencies
+      6. **If the issue is already implemented** (code exists, PR merged, or task completed): verify it's truly done, then output `VERDICT=ALREADY_DONE`
+      7. Write a detailed implementation spec
+      8. Include acceptance criteria
+      9. Identify risks and dependencies
 
       Save the spec to a markdown file in docs/specs/ if applicable.
 
-      {verdict_instruction}. Example: `VERDICT=DONE` or `VERDICT=BLOCKED`
+      {verdict_instruction}. Example: `VERDICT=DONE`, `VERDICT=BLOCKED`, or `VERDICT=ALREADY_DONE`
     transitions:
       done:
         status: todo
       blocked:
         status: blocked
+      already_done:
+        status: done
 
   engineer:
     linear_status: in_progress
