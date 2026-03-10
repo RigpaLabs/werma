@@ -377,6 +377,12 @@ fn cmd_kill(db: &Db, id: &str) -> Result<()> {
 fn cmd_complete(db: &Db, id: &str, session: Option<&str>, result_file: Option<&str>) -> Result<()> {
     let task = db.task(id)?.context(format!("task not found: {id}"))?;
 
+    // Idempotency: skip if already in terminal state
+    if task.status == Status::Completed || task.status == Status::Failed {
+        println!("{id} already in terminal state, skipping");
+        return Ok(());
+    }
+
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     db.set_task_status(id, Status::Completed)?;
     db.update_task_field(id, "finished_at", &now)?;
@@ -387,9 +393,12 @@ fn cmd_complete(db: &Db, id: &str, session: Option<&str>, result_file: Option<&s
     db.increment_usage(&task.model)?;
 
     // Read result text for pipeline callback
-    let result_text = result_file
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .unwrap_or_default();
+    let result_text = match result_file {
+        Some(path) => std::fs::read_to_string(path)
+            .inspect_err(|e| eprintln!("warn: failed to read result_file {path}: {e}"))
+            .unwrap_or_default(),
+        None => String::new(),
+    };
 
     // Pipeline callback: trigger stage transitions
     if !task.pipeline_stage.is_empty()
@@ -430,6 +439,12 @@ fn cmd_complete(db: &Db, id: &str, session: Option<&str>, result_file: Option<&s
 
 fn cmd_fail(db: &Db, id: &str) -> Result<()> {
     let task = db.task(id)?.context(format!("task not found: {id}"))?;
+
+    // Idempotency: skip if already in terminal state
+    if task.status == Status::Completed || task.status == Status::Failed {
+        println!("{id} already in terminal state, skipping");
+        return Ok(());
+    }
 
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     db.set_task_status(id, Status::Failed)?;
