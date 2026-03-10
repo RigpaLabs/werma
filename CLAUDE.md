@@ -88,6 +88,30 @@ Write tasks (code, full, refactor, pipeline-engineer, pipeline-devops) run in is
 | **Ask first** | Add dependencies, modify CI/CD, architectural changes |
 | **Never** | Force push, delete branches, commit secrets, push to main, merge PRs |
 
+## Versioning (CI-driven, DO NOT do manually)
+
+**Conventional Commits** — CI handles version bumps, CHANGELOG, tags, and GitHub Releases automatically.
+
+```
+feat(scope): description   → minor bump (0.x.0)
+fix(scope): description    → patch bump (0.0.x)
+docs:, refactor:, chore:, test:, ci:  → patch bump
+feat!: or BREAKING CHANGE: → minor bump (pre-1.0)
+```
+
+**PR titles** must use conventional commit format (squash merge uses PR title):
+- `feat(RIG-XX): description` or `fix(RIG-XX): description`
+
+**DO NOT:**
+- Bump version in `Cargo.toml` — CI does it
+- Update `CHANGELOG.md` — CI generates it
+- Create git tags — CI creates them
+- Create GitHub Releases — CI creates them
+
+**Flow:** merge PR → `release.yml` parses commits → bumps version → creates tag `vX.Y.Z` → `build.yml` builds binary → GitHub Release with binary and changelog
+
+**Update binary:** `werma update` (or `cargo build --release` from `engine/`)
+
 ## Conventions
 
 - All communication in English (technical context)
