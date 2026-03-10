@@ -2,6 +2,17 @@
 
 All notable changes to the werma engine are documented here.
 
+## [0.3.0] — 2026-03-10
+
+### Added
+- Adaptive pipeline: light track (< 8 SP) vs heavy track (8+ SP) with dynamic agent turns (RIG-62)
+- `estimate` field on Task model — story points set by analyst agent or Linear sync
+- Migration 003: `estimate` column on tasks table
+- Analyst-driven estimation with SP scale for AI agents
+- Linear API: read/write estimates via GraphQL
+- Pipeline routing: ESTIMATE= parsing from analyst output, adaptive analyst/engineer prompts
+- Analyst gets Linear write permissions for sub-issue creation on heavy track
+
 ## [0.2.0] — 2026-03-10
 
 ### Added
