@@ -365,8 +365,7 @@ pub fn callback(
         }
 
         "engineer" => {
-            // Engineer completed → move to In Review
-            // DON'T create another engineer task (bug fix from bash version)
+            // Engineer completed → move to In Review, create reviewer task
             linear.move_issue_by_name(linear_issue_id, "review")?;
             linear.comment(
                 linear_issue_id,
@@ -374,6 +373,17 @@ pub fn callback(
                     "**Engineer completed** (task: `{}`). Moving to In Review.",
                     task_id
                 ),
+            )?;
+
+            // Create reviewer task for automated code review
+            create_next_stage_task(
+                db,
+                linear_issue_id,
+                "reviewer",
+                result,
+                task_id,
+                stage,
+                working_dir,
             )?;
         }
 
