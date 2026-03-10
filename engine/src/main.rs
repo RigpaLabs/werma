@@ -113,6 +113,13 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Current working directory as a String (fallback for `--dir`).
+fn default_working_dir() -> String {
+    std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| ".".to_string())
+}
+
 /// Expand ~ to home directory.
 fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/")
@@ -131,7 +138,7 @@ struct AddParams {
     task_type: String,
     model: String,
     tools: Option<String>,
-    dir: String,
+    dir: Option<String>,
     turns: Option<i32>,
     depends: Option<String>,
     context: Option<String>,
@@ -146,7 +153,7 @@ fn cmd_add(db: &Db, p: AddParams) -> Result<()> {
     let allowed_tools = p
         .tools
         .unwrap_or_else(|| runner::tools_for_type(&p.task_type, has_output));
-    let working_dir = expand_tilde(&p.dir);
+    let working_dir = expand_tilde(&p.dir.unwrap_or_else(default_working_dir));
     let output_path = p.output.map(|o| expand_tilde(&o)).unwrap_or_default();
     let depends_on: Vec<String> = p
         .depends
@@ -652,12 +659,12 @@ struct SchedAddParams {
     model: String,
     output: Option<String>,
     context: Option<String>,
-    dir: String,
+    dir: Option<String>,
     turns: Option<i32>,
 }
 
 fn cmd_sched_add(db: &Db, p: SchedAddParams) -> Result<()> {
-    let working_dir = expand_tilde(&p.dir);
+    let working_dir = expand_tilde(&p.dir.unwrap_or_else(default_working_dir));
     let output_path = p.output.map(|o| expand_tilde(&o)).unwrap_or_default();
     let max_turns = p.turns.unwrap_or(0);
     let context_files: Vec<String> = p
@@ -766,7 +773,7 @@ fn cmd_sched_trigger(db: &Db, id: &str) -> Result<()> {
             task_type: sched.schedule_type,
             model: sched.model,
             tools: None,
-            dir: sched.working_dir,
+            dir: Some(sched.working_dir),
             turns,
             depends: None,
             context,
@@ -819,9 +826,7 @@ fn cmd_review(
 ) -> Result<()> {
     let working_dir = match dir {
         Some(d) => expand_tilde(d),
-        None => std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "~/projects/ar".to_string()),
+        None => default_working_dir(),
     };
 
     let (pr_number, label) = match target {

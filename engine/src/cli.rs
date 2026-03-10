@@ -34,9 +34,9 @@ pub enum Commands {
         #[arg(long)]
         tools: Option<String>,
 
-        /// Working directory
-        #[arg(short, long, default_value = "~/projects/ar")]
-        dir: String,
+        /// Working directory (defaults to current directory)
+        #[arg(short, long)]
+        dir: Option<String>,
 
         /// Max turns (auto by type if not specified)
         #[arg(long)]
@@ -214,9 +214,9 @@ pub enum SchedAction {
         #[arg(long)]
         context: Option<String>,
 
-        /// Working directory
-        #[arg(short, long, default_value = "~/projects/ar")]
-        dir: String,
+        /// Working directory (defaults to current directory)
+        #[arg(short, long)]
+        dir: Option<String>,
 
         /// Max turns
         #[arg(long)]
