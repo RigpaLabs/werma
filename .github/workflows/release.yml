@@ -16,6 +16,7 @@ env:
 jobs:
   version:
     name: Auto-version & Tag
+    if: "!startsWith(github.event.head_commit.message, 'chore: bump version')"
     runs-on: ubuntu-latest
     outputs:
       new_version: ${{ steps.bump.outputs.new_version }}
@@ -38,14 +39,6 @@ jobs:
       - name: Parse commits & determine bump
         id: bump
         run: |
-          # Skip if this is a version bump commit (prevent re-trigger loop)
-          HEAD_MSG=$(git log -1 --pretty=format:"%s")
-          if [[ "$HEAD_MSG" == "chore: bump version"* ]]; then
-            echo "Version bump commit detected, skipping"
-            echo "skipped=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
           LATEST_TAG="${{ steps.latest_tag.outputs.tag }}"
           echo "Analyzing commits since $LATEST_TAG..."
 
@@ -153,30 +146,34 @@ jobs:
             echo 'CHANGELOG_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - name: Bump Cargo.toml, commit, tag, and push
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.bump.outputs.skipped != 'true'
+
+      - name: Bump Cargo.toml, tag & push
         if: steps.bump.outputs.skipped != 'true'
         run: |
           NEW_VERSION="${{ steps.bump.outputs.new_version }}"
           TAG="${{ steps.bump.outputs.tag }}"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
 
-          # Update version in Cargo.toml
-          sed -i "s/^version = .*/version = \"$NEW_VERSION\"/" engine/Cargo.toml
+          # 1. Bump version in Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"${NEW_VERSION}\"/" engine/Cargo.toml
 
-          # Regenerate Cargo.lock with the new version
+          # 2. Update Cargo.lock
           cd engine && cargo generate-lockfile && cd ..
 
+          # 3. Commit the bump
           git add engine/Cargo.toml engine/Cargo.lock
-          git commit -m "chore: bump version to $TAG"
+          git commit -m "chore: bump version to v${NEW_VERSION}"
 
-          # Tag points to the bump commit (correct ordering)
+          # 4. Tag the bump commit (tag points to correct version)
           git tag "$TAG"
 
-          # Push commit and tag atomically
-          git push origin main --tags
-          echo "Pushed bump commit and tag: $TAG"
+          # 5. Push commit + specific tag
+          git push origin main "$TAG"
+          echo "Bumped to ${NEW_VERSION}, tagged ${TAG}, pushed"
 
       - name: Extract Linear issue references
         if: steps.bump.outputs.skipped != 'true'

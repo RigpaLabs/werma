@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 
 const GITHUB_REPO: &str = "RigpaLabs/werma";
 
-/// Read GitHub token from env vars or fall back to `gh auth token`.
+/// Read GitHub token from GITHUB_TOKEN, GH_TOKEN, or `gh auth token` fallback.
 fn github_token() -> Result<String> {
     if let Ok(token) = std::env::var("GITHUB_TOKEN") {
         return Ok(token);
@@ -51,13 +51,13 @@ fn latest_release(token: &str) -> Result<ReleaseInfo> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("werma-updater")
         .build()
-        .with_context(|| "failed to build HTTP client")?;
+        .context("failed to build HTTP client")?;
 
     let resp = client
         .get(&url)
         .header("Authorization", format!("Bearer {token}"))
         .send()
-        .with_context(|| "failed to fetch latest release")?;
+        .context("failed to fetch latest release")?;
 
     if !resp.status().is_success() {
         bail!(
@@ -67,13 +67,11 @@ fn latest_release(token: &str) -> Result<ReleaseInfo> {
         );
     }
 
-    let json: serde_json::Value = resp
-        .json()
-        .with_context(|| "failed to parse release JSON")?;
+    let json: serde_json::Value = resp.json().context("failed to parse release JSON")?;
 
     let tag = json["tag_name"]
         .as_str()
-        .with_context(|| "no tag_name in release")?
+        .context("no tag_name in release")?
         .to_string();
 
     let target = current_target();
@@ -131,7 +129,7 @@ pub fn update() -> Result<()> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("werma-updater")
         .build()
-        .with_context(|| "failed to build HTTP client")?;
+        .context("failed to build HTTP client")?;
 
     let resp = client
         .get(&download_url)
@@ -144,10 +142,10 @@ pub fn update() -> Result<()> {
         bail!("download failed ({}): {download_url}", resp.status());
     }
 
-    let bytes = resp.bytes().with_context(|| "failed to read download")?;
+    let bytes = resp.bytes().context("failed to read download")?;
 
     // Extract tar.gz to temp dir
-    let tmp_dir = tempfile::tempdir().with_context(|| "failed to create temp dir")?;
+    let tmp_dir = tempfile::tempdir().context("failed to create temp dir")?;
     let archive_path = tmp_dir.path().join(format!("{artifact_name}.tar.gz"));
     std::fs::write(&archive_path, &bytes)?;
 
@@ -155,7 +153,7 @@ pub fn update() -> Result<()> {
         .args(["xzf", &archive_path.to_string_lossy()])
         .current_dir(tmp_dir.path())
         .status()
-        .with_context(|| "failed to extract archive")?;
+        .context("failed to extract archive")?;
 
     if !status.success() {
         bail!("tar extraction failed");
@@ -168,7 +166,7 @@ pub fn update() -> Result<()> {
 
     // Find current binary location
     let current_exe =
-        std::env::current_exe().with_context(|| "cannot determine current executable path")?;
+        std::env::current_exe().context("cannot determine current executable path")?;
     let current_exe = current_exe.canonicalize().unwrap_or(current_exe);
 
     println!("replacing {}...", current_exe.display());
@@ -179,8 +177,7 @@ pub fn update() -> Result<()> {
     // Remove stale backup if exists
     let _ = std::fs::remove_file(&backup_path);
 
-    std::fs::rename(&current_exe, &backup_path)
-        .with_context(|| "failed to backup current binary")?;
+    std::fs::rename(&current_exe, &backup_path).context("failed to backup current binary")?;
 
     match std::fs::copy(&new_binary, &current_exe) {
         Ok(_) => {
