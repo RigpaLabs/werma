@@ -14,7 +14,6 @@ use crate::{linear, pipeline, runner};
 
 const TICK_INTERVAL_SECS: u64 = 5;
 const PIPELINE_POLL_INTERVAL_SECS: u64 = 30;
-const ORCHESTRATOR_INTERVAL_SECS: u64 = 900;
 const MERGE_CHECK_INTERVAL_SECS: u64 = 60;
 const MAX_CONCURRENT_AGENTS: usize = 3;
 const DEFAULT_STUCK_TIMEOUT_MINS: i64 = 30;
@@ -45,8 +44,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
         );
     }
 
-    // Trigger orchestrator and pipeline poll immediately on first tick.
-    let mut last_orchestrator = Instant::now() - Duration::from_secs(ORCHESTRATOR_INTERVAL_SECS);
+    // Trigger pipeline poll immediately on first tick.
     let mut last_pipeline_poll = Instant::now() - Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS);
     let mut last_merge_check = Instant::now() - Duration::from_secs(MERGE_CHECK_INTERVAL_SECS);
 
@@ -91,12 +89,6 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 last_merge_check = Instant::now();
             }
 
-            if last_orchestrator.elapsed() >= Duration::from_secs(ORCHESTRATOR_INTERVAL_SECS) {
-                if let Err(e) = run_orchestrator(&db, werma_dir) {
-                    log_daemon(&log_path, &format!("orchestrator error: {e}"));
-                }
-                last_orchestrator = Instant::now();
-            }
         }
 
         let elapsed = tick_start.elapsed();
@@ -503,67 +495,6 @@ fn count_werma_sessions() -> usize {
         }
         Err(_) => 0,
     }
-}
-
-/// Run orchestrator agent if its character.md exists and it's not already running.
-fn run_orchestrator(_db: &Db, werma_dir: &Path) -> Result<()> {
-    // Look for the orchestrator agent directory.
-    let orchestrator_dir = werma_dir
-        .parent()
-        .context("no parent for werma_dir")?
-        .parent()
-        .context("no grandparent")?
-        .join("werma/agents/orchestrator");
-
-    let character_file = orchestrator_dir.join("character.md");
-    if !character_file.exists() {
-        return Ok(()); // No orchestrator configured — skip silently.
-    }
-
-    // Check if an orchestrator task is already running.
-    let running = _db.list_tasks(Some(crate::models::Status::Running))?;
-    let already_running = running.iter().any(|t| t.task_type == "orchestrator");
-    if already_running {
-        return Ok(());
-    }
-
-    // Also check pending orchestrator tasks.
-    let pending = _db.list_tasks(Some(crate::models::Status::Pending))?;
-    let already_pending = pending.iter().any(|t| t.task_type == "orchestrator");
-    if already_pending {
-        return Ok(());
-    }
-
-    let task_id = _db.next_task_id()?;
-    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-
-    let task = crate::models::Task {
-        id: task_id,
-        status: crate::models::Status::Pending,
-        priority: 3, // Low priority.
-        created_at: now,
-        started_at: None,
-        finished_at: None,
-        task_type: "orchestrator".to_string(),
-        prompt: "Run orchestrator health check and planning cycle. Read your character.md and memory.md first.".to_string(),
-        output_path: String::new(),
-        working_dir: orchestrator_dir.to_string_lossy().to_string(),
-        model: "sonnet".to_string(),
-        max_turns: 10,
-        allowed_tools: "Read,Grep,Glob,Write".to_string(),
-        session_id: String::new(),
-        linear_issue_id: String::new(),
-        linear_pushed: false,
-        pipeline_stage: String::new(),
-        depends_on: vec![],
-        context_files: vec![character_file.to_string_lossy().to_string()],
-        repo_hash: crate::runtime_repo_hash(),
-        estimate: 0,
-    };
-
-    _db.insert_task(&task)?;
-
-    Ok(())
 }
 
 /// Rotate log files larger than MAX_LOG_SIZE_BYTES.
