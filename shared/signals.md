@@ -19,6 +19,47 @@
 
 ## Active Signals
 
+**2026-03-11 02:03 WATCHDOG CRITICAL — PERP FEED OFFLINE 41+ HOURS, NO PROGRESS, AWAITING ROLLBACK** — fathom 5/5 healthy (sui-liq 2d, sui-arb 2d, fathom 11h, hyper-arb 3d, hyper-liq 3d); ht-deploy SSH timeout (connectivity issue, unable to verify). **PERP feed inoperable 41+ hours. Same code regression v20260307-2f0aafb. Continuous snapshot parse failures on all 6 symbols (BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT, DOGEUSDT, BNBUSDT). No forward progress since 2026-03-11 08:30 restart.**
+
+**Evidence (logs 2026-03-11 02:03:47–02:03:50 UTC):**
+- Pattern identical to previous state: reconnect → WS connects → snapshot parse fails for 5 symbols → ETH occasionally succeeds → gap → reconnect
+- Exponential backoff ~1000-1100ms (working as designed)
+- Reconnect cycle repeating every 1-2 seconds (1000+ failures/min)
+- No status.json being written (health unmonitored)
+
+**Root cause:** Code regression in v20260307-2f0aafb (SnapshotRest struct likely incompatible with Binance response format). IP ban confirmed lifted (2026-03-10).
+
+**Blocker:** No rollback decision. Code fix requires human action — compare v20260307-2f0aafb vs v20260307-75bd0a6 snapshot parsing logic.
+
+**Impact:** ar-quant-alpha, hyper-liq, hyper-arb CANNOT execute PERP trades. Missing data gap 41+ hours. System degraded.
+
+**Secondary concern:** ht-deploy SSH timeout — unable to verify ar-quant-alpha status. May indicate connectivity/load issue on HT VPS.
+
+**Status:** CRITICAL, unresolved, blocker on human decision.
+
+---
+
+**2026-03-11 01:01 WATCHDOG ALERT — PERP FEED OFFLINE (17+ HOURS, ROLLBACK PENDING)** — All containers healthy: fathom 5/5 (sui-liq 2d, sui-arb 2d, fathom 10h, hyper-arb 3d, hyper-liq 3d); ht-deploy 2/2 (ar-quant-alpha 2w, ht-tg-bot 6w). **PERP feed inoperable. Continuous snapshot parse failures + reconnect loop (1200ms backoff).**
+
+**Evidence (logs 2026-03-11 01:01:07–01:01:11 UTC):**
+- All 6 symbols: "error decoding response body" on snapshot REST fetch
+- Rotating pattern: occasional "snapshot ok" (XRPUSDT, DOGEUSDT) followed by immediate gap-triggered disconnect
+- WS stream connects successfully (fstream.binance.com reachable) but snapshot bootstrap fails
+- Reconnect loop every ~1.2 seconds (exponential backoff 1000-1250ms)
+- No status.json being written (health unmonitored)
+
+**Root cause:** Code regression in v20260307-2f0aafb (likely SnapshotRest struct schema mismatch with Binance response).
+
+**Recommended action (PENDING DECISION):**
+- **Immediate:** Roll back fathom to v20260307-75bd0a6 (last known working)
+- **Then:** Compare snapshot parsing code between v20260307-2f0aafb vs v20260307-75bd0a6 to identify schema mismatch
+
+**Impact:** ar-quant-alpha, hyper-liq, hyper-arb cannot execute PERP trades. Data gap 54+ hours.
+
+**Status:** CRITICAL, unresolved. Awaiting rollback decision.
+
+---
+
 **2026-03-11 08:30 WATCHDOG ALERT — PERP FEED STILL OFFLINE (ROLLBACK REQUIRED)** — All containers healthy: fathom 5/5 (sui-liq 2d, sui-arb 2d, **fathom 10h** [restarted], hyper-arb 3d, hyper-liq 3d); ht-deploy 2/2 (ar-quant-alpha 2w, ht-tg-bot 6w). **PERP feed still inoperable after 10h restart. Code regression v20260307-2f0aafb persists.**
 
 **Evidence:**
