@@ -86,7 +86,6 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 }
                 last_merge_check = Instant::now();
             }
-
         }
 
         let elapsed = tick_start.elapsed();
