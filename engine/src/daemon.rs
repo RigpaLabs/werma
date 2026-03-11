@@ -14,10 +14,8 @@ use crate::{linear, pipeline, runner};
 
 const TICK_INTERVAL_SECS: u64 = 5;
 const PIPELINE_POLL_INTERVAL_SECS: u64 = 30;
-const ORCHESTRATOR_INTERVAL_SECS: u64 = 900;
 const MERGE_CHECK_INTERVAL_SECS: u64 = 60;
 const MAX_CONCURRENT_AGENTS: usize = 3;
-const DEFAULT_STUCK_TIMEOUT_MINS: i64 = 30;
 const MAX_LOG_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 
 /// Run the daemon loop. Blocks forever (or until killed).
@@ -45,8 +43,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
         );
     }
 
-    // Trigger orchestrator and pipeline poll immediately on first tick.
-    let mut last_orchestrator = Instant::now() - Duration::from_secs(ORCHESTRATOR_INTERVAL_SECS);
+    // Trigger pipeline poll immediately on first tick.
     let mut last_pipeline_poll = Instant::now() - Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS);
     let mut last_merge_check = Instant::now() - Duration::from_secs(MERGE_CHECK_INTERVAL_SECS);
 
@@ -59,9 +56,8 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 log_daemon(&log_path, &format!("schedule check error: {e}"));
             }
 
-            if let Err(e) = check_stuck_tasks(&db, werma_dir) {
-                log_daemon(&log_path, &format!("stuck detection error: {e}"));
-            }
+            // check_stuck_tasks disabled (RIG-98): dumb timeout kills healthy long-running agents.
+            // Re-enable with activity-based detection (RIG-109).
 
             if let Err(e) = process_completed_pipeline_tasks(&db, werma_dir) {
                 log_daemon(&log_path, &format!("pipeline callback error: {e}"));
@@ -89,13 +85,6 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                     log_daemon(&log_path, &format!("merge check error: {e}"));
                 }
                 last_merge_check = Instant::now();
-            }
-
-            if last_orchestrator.elapsed() >= Duration::from_secs(ORCHESTRATOR_INTERVAL_SECS) {
-                if let Err(e) = run_orchestrator(&db, werma_dir) {
-                    log_daemon(&log_path, &format!("orchestrator error: {e}"));
-                }
-                last_orchestrator = Instant::now();
             }
         }
 
@@ -219,68 +208,6 @@ fn check_schedules(db: &Db, werma_dir: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Detect tasks stuck in 'running' beyond the timeout and mark them failed.
-fn check_stuck_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
-    let log_path = werma_dir.join("logs/daemon.log");
-    let running = db.list_tasks(Some(crate::models::Status::Running))?;
-    let now = Local::now();
-    let timeout_mins = load_timeout_mins(werma_dir);
-
-    for task in &running {
-        let started = match &task.started_at {
-            Some(s) if !s.is_empty() => s,
-            _ => continue,
-        };
-
-        let started_dt = match chrono::NaiveDateTime::parse_from_str(started, "%Y-%m-%dT%H:%M:%S") {
-            Ok(dt) => dt,
-            Err(_) => continue,
-        };
-
-        let started_local = match started_dt.and_local_timezone(Local).single() {
-            Some(dt) => dt,
-            None => continue,
-        };
-
-        let elapsed_mins = now.signed_duration_since(started_local).num_minutes();
-        if elapsed_mins < timeout_mins {
-            continue;
-        }
-
-        // Kill tmux session
-        let session_name = format!("werma-{}", task.id);
-        let _ = std::process::Command::new("tmux")
-            .args(["kill-session", "-t", &session_name])
-            .output();
-
-        db.set_task_status(&task.id, crate::models::Status::Failed)?;
-        let finished_at = now.format("%Y-%m-%dT%H:%M:%S").to_string();
-        db.update_task_field(&task.id, "finished_at", &finished_at)?;
-
-        log_daemon(
-            &log_path,
-            &format!(
-                "stuck: {} running for {}m (timeout={}m) -> failed",
-                task.id, elapsed_mins, timeout_mins
-            ),
-        );
-    }
-
-    Ok(())
-}
-
-/// Load timeout from limits.json if it exists, otherwise use default.
-fn load_timeout_mins(werma_dir: &Path) -> i64 {
-    let limits_path = werma_dir.join("limits.json");
-    if let Ok(data) = std::fs::read_to_string(limits_path)
-        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&data)
-        && let Some(timeout) = json["timeout_minutes"].as_i64()
-    {
-        return timeout;
-    }
-    DEFAULT_STUCK_TIMEOUT_MINS
 }
 
 /// Process completed tasks that have Linear integration but haven't been pushed yet.
@@ -503,67 +430,6 @@ fn count_werma_sessions() -> usize {
         }
         Err(_) => 0,
     }
-}
-
-/// Run orchestrator agent if its character.md exists and it's not already running.
-fn run_orchestrator(_db: &Db, werma_dir: &Path) -> Result<()> {
-    // Look for the orchestrator agent directory.
-    let orchestrator_dir = werma_dir
-        .parent()
-        .context("no parent for werma_dir")?
-        .parent()
-        .context("no grandparent")?
-        .join("werma/agents/orchestrator");
-
-    let character_file = orchestrator_dir.join("character.md");
-    if !character_file.exists() {
-        return Ok(()); // No orchestrator configured — skip silently.
-    }
-
-    // Check if an orchestrator task is already running.
-    let running = _db.list_tasks(Some(crate::models::Status::Running))?;
-    let already_running = running.iter().any(|t| t.task_type == "orchestrator");
-    if already_running {
-        return Ok(());
-    }
-
-    // Also check pending orchestrator tasks.
-    let pending = _db.list_tasks(Some(crate::models::Status::Pending))?;
-    let already_pending = pending.iter().any(|t| t.task_type == "orchestrator");
-    if already_pending {
-        return Ok(());
-    }
-
-    let task_id = _db.next_task_id()?;
-    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-
-    let task = crate::models::Task {
-        id: task_id,
-        status: crate::models::Status::Pending,
-        priority: 3, // Low priority.
-        created_at: now,
-        started_at: None,
-        finished_at: None,
-        task_type: "orchestrator".to_string(),
-        prompt: "Run orchestrator health check and planning cycle. Read your character.md and memory.md first.".to_string(),
-        output_path: String::new(),
-        working_dir: orchestrator_dir.to_string_lossy().to_string(),
-        model: "sonnet".to_string(),
-        max_turns: 10,
-        allowed_tools: "Read,Grep,Glob,Write".to_string(),
-        session_id: String::new(),
-        linear_issue_id: String::new(),
-        linear_pushed: false,
-        pipeline_stage: String::new(),
-        depends_on: vec![],
-        context_files: vec![character_file.to_string_lossy().to_string()],
-        repo_hash: crate::runtime_repo_hash(),
-        estimate: 0,
-    };
-
-    _db.insert_task(&task)?;
-
-    Ok(())
 }
 
 /// Rotate log files larger than MAX_LOG_SIZE_BYTES.
@@ -840,44 +706,6 @@ mod tests {
             next > now,
             "next {next} should be > now {now} (no match in window)"
         );
-    }
-
-    #[test]
-    fn stuck_detection_logic() {
-        // Verify the time math for stuck detection.
-        use chrono::TimeZone;
-
-        let started_str = "2026-03-09T07:00:00";
-        let started_dt =
-            chrono::NaiveDateTime::parse_from_str(started_str, "%Y-%m-%dT%H:%M:%S").unwrap();
-        let started_local = started_dt.and_local_timezone(Local).single().unwrap();
-
-        // 45 minutes later — should be stuck with 30min timeout.
-        let now = Local.with_ymd_and_hms(2026, 3, 9, 7, 45, 0).unwrap();
-        let elapsed = now.signed_duration_since(started_local).num_minutes();
-        assert_eq!(elapsed, 45);
-        assert!(elapsed >= DEFAULT_STUCK_TIMEOUT_MINS);
-
-        // 20 minutes later — should NOT be stuck.
-        let now_early = Local.with_ymd_and_hms(2026, 3, 9, 7, 20, 0).unwrap();
-        let elapsed_early = now_early.signed_duration_since(started_local).num_minutes();
-        assert_eq!(elapsed_early, 20);
-        assert!(elapsed_early < DEFAULT_STUCK_TIMEOUT_MINS);
-    }
-
-    #[test]
-    fn load_timeout_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let timeout = load_timeout_mins(dir.path());
-        assert_eq!(timeout, DEFAULT_STUCK_TIMEOUT_MINS);
-    }
-
-    #[test]
-    fn load_timeout_from_limits_json() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("limits.json"), r#"{"timeout_minutes": 60}"#).unwrap();
-        let timeout = load_timeout_mins(dir.path());
-        assert_eq!(timeout, 60);
     }
 
     #[test]

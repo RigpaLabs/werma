@@ -442,7 +442,7 @@ impl LinearClient {
     pub fn comment(&self, issue_id: &str, body: &str) -> Result<()> {
         let uuid = self.resolve_to_uuid(issue_id)?;
         self.query(
-            r#"mutation($issueId: ID!, $body: String!) {
+            r#"mutation($issueId: String!, $body: String!) {
                 commentCreate(input: { issueId: $issueId, body: $body }) { success }
             }"#,
             &json!({"issueId": uuid, "body": body}),
