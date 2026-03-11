@@ -372,7 +372,6 @@ pub fn create_initial_stage_task(
     db: &Db,
     config: &PipelineConfig,
     stage_name: &str,
-    _linear_issue_id: &str,
     identifier: &str,
     title: &str,
     description: &str,

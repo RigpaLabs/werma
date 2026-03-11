@@ -1100,7 +1100,7 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
 
     for identifier in identifiers {
         // Fetch issue from Linear
-        let (issue_id, ident, title, description, labels) =
+        let (_issue_id, ident, title, description, labels) =
             match linear.get_issue_by_identifier(identifier) {
                 Ok(data) => data,
                 Err(e) => {
@@ -1143,7 +1143,6 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
             &db,
             &config,
             stage,
-            &issue_id,
             &ident,
             &title,
             &description,

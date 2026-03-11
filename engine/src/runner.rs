@@ -480,8 +480,9 @@ mod tests {
         assert!(engineer.contains("linear"));
 
         let reviewer = tools_for_type("pipeline-reviewer", false);
-        assert!(reviewer.contains("linear"));
+        assert!(reviewer.contains("Read"));
         assert!(!reviewer.contains("Edit"));
+        assert!(!reviewer.contains("linear"));
     }
 
     #[test]
