@@ -41,7 +41,7 @@ pub fn tools_for_type(task_type: &str, has_output: bool) -> String {
             format!("Read,Edit,Write,Bash,Glob,Grep,{LINEAR_READ},{LINEAR_COMMENT}")
         }
         "pipeline-reviewer" | "pipeline-qa" | "pipeline-devops" => {
-            format!("Read,Glob,Grep,Bash,{LINEAR_READ},{LINEAR_COMMENT}")
+            "Read,Glob,Grep,Bash".to_string()
         }
         _ => "Read,Grep,Glob,WebSearch,WebFetch".to_string(),
     };

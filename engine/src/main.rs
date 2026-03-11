@@ -1111,7 +1111,7 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
             };
 
         // Skip if active task already exists for this issue + stage
-        let existing = db.tasks_by_linear_issue(&issue_id, Some(stage), true)?;
+        let existing = db.tasks_by_linear_issue(&ident, Some(stage), true)?;
         if !existing.is_empty() {
             let active_id = &existing[0].id;
             eprintln!(
