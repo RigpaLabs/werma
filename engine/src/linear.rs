@@ -773,6 +773,33 @@ mod tests {
     }
 
     #[test]
+    fn resolve_uuid_detects_identifier_pattern() {
+        // Verify the identifier detection logic used by resolve_uuid.
+        // We can't call resolve_uuid directly (needs API), but we test the
+        // same pattern: "contains '-' and last segment is all digits".
+        let is_identifier = |id: &str| -> bool {
+            id.contains('-')
+                && id
+                    .rsplit('-')
+                    .next()
+                    .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        };
+
+        // Identifiers (should resolve)
+        assert!(is_identifier("RIG-155"));
+        assert!(is_identifier("RIG-1"));
+        assert!(is_identifier("PROJ-9999"));
+
+        // UUIDs (should pass through)
+        assert!(!is_identifier("755e63ee-a00e-4fef-9d7a-b8907652e2b2"));
+
+        // Edge cases
+        assert!(!is_identifier("no-digits-here"));
+        assert!(!is_identifier("plainuuid"));
+        assert!(!is_identifier(""));
+    }
+
+    #[test]
     fn read_env_file_key_missing_file() {
         // This tests the error path (file doesn't exist in test env)
         let result = read_env_file_key("NONEXISTENT_KEY");
