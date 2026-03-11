@@ -41,7 +41,7 @@ pub fn tools_for_type(task_type: &str, has_output: bool) -> String {
             format!("Read,Edit,Write,Bash,Glob,Grep,{LINEAR_READ},{LINEAR_COMMENT}")
         }
         "pipeline-reviewer" | "pipeline-qa" | "pipeline-devops" => {
-            "Read,Glob,Grep,Bash".to_string()
+            format!("Read,Glob,Grep,Bash,{LINEAR_READ},{LINEAR_COMMENT}")
         }
         _ => "Read,Grep,Glob,WebSearch,WebFetch".to_string(),
     };
@@ -115,6 +115,26 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
                     "\n--- Dependency output: {dep_id} ---\n{limited}\n--- End dependency ---\n"
                 ));
                 dep_count += 1;
+            }
+        }
+    }
+
+    // Auto-inject Linear issue description for non-pipeline tasks
+    if !task.linear_issue_id.is_empty()
+        && task.pipeline_stage.is_empty()
+        && let Ok(client) = crate::linear::LinearClient::new()
+    {
+        match client.get_issue_by_identifier(&task.linear_issue_id) {
+            Ok((_uuid, identifier, title, description, _labels)) => {
+                prompt.push_str(&format!(
+                    "\n## Linear Issue: {identifier} — {title}\n\n{description}\n\n"
+                ));
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: could not fetch Linear issue {}: {e}",
+                    task.linear_issue_id
+                );
             }
         }
     }
@@ -480,9 +500,8 @@ mod tests {
         assert!(engineer.contains("linear"));
 
         let reviewer = tools_for_type("pipeline-reviewer", false);
-        assert!(reviewer.contains("Read"));
+        assert!(reviewer.contains("linear"));
         assert!(!reviewer.contains("Edit"));
-        assert!(!reviewer.contains("linear"));
     }
 
     #[test]
