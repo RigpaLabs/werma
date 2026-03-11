@@ -7,6 +7,7 @@ use crate::models::{DailyUsage, Schedule, Status, Task};
 const MIGRATION_SQL: &str = include_str!("../migrations/001_init.sql");
 const MIGRATION_002_SQL: &str = include_str!("../migrations/002_repo_hash.sql");
 const MIGRATION_003_SQL: &str = include_str!("../migrations/003_estimate.sql");
+const MIGRATION_004_SQL: &str = include_str!("../migrations/004_normalize_linear_ids.sql");
 
 pub struct Db {
     conn: Connection,
@@ -54,6 +55,10 @@ impl Db {
                 return Err(e).context("migration 003_estimate");
             }
         }
+        // 004: normalize linear_issue_id from UUIDs to identifiers (idempotent)
+        self.conn
+            .execute_batch(MIGRATION_004_SQL)
+            .context("migration 004_normalize_linear_ids")?;
         Ok(())
     }
 
