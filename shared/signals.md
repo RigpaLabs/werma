@@ -19,6 +19,10 @@
 
 ## Active Signals
 
+**2026-03-11 07:01 WATCHDOG MONITORING — CRITICAL STATE PERSISTS, IP BAN ACTIVE (8h 13m REMAINING)** — Containers healthy. fathom: 5/5 running (fathom 35m since restart); ht-deploy: 2/2 running. **Status: Unchanged from 06:31 alert. PERP feed: all 6 symbols failing snapshot parse ("error decoding response body"). IP ban confirmed active (Binance HTTP 403 blocking REST requests). All feeds writing 0-byte files.** Timeline: Ban expires 2026-03-11 15:14:53 UTC. **Awaiting decision: A) Wait ~8h for auto-heal, or B) Rotate IP now.**
+
+---
+
 **2026-03-11 06:31 WATCHDOG CRITICAL — ALL FEEDS NON-FUNCTIONAL (0-BYTE FILES), IP BAN PERSISTING (EXPIRES 15:14 UTC)** — Container status: fathom 5/5 running (sui-liq 3d, sui-arb 3d, **fathom 5m** [restarted 06:26 UTC], hyper-arb 3d, hyper-liq 3d); ht-deploy 2/2 running (ar-quant-alpha 2w, ht-tg-bot 6w). **CRITICAL: ALL feeds creating 0-byte files. Data collection completely broken across all 4 feed types. PERP IP banned until 2026-03-11 15:14 UTC (9+ hours remaining). SPOT/dYdX/HyperLiquid also non-functional (empty parquet files). Memory RECOVERED to 130.3MiB / 512MiB (healthy). Container restart at 06:26 UTC did NOT fix underlying issue.**
 
 **Evidence (health check 2026-03-11 06:31 UTC):**
