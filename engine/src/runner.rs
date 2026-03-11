@@ -131,9 +131,7 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
                         "\n## Linear Issue: {identifier} — {title}\n\n{description}\n\n"
                     ));
                 } else {
-                    prompt.push_str(&format!(
-                        "\n## Linear Issue: {identifier} — {title}\n\n"
-                    ));
+                    prompt.push_str(&format!("\n## Linear Issue: {identifier} — {title}\n\n"));
                 }
             }
             Err(e) => {
