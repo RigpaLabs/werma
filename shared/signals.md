@@ -19,7 +19,47 @@
 
 ## Active Signals
 
-**2026-03-11 02:03 WATCHDOG CRITICAL — PERP FEED OFFLINE 41+ HOURS, NO PROGRESS, AWAITING ROLLBACK** — fathom 5/5 healthy (sui-liq 2d, sui-arb 2d, fathom 11h, hyper-arb 3d, hyper-liq 3d); ht-deploy SSH timeout (connectivity issue, unable to verify). **PERP feed inoperable 41+ hours. Same code regression v20260307-2f0aafb. Continuous snapshot parse failures on all 6 symbols (BTCUSDT, ETHUSDT, SOLUSDT, XRPUSDT, DOGEUSDT, BNBUSDT). No forward progress since 2026-03-11 08:30 restart.**
+**2026-03-11 04:01 WATCHDOG ALERT — PERP FEED STILL DOWN (54+ HOURS), ROOT CAUSE UNCLEAR** — Container status: fathom 5/5 running (sui-liq 2d, sui-arb 2d, fathom 1h, hyper-arb 3d, hyper-liq 3d); ht-deploy 2/2 running. **PERP feed inoperable: all 6 symbols fail snapshot parsing with "error decoding response body". Zero PERP raw files written. SPOT/HL/dYdX feeds operational (last data: 2026-03-11 02:33 UTC, ~1.5h stale but streaming). Issue persists despite rollback — suggests either Binance API schema change or IP ban still partially active. Code regression hypothesis unsupported (issue spans multiple versions).**
+
+**Evidence (live logs 2026-03-11 04:01:18–04:01:22 UTC):**
+- All 6 symbols: continuous "snapshot parse failed — error decoding response body"
+- WS stream connects successfully, but snapshot bootstrap fails on 4-5/6 symbols (BTC, SOL, XRP, DOGE, BNB; ETH occasionally parses)
+- Reconnect cycle every ~1-2 seconds (exponential backoff 1086-1221ms)
+- SPOT/HL/dYdX data directory exists with files (2026-03-11 02:33 UTC) — these feeds working
+- binance_perp directory does not exist — PERP never bootstrapped after restart
+- No status.json being written (health unmonitored)
+
+**Root cause (HYPOTHESIS):** Either:
+1. **Binance API response format changed** on 2026-03-09 08:04 UTC (affects all code versions at/after this date)
+2. **IP ban still partially active** — WS connects but snapshot REST endpoint returns malformed response
+3. **SnapshotRest struct incompatibility** — parser unable to deserialize current Binance response regardless of code version
+
+Previous theory (simple code regression) **disproven** — rollback to v20260307-75bd0a6 did NOT fix issue.
+
+**Impact:** ar-quant-alpha, hyper-liq, hyper-arb cannot execute PERP trades. Data gap 54+ hours. SPOT/HL/dYdX operational but PERP-dependent strategies blocked.
+
+**Blocker:** Requires either (1) Binance support investigation (API changes), or (2) manual snapshot response inspection + struct comparison. Rollback strategy insufficient.
+
+**Status:** CRITICAL, unresolved. Escalate to human: request Binance snapshot endpoint response dump for debugging.
+
+---
+
+**2026-03-11 11:01 WATCHDOG CRITICAL — FATHOM COMPLETELY NON-FUNCTIONAL (28 MIN UPTIME, PERP+SPOT BOTH DOWN)** — fathom 5/5 running (sui-liq 2d, sui-arb 2d, fathom 28m [restarted 02:33 UTC], hyper-arb 3d, hyper-liq 3d); ht-deploy 2/2 running (ar-quant-alpha 2w, ht-tg-bot 6w). **PERP feed completely inoperable: no raw data directory exists (`/raw/binance_perp/`). SPOT feed stalled: 1s files not updating since 02:33 UTC (container restart time). Only dYdX and Hyperliquid collecting data. CONTAINER MARKED HEALTHY BUT NOT COLLECTING DATA.**
+
+**Evidence:**
+- Zero perp raw files: `/app/data/v20260307-75bd0a6/raw/binance_perp/` does not exist
+- Spot 1s files frozen: all BTCUSDT-BNBUSDT files modified at 02:33:00 UTC (exactly at startup, no updates in 28 minutes)
+- Logs show identical reconnect loop: "snapshot parse failed — error decoding response body" on all 6 perp symbols, exponential backoff 1000-1200ms, repeated every 1-2 seconds
+- Gap detection triggering every few seconds (normal reconnect logic activating in failure state)
+- status.json not being written (container health NOT monitored)
+- HyperLiquid and dYdX data files exist and may be current (not verified)
+- Container memory stable: 233.4MB / 384MB (61% usage)
+
+**Root cause (from prior investigation):** Code regression in v20260307-75bd0a6 binary (SnapshotRest struct incompatible with Binance response format, or Binance API format changed).
+
+**Impact:** ar-quant-alpha, hyper-liq, hyper-arb CANNOT execute PERP trades. Data gap 41+ hours. Spot data collection halted. System severely degraded.
+
+**Status:** CRITICAL, unresolved, blocker on rollback decision.
 
 **Evidence (logs 2026-03-11 02:03:47–02:03:50 UTC):**
 - Pattern identical to previous state: reconnect → WS connects → snapshot parse fails for 5 symbols → ETH occasionally succeeds → gap → reconnect
