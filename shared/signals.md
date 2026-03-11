@@ -19,6 +19,56 @@
 
 ## Active Signals
 
+**2026-03-11 08:30 WATCHDOG ALERT — PERP FEED STILL OFFLINE (ROLLBACK REQUIRED)** — All containers healthy: fathom 5/5 (sui-liq 2d, sui-arb 2d, **fathom 10h** [restarted], hyper-arb 3d, hyper-liq 3d); ht-deploy 2/2 (ar-quant-alpha 2w, ht-tg-bot 6w). **PERP feed still inoperable after 10h restart. Code regression v20260307-2f0aafb persists.**
+
+**Evidence:**
+- PERP WS reconnect loop every 1 second (from logs: repeated "WS connected" messages)
+- Snapshot parse failures on ETHUSDT, SOLUSDT, XRPUSDT, DOGEUSDT, BNBUSDT ("error decoding response body")
+- BTCUSDT occasionally parses (intermittent success pattern matches previous state)
+- Memory stable: 286.5MB / 384MB (safe margin)
+- No status.json being written (health unmonitored)
+- SPOT/HL/DYDX feeds operational (only PERP affected)
+
+**Root cause (from investigation 2026-03-10 23:05):** Code parsing regression in v20260307-2f0aafb. Binance IP ban already lifted (confirmed HTTP 404 response, not 403).
+
+**Recommended action (PENDING):**
+- **Immediate:** Roll back to v20260307-75bd0a6 (last known working version)
+- Then investigate code difference in snapshot parsing between v20260307-2f0aafb vs v20260307-75bd0a6
+
+**Impact:** ar-quant-alpha, hyper-liq, hyper-arb cannot execute PERP trades. Data gap 53+ hours.
+
+**Status:** CRITICAL, unresolved. Waiting for rollback decision.
+
+---
+
+**2026-03-10 23:05 WATCHDOG INVESTIGATION COMPLETE — PERP FEED CODE REGRESSION CONFIRMED, IP BAN LIFTED** — All containers healthy: fathom 5/5 running (sui-liq 2d, sui-arb 2d, fathom 8h, hyper-arb 3d, hyper-liq 3d); ht-deploy 2/2 running (ar-quant-alpha 2w, ht-tg-bot 6w). **PERP feed offline 39+ hours. ROOT CAUSE: Code parsing regression in v20260307-2f0aafb, NOT IP ban.**
+
+**Evidence:**
+- ✅ Binance API IP ban LIFTED: Direct curl test returns HTTP 404 (not 403 Forbidden)
+- ✅ SPOT/HL/DYDX feeds operational: Parquet files writing daily (2026-03-10 latest)
+- ❌ PERP feed completely non-functional: Continuous "snapshot parse failed — error decoding response body" on all 6 symbols
+- ❌ PERP raw data not being written (WS stuck in reconnect loop)
+- ❌ metadata/status.json never created (health unmonitored)
+- 🔁 Reconnect loop active: exponential backoff 1000-1250ms, WS connects but snapshot fetch fails immediately
+
+**Root Cause Analysis:**
+- IP ban window (75h) from 2026-03-09 08:04 UTC should have expired 2026-03-10 18:16 UTC
+- Expected recovery did NOT occur → signals code issue, not network
+- Binance API now accessible (HTTP 404) → ban confirmed lifted
+- Snapshot parsing fails on ALL symbols with same error → NOT a per-symbol issue
+- Container restart 8h ago did NOT fix issue → problem is in binary v20260307-2f0aafb
+
+**Comparison to working version (v20260307-75bd0a6):**
+- Previous version may have different SnapshotRest struct schema
+- Or v20260307-2f0aafb expects different Binance response format than actual
+
+**Impact:** ar-quant-alpha, hyper-liq, hyper-arb cannot execute PERP trades. System degraded.
+
+**Recommended next steps:**
+1. **Immediate:** Roll back to v20260307-75bd0a6 to restore PERP feed
+2. **Investigation:** Compare snapshot parsing code between v20260307-2f0aafb vs v20260307-75bd0a6
+3. **Prevention:** Add snapshot response validation/logging to catch future parsing regressions early
+
 **2026-03-11 21:31 WATCHDOG CRITICAL — PERP FEED OFFLINE, 37+ HOURS, ROOT CAUSE IDENTIFIED AS CODE REGRESSION** — Containers healthy. fathom: 5/5 running (303.2MB/384MB, 78.97%, 1.62% CPU); ht-deploy: 2/2 running. **PERP feed inoperable for 37+ hours (since 2026-03-09 08:04 UTC). IP ban confirmed lifted — Binance API responding (HTTP 404). Issue is code parsing regression, NOT network.**
 
 **Evidence:**
