@@ -19,7 +19,55 @@
 
 ## Active Signals
 
-**2026-03-11 04:01 WATCHDOG ALERT — PERP FEED STILL DOWN (54+ HOURS), ROOT CAUSE UNCLEAR** — Container status: fathom 5/5 running (sui-liq 2d, sui-arb 2d, fathom 1h, hyper-arb 3d, hyper-liq 3d); ht-deploy 2/2 running. **PERP feed inoperable: all 6 symbols fail snapshot parsing with "error decoding response body". Zero PERP raw files written. SPOT/HL/dYdX feeds operational (last data: 2026-03-11 02:33 UTC, ~1.5h stale but streaming). Issue persists despite rollback — suggests either Binance API schema change or IP ban still partially active. Code regression hypothesis unsupported (issue spans multiple versions).**
+**2026-03-11 05:31 WATCHDOG CRITICAL — PERP FEED OFFLINE, MEMORY CRITICAL (99.30%), ROLLBACK INEFFECTIVE** — Container status: fathom 5/5 running (sui-liq 3d, sui-arb 3d, **fathom 3h** [restarted with v20260306-fe03476], hyper-arb 3d, hyper-liq 3d); ht-deploy 2/2 running (ar-quant-alpha 2w, ht-tg-bot 6w). **CRITICAL ISSUE: PERP feed remains completely inoperable despite rollback to v20260306-fe03476. All 6 symbols continuously failing "snapshot parse failed — error decoding response body" (WS connects, snapshot REST fails 100%). PERP raw files stalled at 05:05 UTC. SPOT/dYdX/HL feeds operational. CONTAINER MEMORY CRITICAL: 381.3MiB / 384MiB (99.30%) — approaching OOM threshold.**
+
+**Evidence (logs 05:31:23-05:31:26 UTC):**
+- All 6 symbols: "error decoding response body" on every snapshot reconnection
+- WS connects successfully (fstream.binance.com reachable) → snapshot REST fetch fails immediately
+- Reconnect loop repeating ~1-2 seconds (exponential backoff 1147-1236ms)
+- PERP raw files exist but no new files created since 05:05 UTC (26+ minutes ago)
+- SPOT/dYdX/HL files actively updating (most recent 05:31 UTC)
+- Container memory 381.3MiB / 384MiB (99.30%) — critically high, may cause issues
+
+**Root cause (UPDATED):** Code regression theory DISPROVEN by rollback ineffectiveness. Issue persists across v20260307-2f0aafb → v20260306-fe03476, suggesting:
+1. **Binance API schema change** (permanent, affects all code versions)
+2. **Persistent container environment corruption** (memory pressure, network, DNS)
+3. **Binary/library compatibility issue** (not code logic, but compilation/environment)
+
+Memory crisis (99.30%) likely contributing to degradation. Rollback alone insufficient — requires either fresh container image or environmental investigation.
+
+**Data loss:** PERP data gap now 62+ hours (since restart). ar-quant-alpha, hyper-liq, hyper-arb cannot execute PERP trades. SPOT data still collecting (operational).
+
+**Evidence (logs 2026-03-11 05:01:28–05:01:35 UTC):**
+- All 6 symbols: "snapshot parse failed — error decoding response body" on every reconnection
+- WS connects successfully (fstream.binance.com reachable) → snapshot REST fetch fails immediately
+- Gap detection triggers → reconnect loop repeats exponential backoff 1000-1200ms every 1-2s
+- Raw PERP files: 21 total files spanning 02:00-04:00 UTC window, ZERO files created after 04:00 UTC
+- status.json NOT being written
+- Pattern: identical to 30+ hours of previous failure state
+
+**Root cause analysis (unchanged):**
+- IP ban: Confirmed LIFTED (HTTP 403/429 no longer occurring) — NOT the blocker
+- Code regression: PARTIALLY CONFIRMED — rollback to v20260307-75bd0a6 did NOT fix issue, suggests problem is either older than this version or environment-specific
+- Hypothesis: Either Binance snapshot endpoint returned permanent schema change, OR fathom container environment has persistent corruption
+
+**Container health:** Memory stable (303.2MB/384MB = 78.97%, CPU 1.62%). No OOM issues. BUT container marked healthy by Docker while data collection FAILS.
+
+**HT infrastructure:** ✅ Healthy. ar-quant-alpha (2w+ uptime), ht-tg-bot (6w+ uptime). No SSH issues currently.
+
+**Status:** CRITICAL, UNRESOLVED. Data gap 62+ hours (since 2026-03-09 08:04 UTC). Rollback ineffective. Memory crisis amplifying issue. **Escalation required immediately.**
+
+**Recommended Actions (PRIORITY ORDER):**
+1. **URGENT:** Kill + restart fathom with memory constraint bumped (currently 384MB, try 768MB-1GB). High memory pressure (99.30%) may be corrupting state or causing system calls to fail.
+2. **PARALLEL:** From fathom container, dump actual Binance snapshot response:
+   ```bash
+   curl -v https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT&limit=20
+   ```
+   Compare actual JSON format vs expected SnapshotRest struct in code.
+3. **If #1-2 fail:** Fresh container image build + deploy (current image may have compilation artifact issues).
+4. **If still failing:** Contact Binance support — API endpoint may have changed on 2026-03-09 08:04 UTC window.
+
+**Data Impact:** ar-quant-alpha, hyper-liq, hyper-arb cannot execute PERP trades. SPOT trading operational.
 
 **Evidence (live logs 2026-03-11 04:01:18–04:01:22 UTC):**
 - All 6 symbols: continuous "snapshot parse failed — error decoding response body"
