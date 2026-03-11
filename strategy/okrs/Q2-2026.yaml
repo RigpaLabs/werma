@@ -1,0 +1,20 @@
+quarter: Q2-2026
+period: 2026-04-01 to 2026-06-30
+objectives:
+  - title: "Pipeline autonomy"
+    key_results:
+      - desc: "80% issues Todo→Done without human intervention"
+        target: 80
+        current: 0
+        unit: percent
+      - desc: "Mean issue cycle time < 4 hours"
+        target: 4
+        unit: hours
+  - title: "Reliability"
+    key_results:
+      - desc: "Agent success rate > 90%"
+        target: 90
+        unit: percent
+      - desc: "Zero stuck tasks undetected > 30min"
+        target: 0
+        unit: count
