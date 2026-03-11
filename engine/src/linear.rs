@@ -467,13 +467,14 @@ impl LinearClient {
         Ok(())
     }
 
-    /// Fetch a single issue by ID (title + description).
+    /// Fetch a single issue by ID or identifier (title + description).
     pub fn get_issue(&self, issue_id: &str) -> Result<(String, String)> {
+        let uuid = self.resolve_uuid(issue_id)?;
         let data = self.query(
             r#"query($id: ID!) {
                 issue(id: $id) { title description }
             }"#,
-            &json!({"id": issue_id}),
+            &json!({"id": uuid}),
         )?;
         let title = data["issue"]["title"].as_str().unwrap_or("").to_string();
         let description = data["issue"]["description"]
