@@ -247,7 +247,7 @@ impl LinearClient {
             let priority_num = issue["priority"].as_i64().unwrap_or(0);
 
             // Skip if already in db
-            let existing = db.tasks_by_linear_issue(identifier, None, false)?;
+            let existing = db.tasks_by_linear_issue(issue_id, None, false)?;
             if !existing.is_empty() {
                 skipped += 1;
                 continue;
@@ -304,7 +304,7 @@ impl LinearClient {
                 max_turns,
                 allowed_tools,
                 session_id: String::new(),
-                linear_issue_id: identifier.to_string(),
+                linear_issue_id: issue_id.to_string(),
                 linear_pushed: false,
                 pipeline_stage: String::new(),
                 depends_on: vec![],
@@ -405,20 +405,25 @@ impl LinearClient {
         Ok(())
     }
 
-    /// Resolve an identifier (e.g. "RIG-95") to a Linear UUID.
-    /// If the input is already a UUID, returns it as-is.
-    fn resolve_to_uuid(&self, id_or_ident: &str) -> Result<String> {
-        if is_identifier(id_or_ident) {
-            let (uuid, ..) = self.get_issue_by_identifier(id_or_ident)?;
+    /// Resolve an issue identifier (e.g. "RIG-95") to a UUID.
+    /// If already a UUID (contains no dash-digit pattern), returns as-is.
+    fn resolve_uuid(&self, issue_id: &str) -> Result<String> {
+        if issue_id.contains('-')
+            && issue_id
+                .rsplit('-')
+                .next()
+                .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
+        {
+            let (uuid, ..) = self.get_issue_by_identifier(issue_id)?;
             Ok(uuid)
         } else {
-            Ok(id_or_ident.to_string())
+            Ok(issue_id.to_string())
         }
     }
 
     /// Move an issue to a status by state ID.
     fn move_issue(&self, issue_id: &str, state_id: &str) -> Result<()> {
-        let uuid = self.resolve_to_uuid(issue_id)?;
+        let uuid = self.resolve_uuid(issue_id)?;
         self.query(
             r#"mutation($id: ID!, $stateId: ID!) {
                 issueUpdate(id: $id, input: { stateId: $stateId }) { success }
@@ -440,9 +445,9 @@ impl LinearClient {
 
     /// Add a comment to an issue.
     pub fn comment(&self, issue_id: &str, body: &str) -> Result<()> {
-        let uuid = self.resolve_to_uuid(issue_id)?;
+        let uuid = self.resolve_uuid(issue_id)?;
         self.query(
-            r#"mutation($issueId: String!, $body: String!) {
+            r#"mutation($issueId: ID!, $body: String!) {
                 commentCreate(input: { issueId: $issueId, body: $body }) { success }
             }"#,
             &json!({"issueId": uuid, "body": body}),
@@ -452,7 +457,7 @@ impl LinearClient {
 
     /// Update the estimate (story points) of a Linear issue.
     pub fn update_estimate(&self, issue_id: &str, estimate: i32) -> Result<()> {
-        let uuid = self.resolve_to_uuid(issue_id)?;
+        let uuid = self.resolve_uuid(issue_id)?;
         self.query(
             r#"mutation($id: ID!, $estimate: Int) {
                 issueUpdate(id: $id, input: { estimate: $estimate }) { success }
@@ -462,14 +467,13 @@ impl LinearClient {
         Ok(())
     }
 
-    /// Fetch a single issue by ID or identifier (title + description).
+    /// Fetch a single issue by ID (title + description).
     pub fn get_issue(&self, issue_id: &str) -> Result<(String, String)> {
-        let uuid = self.resolve_to_uuid(issue_id)?;
         let data = self.query(
             r#"query($id: ID!) {
                 issue(id: $id) { title description }
             }"#,
-            &json!({"id": uuid}),
+            &json!({"id": issue_id}),
         )?;
         let title = data["issue"]["title"].as_str().unwrap_or("").to_string();
         let description = data["issue"]["description"]
@@ -576,19 +580,6 @@ impl LinearClient {
 }
 
 // --- Helper functions ---
-
-/// Check if a string looks like a Linear identifier (e.g. "RIG-95") vs a UUID.
-fn is_identifier(s: &str) -> bool {
-    // Identifiers match TEAM_KEY-NUMBER pattern (e.g. "RIG-95", "PROJ-123")
-    if let Some((prefix, suffix)) = s.split_once('-') {
-        !prefix.is_empty()
-            && prefix.chars().all(|c| c.is_ascii_uppercase())
-            && !suffix.is_empty()
-            && suffix.chars().all(|c| c.is_ascii_digit())
-    } else {
-        false
-    }
-}
 
 fn config_path() -> Result<std::path::PathBuf> {
     let home = dirs::home_dir().context("no home directory")?;
