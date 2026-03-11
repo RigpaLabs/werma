@@ -1,0 +1,8 @@
+mission: "Autonomous agent orchestration for solo founders"
+vision: "Self-improving pipeline where agents handle 90% of software delivery"
+north_star: "Time from Linear issue to merged PR, fully autonomous"
+values:
+  - velocity over ceremony
+  - autonomy with safety rails
+  - data-driven decisions over intuition
+  - simplicity over sophistication

@@ -6,6 +6,10 @@ Agent identity, memory & orchestration for RigpaLabs pipeline. Each agent has:
 - `character.md` — personality, communication style, decision-making traits
 - `memory.md` — persistent learnings, accumulated patterns
 
+## Strategy
+
+See `strategy.yaml` for mission, vision, north star metric, and values that guide all agent work.
+
 ## Rules for Agents Working Here
 
 1. **Read your character.md** before starting any task
