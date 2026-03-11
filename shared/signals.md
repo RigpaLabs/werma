@@ -19,6 +19,29 @@
 
 ## Active Signals
 
+**2026-03-11 06:31 WATCHDOG CRITICAL — ALL FEEDS NON-FUNCTIONAL (0-BYTE FILES), IP BAN PERSISTING (EXPIRES 15:14 UTC)** — Container status: fathom 5/5 running (sui-liq 3d, sui-arb 3d, **fathom 5m** [restarted 06:26 UTC], hyper-arb 3d, hyper-liq 3d); ht-deploy 2/2 running (ar-quant-alpha 2w, ht-tg-bot 6w). **CRITICAL: ALL feeds creating 0-byte files. Data collection completely broken across all 4 feed types. PERP IP banned until 2026-03-11 15:14 UTC (9+ hours remaining). SPOT/dYdX/HyperLiquid also non-functional (empty parquet files). Memory RECOVERED to 130.3MiB / 512MiB (healthy). Container restart at 06:26 UTC did NOT fix underlying issue.**
+
+**Evidence (health check 2026-03-11 06:31 UTC):**
+- IP ban confirmed still active: `curl https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT` returns `{"code":-1003,"msg":"Way too many requests; IP(108.61.127.94) banned until 1773213293820"}`
+- Ban expiry converted: 2026-03-11 15:14:53 UTC (~9 hours from now)
+- PERP raw files: all 0 bytes (BTCUSDT, ETHUSDT, DOGEUSDT created 06:27 UTC, not updating)
+- SPOT files: all 0 bytes (BTCUSDT, ETHUSDT, BNBUSDT, DOGEUSDT, XRPUSDT created 06:26 UTC, not updating)
+- dYdX files: all 0 bytes (created 06:26 UTC, not updating)
+- HyperLiquid files: all 0 bytes (BTC, ETH, DOGE, XRP, HYPE created 06:26 UTC, not updating)
+- Logs show continuous pattern: WS connects → snapshot parse fails (all feeds) → gap → reconnect loop (1000-1200ms backoff)
+- Memory: 130.3 MiB / 512 MiB (61% usage, healthy)
+
+**Root cause (LIKELY):** IP ban is blocking ALL REST API requests from fathom container, not just PERP snapshots. Code may be attempting fallback or retry logic on other feeds, but succeeding in none.
+
+**Impact:** COMPLETE DATA LOSS. ar-quant-alpha, hyper-liq, hyper-arb CANNOT execute ANY trades (no PERP, no SPOT, no dYdX, no HL). System COMPLETELY DEGRADED.
+
+**Recommended actions (PRIORITY ORDER):**
+1. **IMMEDIATE — Option A (WAIT):** IP ban auto-expires at 2026-03-11 15:14 UTC (~9h). If deadline allows, feeds should self-recover automatically.
+2. **IMMEDIATE — Option B (PROACTIVE):** Rotate fathom to new VPS now to bypass 9-hour wait. Ban is IP-specific (108.61.127.94), not account-scoped.
+3. **If A/B fail:** Investigate whether code is properly handling Binance 403/429 responses across ALL feeds (not just PERP). Current behavior suggests blanket failure.
+
+**Status:** CRITICAL, COMPLETE DATA LOSS. Awaiting decision: wait for auto-expire or rotate IP now.
+
 **2026-03-11 05:31 WATCHDOG CRITICAL — PERP FEED OFFLINE, MEMORY CRITICAL (99.30%), ROLLBACK INEFFECTIVE** — Container status: fathom 5/5 running (sui-liq 3d, sui-arb 3d, **fathom 3h** [restarted with v20260306-fe03476], hyper-arb 3d, hyper-liq 3d); ht-deploy 2/2 running (ar-quant-alpha 2w, ht-tg-bot 6w). **CRITICAL ISSUE: PERP feed remains completely inoperable despite rollback to v20260306-fe03476. All 6 symbols continuously failing "snapshot parse failed — error decoding response body" (WS connects, snapshot REST fails 100%). PERP raw files stalled at 05:05 UTC. SPOT/dYdX/HL feeds operational. CONTAINER MEMORY CRITICAL: 381.3MiB / 384MiB (99.30%) — approaching OOM threshold.**
 
 **Evidence (logs 05:31:23-05:31:26 UTC):**
