@@ -1010,7 +1010,7 @@ fn cmd_review(
              ```\n\
              gh pr comment {n} --body \"<your review markdown>\"\n\
              ```\n\
-             Include all findings, verdict, and summary in the comment."
+             Include all findings, verdict, and summary in the comment.\n"
         )
     } else {
         String::new()
@@ -1024,7 +1024,7 @@ fn cmd_review(
          3. Classify each finding as **blocker** or **nit**\n\
          4. APPROVE if no blockers, REJECT only on blockers\n\
          5. Read the full source files for important findings — the diff alone may lack context\n\
-         {gh_post}\n\n\
+         {gh_post}\
          ## Output Format\n\
          - Each finding: `file:line — [blocker|nit] description`\n\
          - End with: REVIEW_VERDICT=APPROVED or REVIEW_VERDICT=REJECTED\n\
