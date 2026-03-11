@@ -60,7 +60,7 @@ pub fn poll(db: &Db) -> Result<()> {
         }
 
         // Skip if active task already exists for this issue
-        let existing = db.tasks_by_linear_issue(issue_id, None, true)?;
+        let existing = db.tasks_by_linear_issue(identifier, None, true)?;
         if !existing.is_empty() {
             total_skipped += 1;
             continue;
@@ -93,7 +93,7 @@ pub fn poll(db: &Db) -> Result<()> {
             max_turns,
             allowed_tools,
             session_id: String::new(),
-            linear_issue_id: issue_id.to_string(),
+            linear_issue_id: identifier.to_string(),
             linear_pushed: false,
             pipeline_stage: String::new(),
             depends_on: vec![],
@@ -167,7 +167,7 @@ pub fn poll(db: &Db) -> Result<()> {
                 }
 
                 // Skip if active task already exists for this issue + stage
-                let existing = db.tasks_by_linear_issue(issue_id, Some(stage_name), true)?;
+                let existing = db.tasks_by_linear_issue(identifier, Some(stage_name), true)?;
                 if !existing.is_empty() {
                     total_skipped += 1;
                     continue;
@@ -205,7 +205,7 @@ pub fn poll(db: &Db) -> Result<()> {
                     max_turns,
                     allowed_tools,
                     session_id: String::new(),
-                    linear_issue_id: issue_id.to_string(),
+                    linear_issue_id: identifier.to_string(),
                     linear_pushed: false,
                     pipeline_stage: stage_name.clone(),
                     depends_on: vec![],
@@ -372,7 +372,6 @@ pub fn create_initial_stage_task(
     db: &Db,
     config: &PipelineConfig,
     stage_name: &str,
-    linear_issue_id: &str,
     identifier: &str,
     title: &str,
     description: &str,
@@ -392,7 +391,7 @@ pub fn create_initial_stage_task(
     let prompt = build_poll_prompt(config, stage_cfg, identifier, title, description);
 
     let effective_working_dir = if working_dir.is_empty() || working_dir == "~/projects/ar" {
-        infer_working_dir_from_issue(db, linear_issue_id)
+        infer_working_dir_from_issue(db, identifier)
     } else {
         working_dir.to_string()
     };
@@ -412,7 +411,7 @@ pub fn create_initial_stage_task(
         max_turns,
         allowed_tools,
         session_id: String::new(),
-        linear_issue_id: linear_issue_id.to_string(),
+        linear_issue_id: identifier.to_string(),
         linear_pushed: false,
         pipeline_stage: stage_name.to_string(),
         depends_on: vec![],
