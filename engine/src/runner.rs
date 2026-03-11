@@ -119,6 +119,26 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
         }
     }
 
+    // Auto-inject Linear issue description for non-pipeline tasks
+    if !task.linear_issue_id.is_empty()
+        && task.pipeline_stage.is_empty()
+        && let Ok(client) = crate::linear::LinearClient::new()
+    {
+        match client.get_issue_by_identifier(&task.linear_issue_id) {
+            Ok((_uuid, identifier, title, description, _labels)) => {
+                prompt.push_str(&format!(
+                    "\n## Linear Issue: {identifier} — {title}\n\n{description}\n\n"
+                ));
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: could not fetch Linear issue {}: {e}",
+                    task.linear_issue_id
+                );
+            }
+        }
+    }
+
     prompt.push_str(&task.prompt);
 
     // For write tasks, instruct agents to commit, push, and create PRs autonomously
