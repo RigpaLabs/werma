@@ -405,13 +405,30 @@ impl LinearClient {
         Ok(())
     }
 
+    /// Resolve an issue identifier (e.g. "RIG-95") to a UUID.
+    /// If already a UUID (contains no dash-digit pattern), returns as-is.
+    fn resolve_uuid(&self, issue_id: &str) -> Result<String> {
+        if issue_id.contains('-')
+            && issue_id
+                .rsplit('-')
+                .next()
+                .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
+        {
+            let (uuid, ..) = self.get_issue_by_identifier(issue_id)?;
+            Ok(uuid)
+        } else {
+            Ok(issue_id.to_string())
+        }
+    }
+
     /// Move an issue to a status by state ID.
     fn move_issue(&self, issue_id: &str, state_id: &str) -> Result<()> {
+        let uuid = self.resolve_uuid(issue_id)?;
         self.query(
             r#"mutation($id: ID!, $stateId: ID!) {
                 issueUpdate(id: $id, input: { stateId: $stateId }) { success }
             }"#,
-            &json!({"id": issue_id, "stateId": state_id}),
+            &json!({"id": uuid, "stateId": state_id}),
         )?;
         Ok(())
     }
@@ -428,22 +445,24 @@ impl LinearClient {
 
     /// Add a comment to an issue.
     pub fn comment(&self, issue_id: &str, body: &str) -> Result<()> {
+        let uuid = self.resolve_uuid(issue_id)?;
         self.query(
             r#"mutation($issueId: ID!, $body: String!) {
                 commentCreate(input: { issueId: $issueId, body: $body }) { success }
             }"#,
-            &json!({"issueId": issue_id, "body": body}),
+            &json!({"issueId": uuid, "body": body}),
         )?;
         Ok(())
     }
 
     /// Update the estimate (story points) of a Linear issue.
     pub fn update_estimate(&self, issue_id: &str, estimate: i32) -> Result<()> {
+        let uuid = self.resolve_uuid(issue_id)?;
         self.query(
             r#"mutation($id: ID!, $estimate: Int) {
                 issueUpdate(id: $id, input: { estimate: $estimate }) { success }
             }"#,
-            &json!({"id": issue_id, "estimate": estimate}),
+            &json!({"id": uuid, "estimate": estimate}),
         )?;
         Ok(())
     }
