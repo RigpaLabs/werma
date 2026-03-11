@@ -467,13 +467,14 @@ impl LinearClient {
         Ok(())
     }
 
-    /// Fetch a single issue by ID (title + description).
+    /// Fetch a single issue by ID or identifier (title + description).
     pub fn get_issue(&self, issue_id: &str) -> Result<(String, String)> {
+        let uuid = self.resolve_uuid(issue_id)?;
         let data = self.query(
             r#"query($id: ID!) {
                 issue(id: $id) { title description }
             }"#,
-            &json!({"id": issue_id}),
+            &json!({"id": uuid}),
         )?;
         let title = data["issue"]["title"].as_str().unwrap_or("").to_string();
         let description = data["issue"]["description"]
@@ -769,6 +770,33 @@ mod tests {
         assert!(!is_manual_issue(&["Feature", "Bug"]));
         assert!(!is_manual_issue(&[]));
         assert!(!is_manual_issue(&["manually-created"])); // partial match must NOT trigger
+    }
+
+    #[test]
+    fn resolve_uuid_detects_identifier_pattern() {
+        // Verify the identifier detection logic used by resolve_uuid.
+        // We can't call resolve_uuid directly (needs API), but we test the
+        // same pattern: "contains '-' and last segment is all digits".
+        let is_identifier = |id: &str| -> bool {
+            id.contains('-')
+                && id
+                    .rsplit('-')
+                    .next()
+                    .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        };
+
+        // Identifiers (should resolve)
+        assert!(is_identifier("RIG-155"));
+        assert!(is_identifier("RIG-1"));
+        assert!(is_identifier("PROJ-9999"));
+
+        // UUIDs (should pass through)
+        assert!(!is_identifier("755e63ee-a00e-4fef-9d7a-b8907652e2b2"));
+
+        // Edge cases
+        assert!(!is_identifier("no-digits-here"));
+        assert!(!is_identifier("plainuuid"));
+        assert!(!is_identifier(""));
     }
 
     #[test]
