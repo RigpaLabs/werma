@@ -126,9 +126,15 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
     {
         match client.get_issue_by_identifier(&task.linear_issue_id) {
             Ok((_uuid, identifier, title, description, _labels)) => {
-                prompt.push_str(&format!(
-                    "\n## Linear Issue: {identifier} — {title}\n\n{description}\n\n"
-                ));
+                if !description.is_empty() {
+                    prompt.push_str(&format!(
+                        "\n## Linear Issue: {identifier} — {title}\n\n{description}\n\n"
+                    ));
+                } else {
+                    prompt.push_str(&format!(
+                        "\n## Linear Issue: {identifier} — {title}\n\n"
+                    ));
+                }
             }
             Err(e) => {
                 eprintln!(
