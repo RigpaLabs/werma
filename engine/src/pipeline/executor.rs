@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::Command;
 
 use anyhow::{Context, Result};
 
@@ -341,8 +343,27 @@ pub fn callback(
                 return Err(e);
             }
 
+            // Auto-create PR for engineer stage completion
+            let pr_url = if stage == "engineer" && verdict_str == "done" {
+                match auto_create_pr(working_dir, linear_issue_id, task_id) {
+                    Ok(url) => url,
+                    Err(e) => {
+                        eprintln!("auto-PR error: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             // Post a comment — non-critical, don't fail the callback if this errors.
-            let comment = format_callback_comment(task_id, stage, &verdict_str, t.spawn.as_deref());
+            let comment = format_callback_comment(
+                task_id,
+                stage,
+                &verdict_str,
+                t.spawn.as_deref(),
+                pr_url.as_deref(),
+            );
             if let Err(e) = linear.comment(linear_issue_id, &comment) {
                 eprintln!(
                     "callback: failed to post comment on {}: {e}",
@@ -387,6 +408,7 @@ pub fn callback(
                     prev_stage: stage,
                     working_dir,
                     estimate,
+                    pr_url: pr_url.as_deref(),
                 })?;
             }
         }
@@ -463,12 +485,122 @@ pub fn create_initial_stage_task(
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
+/// Resolve `~/` prefix to the user's home directory.
+fn resolve_home(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    PathBuf::from(path)
+}
+
+/// Automatically create a GitHub PR from the engineer's worktree branch.
+///
+/// Returns the PR URL if successful, or None if:
+/// - On main/master branch (safety)
+/// - No commits ahead of main (nothing to PR)
+/// - PR creation fails (logged but non-fatal)
+fn auto_create_pr(
+    working_dir: &str,
+    linear_issue_id: &str,
+    task_id: &str,
+) -> Result<Option<String>> {
+    let working_dir = resolve_home(working_dir);
+
+    // 1. Get current branch
+    let branch_output = Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(&working_dir)
+        .output()
+        .context("git branch --show-current")?;
+    let branch_name = String::from_utf8_lossy(&branch_output.stdout)
+        .trim()
+        .to_string();
+
+    // 2. Safety: never PR from main/master or empty branch
+    if branch_name.is_empty() || branch_name == "main" || branch_name == "master" {
+        return Ok(None);
+    }
+
+    // 3. Check if there are commits ahead of main
+    let log_output = Command::new("git")
+        .args(["log", "origin/main..HEAD", "--oneline"])
+        .current_dir(&working_dir)
+        .output()
+        .context("git log origin/main..HEAD")?;
+    let log_text = String::from_utf8_lossy(&log_output.stdout);
+    if log_text.trim().is_empty() {
+        eprintln!("auto-PR: no commits ahead of main on branch {branch_name}, skipping");
+        return Ok(None);
+    }
+
+    // 4. Push branch (ignore errors if already up-to-date)
+    let push_output = Command::new("git")
+        .args(["push", "-u", "origin", &branch_name])
+        .current_dir(&working_dir)
+        .output()
+        .context("git push")?;
+    if !push_output.status.success() {
+        let stderr = String::from_utf8_lossy(&push_output.stderr);
+        eprintln!("auto-PR: push failed: {stderr}");
+        return Ok(None);
+    }
+
+    // 5. Check if PR already exists for this branch
+    let existing_pr = Command::new("gh")
+        .args(["pr", "view", "--json", "url", "-q", ".url"])
+        .current_dir(&working_dir)
+        .output()
+        .context("gh pr view")?;
+    if existing_pr.status.success() {
+        let url = String::from_utf8_lossy(&existing_pr.stdout)
+            .trim()
+            .to_string();
+        if !url.is_empty() {
+            return Ok(Some(url));
+        }
+    }
+
+    // 6. Create PR
+    let pr_title = format!("{linear_issue_id} feat: implementation");
+    let pr_body = format!(
+        "## Summary\nPipeline engineer task `{task_id}`.\n\n\
+         Linear: https://linear.app/rigpa/issue/{linear_issue_id}",
+    );
+
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "create",
+            "--title",
+            &pr_title,
+            "--body",
+            &pr_body,
+            "--label",
+            "ai-generated",
+        ])
+        .current_dir(&working_dir)
+        .output()
+        .context("gh pr create")?;
+
+    if output.status.success() {
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(Some(url))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        eprintln!("auto-PR failed: {stderr}");
+        Ok(None)
+    }
+}
+
 /// Build a comment string for a pipeline callback.
 fn format_callback_comment(
     task_id: &str,
     stage: &str,
     verdict: &str,
     spawn: Option<&str>,
+    pr_url: Option<&str>,
 ) -> String {
     let stage_label = stage
         .chars()
@@ -480,22 +612,24 @@ fn format_callback_comment(
         .map(|s| format!(" Spawning **{s}** stage."))
         .unwrap_or_default();
 
+    let pr_note = pr_url.map(|url| format!(" PR: {url}")).unwrap_or_default();
+
     match verdict.to_lowercase().as_str() {
         "approved" | "passed" | "done" | "ok" | "fixed" => {
             format!(
-                "**{stage_label} {verdict_upper}** (task: `{task_id}`).{spawn_note}",
+                "**{stage_label} {verdict_upper}** (task: `{task_id}`).{pr_note}{spawn_note}",
                 verdict_upper = verdict.to_uppercase()
             )
         }
         "rejected" | "failed" | "request_changes" => {
             format!(
-                "**{stage_label}: {verdict_upper}** (task: `{task_id}`). Moving back.{spawn_note}",
+                "**{stage_label}: {verdict_upper}** (task: `{task_id}`). Moving back.{pr_note}{spawn_note}",
                 verdict_upper = verdict.to_uppercase()
             )
         }
         _ => {
             format!(
-                "**{stage_label}** completed (task: `{task_id}`), verdict: {verdict}.{spawn_note}"
+                "**{stage_label}** completed (task: `{task_id}`), verdict: {verdict}.{pr_note}{spawn_note}"
             )
         }
     }
@@ -650,6 +784,7 @@ pub(crate) struct NextStageParams<'a> {
     pub prev_stage: &'a str,
     pub working_dir: &'a str,
     pub estimate: i32,
+    pub pr_url: Option<&'a str>,
 }
 
 /// Create a task for the next pipeline stage with handoff context.
@@ -665,6 +800,7 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         prev_stage,
         working_dir,
         estimate: _,
+        pr_url: _,
     } = p;
 
     // Guard: don't spawn if an active task already exists for this issue + stage.
@@ -714,9 +850,15 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
     std::fs::create_dir_all(&logs_dir)?;
     let handoff_path = logs_dir.join(format!("{task_id}-handoff.md"));
 
+    let pr_section = p
+        .pr_url
+        .map(|url| format!("PR: {url}\n"))
+        .unwrap_or_default();
+
     let handoff_content = format!(
         "## Pipeline Handoff: {} ({}) -> {} ({})\n\
-         Linear issue: {}\n\n\
+         Linear issue: {}\n\
+         {pr_section}\n\
          ### Previous Stage Output\n{}\n",
         prev_task_id,
         prev_stage,
@@ -829,6 +971,7 @@ mod tests {
             prev_stage: "analyst",
             working_dir: "~/projects/rigpa/werma",
             estimate: 0,
+            pr_url: None,
         })
         .unwrap();
 
@@ -862,6 +1005,7 @@ mod tests {
             prev_stage: "reviewer",
             working_dir: "",
             estimate: 0,
+            pr_url: None,
         })
         .unwrap();
 
@@ -947,16 +1091,30 @@ mod tests {
 
     #[test]
     fn format_callback_comment_approved() {
-        let comment = format_callback_comment("task-123", "reviewer", "approved", None);
+        let comment = format_callback_comment("task-123", "reviewer", "approved", None, None);
         assert!(comment.contains("APPROVED"));
         assert!(comment.contains("task-123"));
     }
 
     #[test]
     fn format_callback_comment_rejected_with_spawn() {
-        let comment = format_callback_comment("task-456", "reviewer", "rejected", Some("engineer"));
+        let comment =
+            format_callback_comment("task-456", "reviewer", "rejected", Some("engineer"), None);
         assert!(comment.contains("REJECTED"));
         assert!(comment.contains("engineer"));
+    }
+
+    #[test]
+    fn format_callback_comment_with_pr_url() {
+        let comment = format_callback_comment(
+            "task-789",
+            "engineer",
+            "done",
+            None,
+            Some("https://github.com/org/repo/pull/42"),
+        );
+        assert!(comment.contains("DONE"));
+        assert!(comment.contains("https://github.com/org/repo/pull/42"));
     }
 
     #[test]
@@ -1002,6 +1160,43 @@ mod tests {
             prompt.contains("blocker")
                 || prompt.contains("Revision")
                 || prompt.contains("rejected")
+        );
+    }
+
+    #[test]
+    fn handoff_includes_pr_url_when_provided() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let config = test_config();
+
+        let engineer_output = "Implementation complete.\nVERDICT=DONE";
+        let pr_url = "https://github.com/RigpaLabs/werma/pull/42";
+
+        create_next_stage_task(&NextStageParams {
+            db: &db,
+            config: &config,
+            linear: None,
+            linear_issue_id: "test-issue-pr",
+            next_stage: "reviewer",
+            previous_output: engineer_output,
+            prev_task_id: "20260312-001",
+            prev_stage: "engineer",
+            working_dir: "~/projects/rigpa/werma",
+            estimate: 0,
+            pr_url: Some(pr_url),
+        })
+        .unwrap();
+
+        let tasks = db
+            .tasks_by_linear_issue("test-issue-pr", Some("reviewer"), false)
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+
+        // Verify handoff file contains the PR URL
+        let handoff_path = &tasks[0].context_files[0];
+        let handoff_content = std::fs::read_to_string(handoff_path).unwrap();
+        assert!(
+            handoff_content.contains(pr_url),
+            "handoff should contain PR URL"
         );
     }
 }
