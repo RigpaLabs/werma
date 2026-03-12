@@ -1,5 +1,5 @@
 use std::io::Write as IoWrite;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,8 +15,7 @@ use crate::{linear, pipeline, runner};
 const TICK_INTERVAL_SECS: u64 = 5;
 const PIPELINE_POLL_INTERVAL_SECS: u64 = 30;
 const MERGE_CHECK_INTERVAL_SECS: u64 = 60;
-const PENDING_UPDATE_CHECK_INTERVAL_SECS: u64 = 30;
-const PENDING_UPDATE_TIMEOUT_SECS: u64 = 600; // 10 minutes
+const CLEANLINESS_COOLDOWN_SECS: u64 = 300; // 5 minutes per-repo notification cooldown
 const MAX_LOG_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 
 /// Run the daemon loop. Blocks forever (or until killed).
@@ -51,9 +50,9 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     let mut last_pipeline_poll = Instant::now() - Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS);
     let mut last_merge_check = Instant::now() - Duration::from_secs(MERGE_CHECK_INTERVAL_SECS);
 
-    // Pending update state: set when a merge is detected, cleared when update succeeds or times out.
-    let mut pending_update_since: Option<Instant> = None;
-    let mut last_update_check = Instant::now();
+    // Per-repo cooldown for main-branch cleanliness notifications.
+    let mut cleanliness_notified: std::collections::HashMap<PathBuf, Instant> =
+        std::collections::HashMap::new();
 
     loop {
         let tick_start = Instant::now();
@@ -79,6 +78,11 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 log_daemon(&log_path, &format!("log rotation error: {e}"));
             }
 
+            if let Err(e) = check_main_branch_cleanliness(&db, &log_path, &mut cleanliness_notified)
+            {
+                log_daemon(&log_path, &format!("main branch check error: {e}"));
+            }
+
             // Pipeline poll: check Linear for new issues at pipeline-relevant statuses.
             if last_pipeline_poll.elapsed() >= Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS) {
                 // Refresh max_concurrent from config (picks up runtime YAML changes)
@@ -91,44 +95,10 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
             // Post-merge detection: check if PRs for "ready" issues have been merged.
             if last_merge_check.elapsed() >= Duration::from_secs(MERGE_CHECK_INTERVAL_SECS) {
-                if let Err(e) = check_merged_prs(&db, werma_dir, &mut pending_update_since) {
+                if let Err(e) = check_merged_prs(&db, werma_dir) {
                     log_daemon(&log_path, &format!("merge check error: {e}"));
                 }
                 last_merge_check = Instant::now();
-            }
-        }
-
-        // Pending update retry: poll GitHub for new release every ~30s after merge detected.
-        if let Some(since) = pending_update_since {
-            if since.elapsed() >= Duration::from_secs(PENDING_UPDATE_TIMEOUT_SECS) {
-                log_daemon(
-                    &log_path,
-                    "pending update timed out after 10min — CI build may have failed, giving up",
-                );
-                pending_update_since = None;
-            } else if last_update_check.elapsed()
-                >= Duration::from_secs(PENDING_UPDATE_CHECK_INTERVAL_SECS)
-            {
-                last_update_check = Instant::now();
-                match crate::update::update() {
-                    Ok(crate::update::UpdateResult::Updated(tag)) => {
-                        log_daemon(
-                            &log_path,
-                            &format!("auto-update: binary updated to {tag}, restarting daemon"),
-                        );
-                        // Exit cleanly — launchd will restart us with the new binary.
-                        std::process::exit(0);
-                    }
-                    Ok(crate::update::UpdateResult::AlreadyUpToDate) => {
-                        // CI hasn't published the new release yet — keep waiting.
-                    }
-                    Err(e) => {
-                        log_daemon(
-                            &log_path,
-                            &format!("pending update check failed (will retry): {e}"),
-                        );
-                    }
-                }
             }
         }
 
@@ -374,13 +344,8 @@ fn drain_queue(db: &Db, werma_dir: &Path, max_concurrent: usize) -> Result<()> {
 }
 
 /// Check for merged PRs on issues in "ready" status.
-/// When a PR is merged, move the issue to Done in Linear and set pending_update flag
-/// so the daemon retries the update until CI publishes the new release.
-fn check_merged_prs(
-    _db: &Db,
-    werma_dir: &Path,
-    pending_update_since: &mut Option<Instant>,
-) -> Result<()> {
+/// When a PR is merged, move the issue to Done in Linear and trigger auto-update.
+fn check_merged_prs(_db: &Db, werma_dir: &Path) -> Result<()> {
     let log_path = werma_dir.join("logs/daemon.log");
 
     let linear = match linear::LinearClient::new() {
@@ -449,13 +414,97 @@ fn check_merged_prs(
                 )
                 .ok();
 
-            // Set pending update flag — daemon tick loop will retry until CI publishes the release.
-            if pending_update_since.is_none() {
+            // Trigger auto-update: pull latest binary after merge.
+            log_daemon(&log_path, "triggering auto-update after merge");
+            match crate::update::update() {
+                Ok(()) => {
+                    log_daemon(&log_path, "auto-update: binary updated, restarting daemon");
+                    // Exit cleanly — launchd will restart us with the new binary (KeepAlive=true).
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    log_daemon(&log_path, &format!("auto-update failed (non-fatal): {e}"));
+                    // Continue running — update failure shouldn't block the daemon.
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Check that main branch checkouts are clean (no staged/unstaged changes).
+/// Collects unique repo root dirs from running write tasks and checks `git status`.
+/// Uses per-repo cooldown to avoid spamming notifications every tick.
+fn check_main_branch_cleanliness(
+    db: &Db,
+    log_path: &Path,
+    notified: &mut std::collections::HashMap<PathBuf, Instant>,
+) -> Result<()> {
+    let running = db.list_tasks(Some(crate::models::Status::Running))?;
+
+    // Collect unique main repo dirs from running write tasks
+    let mut checked = std::collections::HashSet::new();
+    for task in &running {
+        if !crate::worktree::needs_worktree(&task.task_type) {
+            continue;
+        }
+
+        // Infer the main repo dir by stripping .trees/... from the working_dir
+        let working_dir = runner::resolve_home_pub(&task.working_dir);
+        let working_dir_str = working_dir.to_string_lossy();
+        let repo_dir = if let Some(trees_pos) = working_dir_str.find("/.trees/") {
+            PathBuf::from(&working_dir_str[..trees_pos])
+        } else {
+            // Task working_dir doesn't contain .trees/ — this IS the main repo
+            // (shouldn't happen for write tasks, but check it anyway)
+            working_dir
+        };
+
+        if !checked.insert(repo_dir.clone()) {
+            continue; // Already checked this repo
+        }
+
+        // Skip if we notified about this repo within the cooldown window.
+        if let Some(last) = notified.get(&repo_dir)
+            && last.elapsed() < Duration::from_secs(CLEANLINESS_COOLDOWN_SECS)
+        {
+            continue;
+        }
+
+        let output = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&repo_dir)
+            .output();
+
+        if let Ok(out) = output
+            && out.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if !stdout.trim().is_empty() {
+                let dirty_files: Vec<&str> = stdout.lines().take(5).collect();
                 log_daemon(
-                    &log_path,
-                    "merge detected — setting pending update (will retry every 30s for up to 10min)",
+                    log_path,
+                    &format!(
+                        "WARNING: main checkout dirty at {} — possible agent contamination: {}",
+                        repo_dir.display(),
+                        dirty_files.join(", ")
+                    ),
                 );
-                *pending_update_since = Some(Instant::now());
+                crate::notify::notify_macos(
+                    "werma: main branch contamination detected",
+                    &format!(
+                        "Dirty files in {}: {}",
+                        repo_dir.display(),
+                        dirty_files.join(", ")
+                    ),
+                    "Basso",
+                );
+                notified.insert(repo_dir, Instant::now());
+            } else {
+                // Repo is clean — clear any previous cooldown so we re-alert immediately
+                // if it becomes dirty again.
+                notified.remove(&repo_dir);
             }
         }
     }

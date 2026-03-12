@@ -2,15 +2,6 @@ use anyhow::{Context, Result, bail};
 
 const GITHUB_REPO: &str = "RigpaLabs/werma";
 
-/// Result of an update check.
-#[derive(Debug, PartialEq, Eq)]
-pub enum UpdateResult {
-    /// Binary was updated to a new version.
-    Updated(String),
-    /// Already running the latest version.
-    AlreadyUpToDate,
-}
-
 /// Read GitHub token from GITHUB_TOKEN, GH_TOKEN, or `gh auth token` fallback.
 fn github_token() -> Result<String> {
     if let Ok(token) = std::env::var("GITHUB_TOKEN") {
@@ -102,7 +93,7 @@ fn latest_release(token: &str) -> Result<ReleaseInfo> {
 }
 
 /// Self-update werma binary from GitHub Releases.
-pub fn update() -> Result<UpdateResult> {
+pub fn update() -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     println!("current: v{current}");
     println!("checking for updates...");
@@ -113,7 +104,7 @@ pub fn update() -> Result<UpdateResult> {
 
     if latest_version == current {
         println!("already up to date (v{current})");
-        return Ok(UpdateResult::AlreadyUpToDate);
+        return Ok(());
     }
 
     println!("new version: {} (current: v{current})", release.tag);
@@ -252,7 +243,7 @@ pub fn update() -> Result<UpdateResult> {
     // Restart daemon if it's running so it picks up the new binary.
     restart_daemon_if_running();
 
-    Ok(UpdateResult::Updated(release.tag))
+    Ok(())
 }
 
 const LAUNCHD_LABEL: &str = "io.rigpalabs.werma.daemon";

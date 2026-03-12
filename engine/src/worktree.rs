@@ -272,6 +272,12 @@ fi
     Ok(())
 }
 
+/// Check if a path is inside a `.trees/` directory (i.e., a worktree, not the main checkout).
+/// Used as a safety guard to prevent write tasks from running on the main repo.
+pub fn is_inside_worktree(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == ".trees")
+}
+
 /// Remove a worktree (does NOT delete the branch).
 #[allow(dead_code)]
 pub fn cleanup_worktree(working_dir: &Path, branch_name: &str) -> Result<()> {
@@ -408,6 +414,27 @@ mod tests {
             repo_hash: String::new(),
             estimate: 0,
         }
+    }
+
+    // --- is_inside_worktree ---
+
+    #[test]
+    fn is_inside_worktree_positive() {
+        assert!(is_inside_worktree(Path::new(
+            "/home/user/project/.trees/feat--RIG-42-thing"
+        )));
+        assert!(is_inside_worktree(Path::new(
+            "/Users/ar/projects/rigpa/werma/.trees/fix--RIG-99-bug"
+        )));
+    }
+
+    #[test]
+    fn is_inside_worktree_negative() {
+        assert!(!is_inside_worktree(Path::new("/home/user/project")));
+        assert!(!is_inside_worktree(Path::new(
+            "/home/user/project/src/main.rs"
+        )));
+        assert!(!is_inside_worktree(Path::new("/tmp")));
     }
 
     // --- needs_worktree ---

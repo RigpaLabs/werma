@@ -270,7 +270,7 @@ fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<()> 
                 render_compact(db, Some(interval))?;
             } else {
                 render_status(db)?;
-                println!("{}", format!("  ↻ {interval}s").dimmed());
+                println!("{}", format!("                                                              ↻ {interval}s").dimmed());
             }
             std::thread::sleep(std::time::Duration::from_secs(interval));
         }
@@ -1581,11 +1581,7 @@ fn main() -> anyhow::Result<()> {
         },
 
         cli::Commands::Update => {
-            let result = update::update()?;
-            match result {
-                update::UpdateResult::Updated(tag) => println!("updated to {tag}"),
-                update::UpdateResult::AlreadyUpToDate => {}
-            }
+            update::update()?;
         }
 
         cli::Commands::Review { target, dir, force } => {
