@@ -110,7 +110,10 @@ RIG-XX feat!: or BREAKING CHANGE: → minor bump (pre-1.0)
 
 **Flow:** merge PR → `release.yml` parses commits → bumps version → creates tag `vX.Y.Z` → `build.yml` builds binary → GitHub Release with binary and changelog
 
-**Update binary:** `werma update` (or `cargo build --release` from `engine/`)
+**Update binary:**
+- **Primary:** `werma update` — downloads latest from GitHub Releases (CI-built)
+- **Hotfix only:** `cargo build --release` from `engine/` — when CI/pipeline is broken
+- **macOS:** after ANY binary copy, run `codesign --force --sign -` to re-sign (macOS SIGKILL's binaries with invalidated adhoc signatures after `cp`)
 
 ## Conventions
 

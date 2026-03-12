@@ -30,7 +30,7 @@ stages:
       8. Include acceptance criteria
       9. Identify risks and dependencies
 
-      Save the spec to a markdown file in docs/specs/ if applicable.
+      Post the spec as a **Linear comment** on the issue (use save_comment MCP tool). Do NOT save to local files.
 
       {verdict_instruction}. Example: `VERDICT=DONE`, `VERDICT=BLOCKED`, or `VERDICT=ALREADY_DONE`
     transitions:

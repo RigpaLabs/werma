@@ -685,10 +685,10 @@ fn repo_label_to_dir(repo: &str) -> Option<&'static str> {
 
 /// Expand `~` to the user's home directory.
 fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return format!("{}/{}", home.display(), rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return format!("{}/{}", home.display(), rest);
     }
     path.to_string()
 }
