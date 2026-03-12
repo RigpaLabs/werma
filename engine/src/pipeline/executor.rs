@@ -67,6 +67,14 @@ pub fn poll(db: &Db) -> Result<()> {
         }
 
         let working_dir = crate::linear::infer_working_dir(title, &labels);
+        if crate::linear::validate_working_dir(&working_dir).is_none() {
+            eprintln!(
+                "  ! skipping {} [{}]: working dir '{}' does not exist",
+                identifier, title, working_dir
+            );
+            total_skipped += 1;
+            continue;
+        }
         let prompt = format!(
             "[{}] {}\n\n{}\n\nSave the research output as a markdown file in docs/research/. \
              On the last line of your output, write: OUTPUT_FILE=<path-to-saved-file>",
@@ -180,6 +188,14 @@ pub fn poll(db: &Db) -> Result<()> {
                 }
 
                 let working_dir = crate::linear::infer_working_dir(title, &labels);
+                if crate::linear::validate_working_dir(&working_dir).is_none() {
+                    eprintln!(
+                        "  ! skipping {} [{}] stage={}: working dir '{}' does not exist",
+                        identifier, title, stage_name, working_dir
+                    );
+                    total_skipped += 1;
+                    continue;
+                }
 
                 // Build prompt from config
                 let prompt = build_poll_prompt(&config, stage_cfg, identifier, title, description);
@@ -390,7 +406,7 @@ pub fn create_initial_stage_task(
 
     let prompt = build_poll_prompt(config, stage_cfg, identifier, title, description);
 
-    let effective_working_dir = if working_dir.is_empty() || working_dir == "~/projects/ar" {
+    let effective_working_dir = if working_dir.is_empty() || working_dir == "~/projects/rigpa/werma" {
         infer_working_dir_from_issue(db, identifier)
     } else {
         working_dir.to_string()
@@ -510,7 +526,7 @@ fn truncate_lines(text: &str, max: usize) -> String {
 fn infer_working_dir_from_issue(db: &Db, linear_issue_id: &str) -> String {
     if let Ok(tasks) = db.tasks_by_linear_issue(linear_issue_id, None, false) {
         for task in &tasks {
-            if !task.working_dir.is_empty() && task.working_dir != "~/projects/ar" {
+            if !task.working_dir.is_empty() && task.working_dir != "~/projects/rigpa/werma" {
                 return task.working_dir.clone();
             }
         }
@@ -518,7 +534,7 @@ fn infer_working_dir_from_issue(db: &Db, linear_issue_id: &str) -> String {
             return task.working_dir.clone();
         }
     }
-    "~/projects/ar".to_string()
+    "~/projects/rigpa/werma".to_string()
 }
 
 /// Build the stage prompt for a spawned task (handoff context).
@@ -861,7 +877,7 @@ mod tests {
         assert_eq!(dir, "~/projects/rigpa/werma");
 
         let dir = infer_working_dir_from_issue(&db, "unknown-issue");
-        assert_eq!(dir, "~/projects/ar");
+        assert_eq!(dir, "~/projects/rigpa/werma");
     }
 
     #[test]

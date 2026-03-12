@@ -274,6 +274,14 @@ impl LinearClient {
 
             let task_type = infer_type_from_labels(&labels);
             let working_dir = infer_working_dir(title, &labels);
+            if validate_working_dir(&working_dir).is_none() {
+                eprintln!(
+                    "  ! skipping {} [{}]: working dir '{}' does not exist",
+                    identifier, title, working_dir
+                );
+                skipped += 1;
+                continue;
+            }
             let estimate = issue["estimate"].as_i64().unwrap_or(0) as i32;
 
             // Build prompt
@@ -661,25 +669,65 @@ pub fn is_manual_issue(labels: &[&str]) -> bool {
     labels.iter().any(|l| l.eq_ignore_ascii_case("manual"))
 }
 
+/// Map a `repo:*` label value to its local directory path.
+/// All RigpaLabs repos live under `~/projects/rigpa/`.
+fn repo_label_to_dir(repo: &str) -> Option<&'static str> {
+    match repo.trim() {
+        "forge" | "werma" => Some("~/projects/rigpa/werma"),
+        "fathom" => Some("~/projects/rigpa/fathom"),
+        "hyper-liq" => Some("~/projects/rigpa/hyper-liq"),
+        "sui-bots" => Some("~/projects/rigpa/sui-bots"),
+        "ar-quant" => Some("~/projects/rigpa/ar-quant"),
+        "ar-quant-alpha" => Some("~/projects/rigpa/ar-quant-alpha"),
+        _ => None,
+    }
+}
+
+/// Expand `~` to the user's home directory.
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return format!("{}/{}", home.display(), rest);
+        }
+    }
+    path.to_string()
+}
+
+/// Validate that a resolved working directory actually exists on disk.
+/// Returns `None` if the path doesn't exist.
+pub fn validate_working_dir(dir: &str) -> Option<String> {
+    let expanded = expand_tilde(dir);
+    if std::path::Path::new(&expanded).is_dir() {
+        Some(dir.to_string())
+    } else {
+        None
+    }
+}
+
 /// Infer working directory from title keywords and labels.
 pub fn infer_working_dir(title: &str, labels: &[&str]) -> String {
     let title_lower = title.to_lowercase();
 
-    // Check for repo: label
+    // Check for repo: label (explicit mapping takes priority)
     for label in labels {
         if let Some(repo) = label.strip_prefix("repo:") {
-            return format!("~/projects/{}", repo.trim());
+            if let Some(dir) = repo_label_to_dir(repo) {
+                return dir.to_string();
+            }
+            // Unknown repo label — fall through to keyword matching
+            eprintln!("warning: unknown repo label 'repo:{}', falling back to keyword inference", repo);
         }
     }
 
     // Keyword-based inference
     let keywords: &[(&str, &str)] = &[
         ("werma", "~/projects/rigpa/werma"),
-        ("aq", "~/projects/ai/aq"),
         ("pipeline", "~/projects/rigpa/werma"),
-        ("sui", "~/projects/sui-bots"),
-        ("hyper", "~/projects/hyper-liq"),
-        ("fathom", "~/projects/fathom"),
+        ("fathom", "~/projects/rigpa/fathom"),
+        ("sui", "~/projects/rigpa/sui-bots"),
+        ("hyper", "~/projects/rigpa/hyper-liq"),
+        ("ar-quant-alpha", "~/projects/rigpa/ar-quant-alpha"),
+        ("ar-quant", "~/projects/rigpa/ar-quant"),
     ];
 
     for (keyword, dir) in keywords {
@@ -688,7 +736,7 @@ pub fn infer_working_dir(title: &str, labels: &[&str]) -> String {
         }
     }
 
-    "~/projects/ar".to_string()
+    "~/projects/rigpa/werma".to_string()
 }
 
 #[cfg(test)]
@@ -726,26 +774,56 @@ mod tests {
             "~/projects/rigpa/werma"
         );
         assert_eq!(
-            infer_working_dir("Update aq scheduling", &[]),
-            "~/projects/ai/aq"
-        );
-        assert_eq!(
             infer_working_dir("Add pipeline stage", &[]),
             "~/projects/rigpa/werma"
         );
-        assert_eq!(infer_working_dir("Random task title", &[]), "~/projects/ar");
+        // Default fallback for unknown titles
+        assert_eq!(
+            infer_working_dir("Random task title", &[]),
+            "~/projects/rigpa/werma"
+        );
     }
 
     #[test]
     fn working_dir_from_repo_label() {
+        // Known repo labels map to rigpa/ paths
         assert_eq!(
-            infer_working_dir("Some task", &["repo:my-project"]),
-            "~/projects/my-project"
+            infer_working_dir("Some task", &["repo:forge"]),
+            "~/projects/rigpa/werma"
+        );
+        assert_eq!(
+            infer_working_dir("Some task", &["repo:werma"]),
+            "~/projects/rigpa/werma"
+        );
+        assert_eq!(
+            infer_working_dir("Some task", &["repo:fathom"]),
+            "~/projects/rigpa/fathom"
+        );
+        assert_eq!(
+            infer_working_dir("Some task", &["repo:hyper-liq"]),
+            "~/projects/rigpa/hyper-liq"
+        );
+        assert_eq!(
+            infer_working_dir("Some task", &["repo:sui-bots"]),
+            "~/projects/rigpa/sui-bots"
+        );
+        assert_eq!(
+            infer_working_dir("Some task", &["repo:ar-quant"]),
+            "~/projects/rigpa/ar-quant"
+        );
+        assert_eq!(
+            infer_working_dir("Some task", &["repo:ar-quant-alpha"]),
+            "~/projects/rigpa/ar-quant-alpha"
         );
         // repo: label takes priority over title keywords
         assert_eq!(
-            infer_working_dir("Fix werma bug", &["repo:other-project"]),
-            "~/projects/other-project"
+            infer_working_dir("Fix werma bug", &["repo:fathom"]),
+            "~/projects/rigpa/fathom"
+        );
+        // Unknown repo label falls through to keyword inference
+        assert_eq!(
+            infer_working_dir("Fix werma bug", &["repo:unknown-project"]),
+            "~/projects/rigpa/werma"
         );
     }
 
@@ -753,11 +831,11 @@ mod tests {
     fn working_dir_title_keywords() {
         assert_eq!(
             infer_working_dir("sui bot improvements", &[]),
-            "~/projects/sui-bots"
+            "~/projects/rigpa/sui-bots"
         );
         assert_eq!(
             infer_working_dir("hyper liquidation fix", &[]),
-            "~/projects/hyper-liq"
+            "~/projects/rigpa/hyper-liq"
         );
     }
 
@@ -774,9 +852,6 @@ mod tests {
 
     #[test]
     fn resolve_uuid_detects_identifier_pattern() {
-        // Verify the identifier detection logic used by resolve_uuid.
-        // We can't call resolve_uuid directly (needs API), but we test the
-        // same pattern: "contains '-' and last segment is all digits".
         let is_identifier = |id: &str| -> bool {
             id.contains('-')
                 && id
@@ -785,18 +860,65 @@ mod tests {
                     .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
         };
 
-        // Identifiers (should resolve)
         assert!(is_identifier("RIG-155"));
         assert!(is_identifier("RIG-1"));
         assert!(is_identifier("PROJ-9999"));
-
-        // UUIDs (should pass through)
         assert!(!is_identifier("755e63ee-a00e-4fef-9d7a-b8907652e2b2"));
-
-        // Edge cases
         assert!(!is_identifier("no-digits-here"));
         assert!(!is_identifier("plainuuid"));
         assert!(!is_identifier(""));
+    }
+
+    #[test]
+    fn repo_label_mapping() {
+        assert_eq!(repo_label_to_dir("forge"), Some("~/projects/rigpa/werma"));
+        assert_eq!(repo_label_to_dir("werma"), Some("~/projects/rigpa/werma"));
+        assert_eq!(repo_label_to_dir("fathom"), Some("~/projects/rigpa/fathom"));
+        assert_eq!(repo_label_to_dir("hyper-liq"), Some("~/projects/rigpa/hyper-liq"));
+        assert_eq!(repo_label_to_dir("sui-bots"), Some("~/projects/rigpa/sui-bots"));
+        assert_eq!(repo_label_to_dir("ar-quant"), Some("~/projects/rigpa/ar-quant"));
+        assert_eq!(
+            repo_label_to_dir("ar-quant-alpha"),
+            Some("~/projects/rigpa/ar-quant-alpha")
+        );
+        assert_eq!(repo_label_to_dir("unknown-repo"), None);
+    }
+
+    #[test]
+    fn validate_working_dir_nonexistent() {
+        assert!(validate_working_dir("~/projects/nonexistent-xyz-999").is_none());
+    }
+
+    #[test]
+    fn validate_working_dir_exists() {
+        assert!(validate_working_dir("~/").is_some());
+    }
+
+    #[test]
+    fn expand_tilde_works() {
+        let expanded = expand_tilde("~/projects/test");
+        assert!(!expanded.starts_with("~/"));
+        assert!(expanded.ends_with("/projects/test"));
+    }
+
+    #[test]
+    fn working_dir_fathom_keyword() {
+        assert_eq!(
+            infer_working_dir("Fix fathom collector", &[]),
+            "~/projects/rigpa/fathom"
+        );
+    }
+
+    #[test]
+    fn working_dir_ar_quant_keywords() {
+        assert_eq!(
+            infer_working_dir("Update ar-quant-alpha bot", &[]),
+            "~/projects/rigpa/ar-quant-alpha"
+        );
+        assert_eq!(
+            infer_working_dir("Fix ar-quant backtesting", &[]),
+            "~/projects/rigpa/ar-quant"
+        );
     }
 
     #[test]
