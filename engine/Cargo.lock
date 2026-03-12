@@ -1641,7 +1641,7 @@ dependencies = [
 
 [[package]]
 name = "werma"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "anyhow",
  "chrono",
