@@ -353,13 +353,25 @@ pub fn callback(
 
             // Auto-create PR for engineer stage completion
             let pr_url = if stage == "engineer" && verdict_str == "done" {
-                match auto_create_pr(working_dir, linear_issue_id, task_id) {
+                let url = match auto_create_pr(working_dir, linear_issue_id, task_id) {
                     Ok(url) => url,
                     Err(e) => {
                         eprintln!("auto-PR error: {e}");
                         None
                     }
+                };
+
+                // Also try to extract PR URL from task output (agent may have created it)
+                let url = url.or_else(|| extract_pr_url(result));
+
+                // Attach PR URL to Linear issue
+                if let Some(ref pr) = url {
+                    let pr_title = pr_title_from_url(pr);
+                    if let Err(e) = linear.attach_url(linear_issue_id, pr, &pr_title) {
+                        eprintln!("attach PR to Linear: {e}");
+                    }
                 }
+                url
             } else {
                 None
             };
@@ -600,6 +612,35 @@ fn auto_create_pr(
         eprintln!("auto-PR failed: {stderr}");
         Ok(None)
     }
+}
+
+/// Extract a GitHub PR URL from task output text.
+/// Looks for `https://github.com/.../pull/N` patterns.
+fn extract_pr_url(output: &str) -> Option<String> {
+    const PREFIX: &str = "https://github.com/";
+    for line in output.lines() {
+        if let Some(start) = line.find(PREFIX) {
+            let candidate = &line[start..];
+            // Take until whitespace or common delimiters
+            let url: String = candidate
+                .chars()
+                .take_while(|c| !c.is_whitespace() && *c != ')' && *c != '>' && *c != ']')
+                .collect();
+            if url.contains("/pull/") {
+                return Some(url);
+            }
+        }
+    }
+    None
+}
+
+/// Derive a short title from a GitHub PR URL (e.g. "PR #42").
+fn pr_title_from_url(url: &str) -> String {
+    url.rsplit('/')
+        .next()
+        .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        .map(|n| format!("PR #{n}"))
+        .unwrap_or_else(|| "Pull Request".to_string())
 }
 
 /// Build a comment string for a pipeline callback.
@@ -1281,6 +1322,51 @@ mod tests {
         assert!(
             handoff_content.contains(pr_url),
             "handoff should contain PR URL"
+        );
+    }
+
+    #[test]
+    fn extract_pr_url_from_output() {
+        let output = "Created PR: https://github.com/RigpaLabs/werma/pull/42\nVERDICT=DONE";
+        assert_eq!(
+            extract_pr_url(output),
+            Some("https://github.com/RigpaLabs/werma/pull/42".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_pr_url_in_markdown() {
+        let output = "PR created: [link](https://github.com/org/repo/pull/99)\nDone.";
+        assert_eq!(
+            extract_pr_url(output),
+            Some("https://github.com/org/repo/pull/99".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_pr_url_none_when_absent() {
+        assert_eq!(extract_pr_url("just some output, no PR link"), None);
+    }
+
+    #[test]
+    fn extract_pr_url_ignores_non_pull_github_urls() {
+        let output = "See https://github.com/org/repo/issues/10 for context";
+        assert_eq!(extract_pr_url(output), None);
+    }
+
+    #[test]
+    fn pr_title_from_url_extracts_number() {
+        assert_eq!(
+            pr_title_from_url("https://github.com/org/repo/pull/42"),
+            "PR #42"
+        );
+    }
+
+    #[test]
+    fn pr_title_from_url_fallback() {
+        assert_eq!(
+            pr_title_from_url("https://github.com/org/repo/pull/"),
+            "Pull Request"
         );
     }
 }

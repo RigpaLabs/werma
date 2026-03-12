@@ -466,6 +466,20 @@ impl LinearClient {
         Ok(())
     }
 
+    /// Attach a URL to a Linear issue (appears in the issue sidebar).
+    pub fn attach_url(&self, issue_id: &str, url: &str, title: &str) -> Result<()> {
+        let uuid = self.resolve_uuid(issue_id)?;
+        self.query(
+            r#"mutation($issueId: String!, $url: String!, $title: String!) {
+                attachmentCreate(input: { issueId: $issueId, url: $url, title: $title }) {
+                    success
+                }
+            }"#,
+            &json!({"issueId": uuid, "url": url, "title": title}),
+        )?;
+        Ok(())
+    }
+
     /// Update the estimate (story points) of a Linear issue.
     pub fn update_estimate(&self, issue_id: &str, estimate: i32) -> Result<()> {
         let uuid = self.resolve_uuid(issue_id)?;
