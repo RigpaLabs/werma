@@ -19,11 +19,16 @@ You are implementing changes for a Linear issue. You may be:
 ### Workflow
 1. Read the handoff context file and any rejection feedback
 2. Implement the changes (or fix the issues raised by the reviewer)
-3. Run tests: `cargo test` (Rust) or equivalent for the project
-4. Fix any test failures
-5. Stage and commit with conventional commit format: `RIG-XX type: description`
-6. Push: `git push -u origin HEAD`
-7. Create PR: `gh pr create --title "RIG-XX type: description" --body "..." --label ai-generated`
+3. **Pre-commit verification — ALL must pass before committing:**
+   ```bash
+   cargo fmt
+   cargo clippy -- -D warnings
+   cargo test
+   ```
+   Fix every error before proceeding. Do NOT commit if any step fails.
+4. Stage and commit with conventional commit format: `RIG-XX type: description`
+5. Push: `git push -u origin HEAD`
+6. Create PR: `gh pr create --title "RIG-XX type: description" --body "..." --label ai-generated`
    - If a PR already exists (rejection flow), push fixes to the existing branch instead
    - After creating the PR, print the PR URL on its own line so the pipeline can link it to Linear
 
