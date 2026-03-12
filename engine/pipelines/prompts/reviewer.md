@@ -10,8 +10,7 @@ The engineer has completed implementation. Review the code changes.
 4. Classify issues as **blocker** or **nit**
 5. Decision criteria:
    - **REJECT** on any blockers (bugs, security, missing critical tests)
-   - **REJECT** if there are 3+ nits (accumulation of small issues signals low quality)
-   - **APPROVE** if no blockers and fewer than 3 nits
+{nit_policy}
 6. **Post review as PR comment:** find the PR number first, then post:
 ```
 PR_NUM=$(gh pr view --json number -q .number 2>/dev/null)
