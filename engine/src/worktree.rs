@@ -19,7 +19,7 @@ pub fn needs_worktree(task_type: &str) -> bool {
 /// Derive a git branch type prefix from task type and prompt content.
 /// Pipeline stages map to: engineer→feat/fix, reviewer→review, analyst→chore, devops→chore.
 /// Regular tasks: code→feat, refactor→refactor, full→feat.
-/// If the prompt contains "fix:" or "bug" indicators, overrides to "fix".
+/// If the prompt's first line contains "fix:" or "fix!:", overrides to "fix".
 fn derive_branch_type(task: &Task) -> &'static str {
     // Check prompt for fix indicators (conventional commit prefix or keywords)
     let prompt_lower = task.prompt.to_lowercase();
@@ -45,10 +45,10 @@ pub fn generate_branch_name(task: &Task) -> String {
     if !task.linear_issue_id.is_empty() {
         let slug = slugify_prompt(&task.prompt);
         let rig_id = extract_rig_id(&task.prompt).unwrap_or_default();
-        let branch_type = derive_branch_type(task);
         if rig_id.is_empty() {
             format!("werma-{}/{}", task.id, slug)
         } else {
+            let branch_type = derive_branch_type(task);
             format!("{}/{}-{}", branch_type, rig_id, slug)
         }
     } else {
@@ -112,8 +112,9 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
         return Ok(worktree_path);
     }
 
-    // Branch might already exist (e.g. from a previous failed task) — attach to it
     let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Branch already exists (e.g. from a previous failed task) — attach to it
     if stderr.contains("already exists") {
         let output2 = Command::new("git")
             .args([
@@ -135,6 +136,39 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
             "git worktree add failed for existing branch '{}': {}",
             branch_name,
             stderr2.trim()
+        );
+    }
+
+    // origin/main ref unresolvable (network failure, no cached ref) — fall back to HEAD
+    if stderr.contains("bad revision")
+        || stderr.contains("invalid reference")
+        || stderr.contains("pathspec")
+    {
+        eprintln!(
+            "warning: origin/main not resolvable, branching from HEAD: {}",
+            stderr.trim()
+        );
+        let output_head = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                &worktree_path.to_string_lossy(),
+                "-b",
+                branch_name,
+            ])
+            .current_dir(working_dir)
+            .output()
+            .context("running git worktree add (fallback to HEAD)")?;
+
+        if output_head.status.success() {
+            return Ok(worktree_path);
+        }
+
+        let stderr_head = String::from_utf8_lossy(&output_head.stderr);
+        bail!(
+            "git worktree add failed (HEAD fallback) for '{}': {}",
+            branch_name,
+            stderr_head.trim()
         );
     }
 
@@ -537,6 +571,34 @@ mod tests {
         // Cleanup
         cleanup_worktree(repo_dir, branch).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn setup_worktree_falls_back_to_head_without_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = dir.path();
+
+        // Init a git repo with NO origin remote — origin/main will be unresolvable
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+
+        let branch = "feat/RIG-100-no-origin";
+
+        // Should succeed by falling back to HEAD (no origin remote at all)
+        let path = setup_worktree(repo_dir, branch).unwrap();
+        assert!(path.exists());
+        assert!(path.ends_with(".trees/feat--RIG-100-no-origin"));
+
+        // Cleanup
+        cleanup_worktree(repo_dir, branch).unwrap();
     }
 
     #[test]
