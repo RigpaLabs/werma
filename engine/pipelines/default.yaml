@@ -11,9 +11,7 @@ stages:
     # No linear_status — analyst is triggered manually, not auto-polled
     agent: pipeline-analyst
     model: sonnet
-=======
     max_turns: 20
->>>>>>> 58cb222 (RIG-183 feat: review round optimization + model selection by estimate)
     manual: skip
     prompt: |
       # Pipeline: Analyst Stage
