@@ -15,6 +15,7 @@ use crate::{linear, pipeline, runner};
 const TICK_INTERVAL_SECS: u64 = 5;
 const PIPELINE_POLL_INTERVAL_SECS: u64 = 30;
 const MERGE_CHECK_INTERVAL_SECS: u64 = 60;
+const UPDATE_CHECK_INTERVAL_SECS: u64 = 300; // 5 minutes
 const CLEANLINESS_CHECK_INTERVAL_SECS: u64 = 30; // rate-limit git status calls
 const CLEANLINESS_COOLDOWN_SECS: u64 = 300; // 5 minutes per-repo notification cooldown
 const MAX_LOG_SIZE_BYTES: u64 = 5 * 1024 * 1024;
@@ -50,6 +51,14 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     // Trigger pipeline poll immediately on first tick.
     let mut last_pipeline_poll = Instant::now() - Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS);
     let mut last_merge_check = Instant::now() - Duration::from_secs(MERGE_CHECK_INTERVAL_SECS);
+
+    // Periodic update check: configurable via WERMA_UPDATE_INTERVAL_SECS env or .env.
+    let update_interval_secs = std::env::var("WERMA_UPDATE_INTERVAL_SECS")
+        .or_else(|_| read_env_file_key("WERMA_UPDATE_INTERVAL_SECS"))
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(UPDATE_CHECK_INTERVAL_SECS);
+    let mut last_update_check = Instant::now(); // skip check on first tick (just started)
 
     // Per-repo cooldown for main-branch cleanliness notifications.
     let mut cleanliness_notified: std::collections::HashMap<PathBuf, Instant> =
@@ -109,6 +118,25 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                     log_daemon(&log_path, &format!("merge check error: {e}"));
                 }
                 last_merge_check = Instant::now();
+            }
+        }
+
+        // Periodic update check: outside DB guard — doesn't need DB access.
+        if last_update_check.elapsed() >= Duration::from_secs(update_interval_secs) {
+            last_update_check = Instant::now();
+            match crate::update::check_and_apply_update() {
+                Ok(true) => {
+                    log_daemon(
+                        &log_path,
+                        "auto-update: new version installed, restarting daemon",
+                    );
+                    // Exit cleanly — launchd KeepAlive restarts with new binary.
+                    std::process::exit(0);
+                }
+                Ok(false) => {} // Already up to date — no-op.
+                Err(e) => {
+                    log_daemon(&log_path, &format!("auto-update check failed: {e}"));
+                }
             }
         }
 
