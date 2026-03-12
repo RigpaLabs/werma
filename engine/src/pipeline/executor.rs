@@ -1027,6 +1027,82 @@ mod tests {
                 || eng_task.prompt.contains("rejected")
                 || eng_task.prompt.contains("blocker")
         );
+        // Must have pipeline_stage set for deterministic branch naming (worktree reuse)
+        assert_eq!(eng_task.pipeline_stage, "engineer");
+        assert_eq!(eng_task.task_type, "pipeline-engineer");
+    }
+
+    #[test]
+    fn callback_reviewer_rejection_reuses_branch() {
+        // Verify that initial and re-spawned engineer tasks produce the same branch name,
+        // enabling worktree reuse and pushing to the existing PR.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let config = test_config();
+
+        // Use realistic linear_issue_id (RIG-XX format, as in production)
+        let issue_id = "RIG-42";
+
+        // 1. Simulate initial engineer task (from analyst)
+        let analyst_output = "## Spec\nImplement feature X for RIG-42";
+        create_next_stage_task(&NextStageParams {
+            db: &db,
+            config: &config,
+            linear: None,
+            linear_issue_id: issue_id,
+            next_stage: "engineer",
+            previous_output: analyst_output,
+            prev_task_id: "20260310-001",
+            prev_stage: "analyst",
+            working_dir: "~/projects/rigpa/werma",
+            estimate: 0,
+            pr_url: None,
+        })
+        .unwrap();
+
+        let initial_tasks = db
+            .tasks_by_linear_issue(issue_id, Some("engineer"), false)
+            .unwrap();
+        assert_eq!(initial_tasks.len(), 1);
+        let initial_task = &initial_tasks[0];
+
+        // Mark it completed so the duplicate guard doesn't block the next spawn
+        db.set_task_status(&initial_task.id, Status::Completed)
+            .unwrap();
+
+        // 2. Simulate re-spawned engineer (from reviewer rejection)
+        let reviewer_output = "## Review\n- blocker: no tests\nREVIEW_VERDICT=REJECTED";
+        create_next_stage_task(&NextStageParams {
+            db: &db,
+            config: &config,
+            linear: None,
+            linear_issue_id: issue_id,
+            next_stage: "engineer",
+            previous_output: reviewer_output,
+            prev_task_id: "20260310-002",
+            prev_stage: "reviewer",
+            working_dir: "~/projects/rigpa/werma",
+            estimate: 0,
+            pr_url: None,
+        })
+        .unwrap();
+
+        let all_eng_tasks = db
+            .tasks_by_linear_issue(issue_id, Some("engineer"), false)
+            .unwrap();
+        assert_eq!(all_eng_tasks.len(), 2);
+
+        // Both tasks should produce the same branch name
+        let branch1 = crate::worktree::generate_branch_name(initial_task);
+        let respawned_task = all_eng_tasks
+            .iter()
+            .find(|t| t.id != initial_task.id)
+            .unwrap();
+        let branch2 = crate::worktree::generate_branch_name(respawned_task);
+
+        assert_eq!(
+            branch1, branch2,
+            "re-spawned engineer must reuse the same branch for PR continuity"
+        );
     }
 
     #[test]
