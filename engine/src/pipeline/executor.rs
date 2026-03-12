@@ -195,10 +195,7 @@ pub fn poll(db: &Db) -> Result<()> {
 
                 // For reviewer stage: skip if PR is already merged (manual merge while in Review)
                 if stage_name == "reviewer" && is_pr_merged_for_issue(&working_dir, identifier) {
-                    println!(
-                        "  ~ {} [{}] PR already merged, moving to Done",
-                        identifier, title
-                    );
+                    println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
                     let _ = linear.move_issue_by_name(issue_id, "done");
                     total_skipped += 1;
                     continue;
@@ -331,10 +328,7 @@ pub fn poll(db: &Db) -> Result<()> {
 
             // For reviewer stage: skip if PR is already merged
             if *stage_name == "reviewer" && is_pr_merged_for_issue(&working_dir, identifier) {
-                println!(
-                    "  ~ {} [{}] PR already merged, moving to Done",
-                    identifier, title
-                );
+                println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
                 let _ = linear.move_issue_by_name(issue_id, "done");
                 total_skipped += 1;
                 continue;
