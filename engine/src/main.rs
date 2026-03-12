@@ -260,12 +260,12 @@ fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<()> 
     let auto_compacted = !compact && term_width < 60;
 
     if watch {
+        if auto_compacted {
+            eprintln!("tip: terminal width < 60, using compact mode (or pass -c)");
+        }
         loop {
             print!("\x1b[2J\x1b[H");
             std::io::Write::flush(&mut std::io::stdout()).ok();
-            if auto_compacted {
-                eprintln!("tip: terminal width < 60, using compact mode (or pass -c)");
-            }
             if use_compact {
                 render_compact(db, Some(interval))?;
             } else {
@@ -416,8 +416,16 @@ fn compact_task_type(task_type: &str) -> &str {
 }
 
 fn compact_task_id(id: &str) -> &str {
-    // "20260312-035" → "035" (last 3 chars after the dash)
+    // "20260312-035" → "035" (suffix after the last dash)
     id.rsplit('-').next().unwrap_or(id)
+}
+
+fn compact_linear_label(linear_issue_id: &str) -> String {
+    if linear_issue_id.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", linear_issue_id)
+    }
 }
 
 fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
@@ -443,33 +451,25 @@ fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
             .as_deref()
             .map(format_elapsed_since)
             .unwrap_or_default();
-        let linear = if task.linear_issue_id.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", task.linear_issue_id.cyan())
-        };
+        let linear = compact_linear_label(&task.linear_issue_id);
         println!(
             " {} {} {}{} {}",
             "●".green().bold(),
             compact_task_id(&task.id),
             compact_task_type(&task.task_type).blue(),
-            linear,
+            linear.cyan(),
             elapsed.dimmed(),
         );
     }
 
     for task in pending.iter().take(3) {
-        let linear = if task.linear_issue_id.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", task.linear_issue_id.cyan())
-        };
+        let linear = compact_linear_label(&task.linear_issue_id);
         println!(
             " {} {} {}{}",
             "○".yellow(),
             compact_task_id(&task.id),
             compact_task_type(&task.task_type).blue(),
-            linear,
+            linear.cyan(),
         );
     }
     if pending.len() > 3 {
@@ -485,11 +485,7 @@ fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = if task.linear_issue_id.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", task.linear_issue_id)
-        };
+        let linear = compact_linear_label(&task.linear_issue_id);
         println!(
             " {} {} {}{} {}",
             "✓".dimmed(),
@@ -507,11 +503,7 @@ fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = if task.linear_issue_id.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", task.linear_issue_id)
-        };
+        let linear = compact_linear_label(&task.linear_issue_id);
         println!(
             " {} {} {}{} {}",
             "✗".red(),

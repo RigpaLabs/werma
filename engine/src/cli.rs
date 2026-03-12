@@ -83,8 +83,8 @@ pub enum Commands {
         #[arg(short, long)]
         compact: bool,
 
-        /// Refresh interval in seconds (default: 3)
-        #[arg(short, long, default_value_t = 3)]
+        /// Refresh interval in seconds (default: 3, minimum: 1)
+        #[arg(short, long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..))]
         interval: u64,
     },
 
