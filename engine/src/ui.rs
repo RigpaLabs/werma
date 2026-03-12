@@ -255,7 +255,11 @@ pub fn render_status_buf(
         write_task_line(&mut buf, task, &prio, 45);
     }
     if pending.len() > 5 {
-        let _ = writeln!(buf, "   {}", dimmed(&format!("... +{} more", pending.len() - 5)));
+        let _ = writeln!(
+            buf,
+            "   {}",
+            dimmed(&format!("... +{} more", pending.len() - 5))
+        );
     }
 
     // Completed + Failed
@@ -351,7 +355,11 @@ pub fn render_compact_buf(
         );
     }
     if pending.len() > 3 {
-        let _ = writeln!(buf, " {}", dimmed(&format!("  +{} more", pending.len() - 3)));
+        let _ = writeln!(
+            buf,
+            " {}",
+            dimmed(&format!("  +{} more", pending.len() - 3))
+        );
     }
 
     // Only show separator if there were running or pending tasks above
