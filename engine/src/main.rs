@@ -252,14 +252,33 @@ fn cmd_list(db: &Db, status_filter: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_status(db: &Db, watch: bool) -> Result<()> {
+fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<()> {
+    let term_width = terminal_size::terminal_size()
+        .map(|(w, _)| w.0 as usize)
+        .unwrap_or(80);
+    let use_compact = compact || term_width < 60;
+    let auto_compacted = !compact && term_width < 60;
+
     if watch {
+        if auto_compacted {
+            eprintln!("tip: terminal width < 60, using compact mode (or pass -c)");
+        }
         loop {
             print!("\x1b[2J\x1b[H");
             std::io::Write::flush(&mut std::io::stdout()).ok();
-            render_status(db)?;
-            std::thread::sleep(std::time::Duration::from_secs(5));
+            if use_compact {
+                render_compact(db, Some(interval))?;
+            } else {
+                render_status(db)?;
+                println!("{}", format!("                                                              ↻ {interval}s").dimmed());
+            }
+            std::thread::sleep(std::time::Duration::from_secs(interval));
         }
+    } else if use_compact {
+        if auto_compacted {
+            eprintln!("tip: terminal width < 60, using compact mode (or pass -c)");
+        }
+        render_compact(db, None)?;
     } else {
         render_status(db)?;
     }
@@ -363,7 +382,7 @@ fn render_status(db: &Db) -> Result<()> {
     );
 
     // Show newest first: reverse order (DB returns oldest first typically)
-    let recent: Vec<&Task> = completed.iter().rev().take(5).collect();
+    let recent: Vec<&Task> = completed.iter().rev().take(10).collect();
     let failed_recent: Vec<&Task> = failed.iter().rev().take(5).collect();
 
     for task in &recent {
@@ -383,6 +402,132 @@ fn render_status(db: &Db) -> Result<()> {
     }
 
     println!();
+    Ok(())
+}
+
+fn compact_task_type(task_type: &str) -> &str {
+    match task_type {
+        "pipeline-engineer" => "engineer",
+        "pipeline-analyst" => "analyst",
+        "pipeline-reviewer" => "reviewer",
+        "pipeline-devops" => "devops",
+        other => other,
+    }
+}
+
+fn compact_task_id(id: &str) -> &str {
+    // "20260312-035" → "035" (suffix after the last dash)
+    id.rsplit('-').next().unwrap_or(id)
+}
+
+fn compact_linear_label(linear_issue_id: &str) -> String {
+    if linear_issue_id.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", linear_issue_id)
+    }
+}
+
+fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
+    let running = db.list_tasks(Some(Status::Running))?;
+    let pending = db.list_tasks(Some(Status::Pending))?;
+    let completed = db.list_tasks(Some(Status::Completed))?;
+    let failed = db.list_tasks(Some(Status::Failed))?;
+
+    let sep = "───────────────────────────────────";
+
+    println!(
+        " werma {} {} running  {} {} pending",
+        "●".green().bold(),
+        running.len().to_string().green().bold(),
+        "○".yellow(),
+        pending.len().to_string().yellow(),
+    );
+    println!(" {sep}");
+
+    for task in &running {
+        let elapsed = task
+            .started_at
+            .as_deref()
+            .map(format_elapsed_since)
+            .unwrap_or_default();
+        let linear = compact_linear_label(&task.linear_issue_id);
+        println!(
+            " {} {} {}{} {}",
+            "●".green().bold(),
+            compact_task_id(&task.id),
+            compact_task_type(&task.task_type).blue(),
+            linear.cyan(),
+            elapsed.dimmed(),
+        );
+    }
+
+    for task in pending.iter().take(3) {
+        let linear = compact_linear_label(&task.linear_issue_id);
+        println!(
+            " {} {} {}{}",
+            "○".yellow(),
+            compact_task_id(&task.id),
+            compact_task_type(&task.task_type).blue(),
+            linear.cyan(),
+        );
+    }
+    if pending.len() > 3 {
+        println!(" {}", format!("  +{} more", pending.len() - 3).dimmed());
+    }
+
+    println!(" {sep}");
+
+    // Recent completed (last 5, newest first)
+    let recent: Vec<&Task> = completed.iter().rev().take(5).collect();
+    for task in &recent {
+        let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
+            (Some(s), Some(e)) => format_duration_between(s, e),
+            _ => String::new(),
+        };
+        let linear = compact_linear_label(&task.linear_issue_id);
+        println!(
+            " {} {} {}{} {}",
+            "✓".dimmed(),
+            compact_task_id(&task.id),
+            compact_task_type(&task.task_type),
+            linear.dimmed(),
+            dur.dimmed(),
+        );
+    }
+
+    // Recent failed (last 5, newest first)
+    let failed_recent: Vec<&Task> = failed.iter().rev().take(5).collect();
+    for task in &failed_recent {
+        let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
+            (Some(s), Some(e)) => format_duration_between(s, e),
+            _ => String::new(),
+        };
+        let linear = compact_linear_label(&task.linear_issue_id);
+        println!(
+            " {} {} {}{} {}",
+            "✗".red(),
+            compact_task_id(&task.id),
+            compact_task_type(&task.task_type),
+            linear.dimmed(),
+            dur.dimmed(),
+        );
+    }
+
+    println!(" {sep}");
+
+    let refresh_str = if let Some(secs) = interval {
+        format!("  ↻ {secs}s")
+    } else {
+        String::new()
+    };
+    println!(
+        " {} done  {} fail{}",
+        completed.len().to_string().dimmed(),
+        failed.len().to_string().red(),
+        refresh_str.dimmed(),
+    );
+
     Ok(())
 }
 
@@ -1260,9 +1405,13 @@ fn main() -> anyhow::Result<()> {
             cmd_list(&db, status.as_deref())?;
         }
 
-        cli::Commands::Status { watch } => {
+        cli::Commands::Status {
+            watch,
+            compact,
+            interval,
+        } => {
             let db = open_db()?;
-            cmd_status(&db, watch)?;
+            cmd_status(&db, watch, compact, interval)?;
         }
 
         cli::Commands::View { id } => {
