@@ -266,7 +266,7 @@ fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<()> 
 
         let mut prev_lines = 0;
 
-        // Ensure cursor is restored on exit (Ctrl+C via panic/unwind)
+        // Ensure cursor is restored on exit (Ctrl+C, normal return, or panic)
         struct CursorGuard;
         impl Drop for CursorGuard {
             fn drop(&mut self) {
@@ -1063,7 +1063,7 @@ fn cmd_sched_list(db: &Db) -> Result<()> {
         // Show last_enqueued for schedules that have it
         for s in &schedules {
             if !s.last_enqueued.is_empty() {
-                println!("    {} last: {}", s.id, s.last_enqueued);
+                println!("    last: {}", s.last_enqueued);
             }
         }
     }

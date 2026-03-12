@@ -193,6 +193,14 @@ pub fn poll(db: &Db) -> Result<()> {
                     continue;
                 }
 
+                // For reviewer stage: skip if PR is already merged (manual merge while in Review)
+                if stage_name == "reviewer" && is_pr_merged_for_issue(&working_dir, identifier) {
+                    println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
+                    let _ = linear.move_issue_by_name(issue_id, "done");
+                    total_skipped += 1;
+                    continue;
+                }
+
                 // Build prompt from config
                 let prompt = build_poll_prompt(&config, stage_cfg, identifier, title, description);
 
@@ -318,13 +326,35 @@ pub fn poll(db: &Db) -> Result<()> {
                 continue;
             }
 
+            // For reviewer stage: skip if PR is already merged
+            if *stage_name == "reviewer" && is_pr_merged_for_issue(&working_dir, identifier) {
+                println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
+                let _ = linear.move_issue_by_name(issue_id, "done");
+                total_skipped += 1;
+                continue;
+            }
+
             let prompt = build_poll_prompt(&config, stage_cfg, identifier, title, description);
 
             let task_id = db.next_task_id()?;
             let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
 
-            let max_turns = crate::default_turns(&stage_cfg.agent);
+            let issue_estimate = issue["estimate"].as_i64().unwrap_or(0) as i32;
+
+            let review_round: i64 = if *stage_name == "reviewer" {
+                db.count_completed_tasks_for_issue_stage(identifier, "reviewer")?
+            } else {
+                0
+            };
+
+            let max_turns = stage_cfg
+                .max_turns
+                .map(|t| t as i32)
+                .unwrap_or_else(|| crate::default_turns(&stage_cfg.agent));
             let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
+            let effective_model = stage_cfg
+                .effective_model(issue_estimate, review_round)
+                .to_string();
 
             let task = Task {
                 id: task_id.clone(),
@@ -337,7 +367,7 @@ pub fn poll(db: &Db) -> Result<()> {
                 prompt,
                 output_path: String::new(),
                 working_dir,
-                model: stage_cfg.model.clone(),
+                model: effective_model,
                 max_turns,
                 allowed_tools,
                 session_id: String::new(),
@@ -347,7 +377,7 @@ pub fn poll(db: &Db) -> Result<()> {
                 depends_on: vec![],
                 context_files: vec![],
                 repo_hash: crate::runtime_repo_hash(),
-                estimate: issue["estimate"].as_i64().unwrap_or(0) as i32,
+                estimate: issue_estimate,
             };
 
             db.insert_task(&task)?;
@@ -388,6 +418,14 @@ pub fn callback(
     linear_issue_id: &str,
     working_dir: &str,
 ) -> Result<()> {
+    // Dedup guard: if callback was recently fired for this task, skip to prevent
+    // duplicate Linear comments from overlapping daemon ticks / cmd_complete races.
+    if db.is_callback_recently_fired(task_id, 60)? {
+        eprintln!("callback: skipping duplicate for task {task_id} (fired <60s ago)");
+        return Ok(());
+    }
+    db.set_callback_fired_at(task_id)?;
+
     let config = load_default()?;
     let linear = LinearClient::new()?;
 
@@ -645,6 +683,29 @@ fn resolve_home(path: &str) -> PathBuf {
         return home.join(rest);
     }
     PathBuf::from(path)
+}
+
+/// Check if a merged PR exists for the given Linear issue identifier in the repo.
+/// Uses `gh pr list --search` to find merged PRs mentioning the issue.
+fn is_pr_merged_for_issue(working_dir: &str, identifier: &str) -> bool {
+    let working_dir = resolve_home(working_dir);
+    let output = Command::new("gh")
+        .args([
+            "pr", "list", "--search", identifier, "--state", "merged", "--json", "number",
+            "--limit", "1",
+        ])
+        .current_dir(&working_dir)
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let text = text.trim();
+            // gh pr list returns "[]" if no results
+            text != "[]" && !text.is_empty()
+        }
+        _ => false,
+    }
 }
 
 /// Automatically create a GitHub PR from the engineer's worktree branch.
@@ -1445,6 +1506,16 @@ mod tests {
     fn handoff_includes_pr_url_when_provided() {
         let db = crate::db::Db::open_in_memory().unwrap();
         let config = test_config();
+
+        // Pre-insert dummy tasks to offset the ID counter, avoiding handoff file
+        // collisions with other tests that also generate 20260312-001 IDs.
+        for i in 0..20 {
+            let dummy = crate::models::Task {
+                id: format!("20260312-{:03}", i + 1),
+                ..Default::default()
+            };
+            db.insert_task(&dummy).unwrap();
+        }
 
         let engineer_output = "Implementation complete.\nVERDICT=DONE";
         let pr_url = "https://github.com/RigpaLabs/werma/pull/42";
