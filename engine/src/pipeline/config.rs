@@ -31,6 +31,13 @@ pub struct StageConfig {
     /// Absent means this stage is spawned-only (not polled directly).
     #[serde(default)]
     pub linear_status: Option<OneOrMany>,
+    /// Poll issues by Linear label instead of (or in addition to) status.
+    /// After task creation, the label is removed from the issue.
+    #[serde(default)]
+    pub linear_label: Option<String>,
+    /// Action to take when a task is created for this stage (e.g. move issue status).
+    #[serde(default)]
+    pub on_start: Option<OnStartConfig>,
     /// Agent type string (e.g. "pipeline-reviewer").
     pub agent: String,
     /// Model short name: "opus" | "sonnet" | "haiku".
@@ -68,6 +75,13 @@ pub struct StageConfig {
     /// SP threshold: if task estimate <= this, use light_model. Default: 2.
     #[serde(default)]
     pub light_threshold: Option<u32>,
+}
+
+/// Action to take when a pipeline stage picks up an issue.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OnStartConfig {
+    /// Linear status to move the issue to when the task is created.
+    pub status: String,
 }
 
 /// Behavior when processing an issue that has the `manual` label.
@@ -122,11 +136,11 @@ impl<'de> Deserialize<'de> for OneOrMany {
 }
 
 impl PipelineConfig {
-    /// Returns all Linear status keys mapped by stage name (only polled stages).
+    /// Returns all stages that can be polled (have linear_status or linear_label).
     pub fn poll_stages(&self) -> Vec<(&str, &StageConfig)> {
         self.stages
             .iter()
-            .filter(|(_, s)| s.linear_status.is_some())
+            .filter(|(_, s)| s.linear_status.is_some() || s.linear_label.is_some())
             .map(|(name, s)| (name.as_str(), s))
             .collect()
     }
@@ -216,6 +230,9 @@ templates:
 stages:
   analyst:
     linear_status: todo
+    linear_label: analyze
+    on_start:
+      status: in_progress
     agent: pipeline-analyst
     model: opus
     manual: skip
@@ -498,6 +515,59 @@ stages:
         assert!(stage.max_turns.is_none());
         assert!(stage.light_model.is_none());
         assert!(stage.light_threshold.is_none());
+    }
+
+    #[test]
+    fn on_start_config_parsed() {
+        let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
+        let analyst = config.stage("analyst").unwrap();
+        let on_start = analyst.on_start.as_ref().unwrap();
+        assert_eq!(on_start.status, "in_progress");
+    }
+
+    #[test]
+    fn on_start_config_absent() {
+        let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
+        let engineer = config.stage("engineer").unwrap();
+        assert!(engineer.on_start.is_none());
+    }
+
+    #[test]
+    fn linear_label_parsed() {
+        let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
+        let analyst = config.stage("analyst").unwrap();
+        assert_eq!(analyst.linear_label.as_deref(), Some("analyze"));
+    }
+
+    #[test]
+    fn linear_label_absent() {
+        let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
+        let reviewer = config.stage("reviewer").unwrap();
+        assert!(reviewer.linear_label.is_none());
+    }
+
+    #[test]
+    fn poll_stages_includes_label_only_stage() {
+        let yaml = r#"
+pipeline: test
+stages:
+  label_only:
+    linear_label: trigger-me
+    agent: pipeline-test
+    model: sonnet
+  spawned_only:
+    agent: pipeline-test
+    model: sonnet
+  status_based:
+    linear_status: todo
+    agent: pipeline-test
+    model: sonnet
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        let polled: Vec<&str> = config.poll_stages().iter().map(|(n, _)| *n).collect();
+        assert!(polled.contains(&"label_only"));
+        assert!(polled.contains(&"status_based"));
+        assert!(!polled.contains(&"spawned_only"));
     }
 
     #[test]
