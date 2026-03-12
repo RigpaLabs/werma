@@ -94,7 +94,10 @@ fn latest_release(token: &str) -> Result<ReleaseInfo> {
 
 /// Download a release asset and extract the binary to a temp directory.
 /// Returns the temp dir (must be kept alive) and the path to the extracted binary.
-fn download_and_extract(token: &str, release: &ReleaseInfo) -> Result<(tempfile::TempDir, std::path::PathBuf)> {
+fn download_and_extract(
+    token: &str,
+    release: &ReleaseInfo,
+) -> Result<(tempfile::TempDir, std::path::PathBuf)> {
     let target = current_target();
     if target == "unknown" {
         bail!("unsupported platform — download manually from GitHub Releases");
@@ -207,7 +210,12 @@ pub fn check_and_apply_update() -> Result<bool> {
     }
 
     let (_tmp_dir, new_binary) = download_and_extract(&token, &release)?;
-    install_binary(&new_binary)?;
+    let codesign_ok = install_binary(&new_binary)?;
+    if !codesign_ok {
+        // Binary installed but codesign failed — macOS will SIGKILL it on next exec.
+        // Log and bail so the daemon does not restart into a broken binary.
+        anyhow::bail!("update applied but codesign failed — run: codesign --force --sign - $(which werma)");
+    }
     Ok(true)
 }
 
