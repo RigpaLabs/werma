@@ -944,7 +944,9 @@ mod tests {
 
         assert!(script.contains("FALLBACK_MODEL='claude-sonnet-4-6'"));
         assert!(script.contains("run_claude"));
-        assert!(script.contains("rate.?limit|429|too many requests|quota.?exceeded|server.?overloaded|api.?capacity"));
+        assert!(script.contains(
+            "rate.?limit|429|too many requests|quota.?exceeded|server.?overloaded|api.?capacity",
+        ));
         assert!(script.contains("retrying with fallback"));
     }
 
