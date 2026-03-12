@@ -35,6 +35,9 @@ pub struct StageConfig {
     pub agent: String,
     /// Model short name: "opus" | "sonnet" | "haiku".
     pub model: String,
+    /// Fallback model if primary is rate-limited.
+    #[serde(default)]
+    pub fallback: Option<String>,
     /// Deprecated: per-stage max_concurrent is ignored. Use pipeline-level max_concurrent.
     /// Kept for backward compatibility with existing YAML configs.
     #[serde(default)]
@@ -181,6 +184,7 @@ stages:
   engineer:
     agent: pipeline-engineer
     model: opus
+    fallback: sonnet
     manual: skip
     transitions:
       done:
@@ -364,6 +368,16 @@ stages:
         let analyst = config.stage("analyst").unwrap();
         let t = analyst.transition_for("done").unwrap();
         assert_eq!(t.spawn.as_deref(), Some("engineer"));
+    }
+
+    #[test]
+    fn fallback_model_parsed() {
+        let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
+        let engineer = config.stage("engineer").unwrap();
+        assert_eq!(engineer.fallback.as_deref(), Some("sonnet"));
+
+        let analyst = config.stage("analyst").unwrap();
+        assert!(analyst.fallback.is_none());
     }
 
     #[test]

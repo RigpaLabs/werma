@@ -1080,6 +1080,16 @@ mod tests {
         let db = crate::db::Db::open_in_memory().unwrap();
         let config = test_config();
 
+        // Pre-insert dummy tasks to offset the ID counter, avoiding handoff file
+        // collisions with other tests that also generate 20260312-001 IDs.
+        for i in 0..10 {
+            let dummy = crate::models::Task {
+                id: format!("20260312-{:03}", i + 1),
+                ..Default::default()
+            };
+            db.insert_task(&dummy).unwrap();
+        }
+
         // Use realistic linear_issue_id (RIG-XX format, as in production)
         let issue_id = "RIG-42";
 

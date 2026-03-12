@@ -297,6 +297,7 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     };
 
     let model = model_flag(&task.model);
+    let fallback_model = resolve_fallback_model(task);
     let log_file = logs_dir.join(format!("{task_id}.log"));
     let prompt_file = logs_dir.join(format!("{task_id}-prompt.txt"));
     let exec_script = logs_dir.join(format!("{task_id}-exec.sh"));
@@ -322,6 +323,7 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
         tools: &tools,
         max_turns: task.max_turns,
         model,
+        fallback_model: fallback_model.as_deref(),
         log_file: &log_file,
         is_write_task: crate::worktree::needs_worktree(&task.task_type),
     });
@@ -370,18 +372,27 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     }
 }
 
-/// Resolve `~/` prefix to home directory. Public for use by daemon watchdog.
-pub fn resolve_home_pub(path: &str) -> PathBuf {
-    resolve_home(path)
-}
-
-fn resolve_home(path: &str) -> PathBuf {
+/// Resolve `~/` prefix to home directory.
+pub fn resolve_home(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/")
         && let Some(home) = dirs::home_dir()
     {
         return home.join(rest);
     }
     PathBuf::from(path)
+}
+
+/// Resolve fallback model for a pipeline task by looking up the pipeline config.
+fn resolve_fallback_model(task: &Task) -> Option<String> {
+    if task.pipeline_stage.is_empty() {
+        return None;
+    }
+    let config = crate::pipeline::loader::load_default().ok()?;
+    let stage_cfg = config.stage(&task.pipeline_stage)?;
+    stage_cfg
+        .fallback
+        .as_ref()
+        .map(|f| model_flag(f).to_string())
 }
 
 /// Parameters for exec script generation — avoids too-many-arguments.
@@ -393,6 +404,7 @@ struct ExecScriptParams<'a> {
     tools: &'a str,
     max_turns: i32,
     model: &'a str,
+    fallback_model: Option<&'a str>,
     log_file: &'a Path,
     is_write_task: bool,
 }
@@ -409,6 +421,7 @@ fn generate_exec_script(params: &ExecScriptParams<'_>) -> String {
     let tools = params.tools;
     let max_turns = params.max_turns;
     let model = params.model;
+    let fallback_model = params.fallback_model.unwrap_or("");
 
     // For write tasks, add a bash guard that verifies cwd is inside .trees/
     let worktree_guard = if params.is_write_task {
@@ -436,6 +449,7 @@ WORKING_DIR='{working_dir_str}'
 ALLOWED_TOOLS='{tools}'
 MAX_TURNS='{max_turns}'
 MODEL='{model}'
+FALLBACK_MODEL='{fallback_model}'
 LOG_FILE='{log_file_str}'
 RESULT_FILE="${{LOG_FILE%.log}}-output.md"
 
@@ -443,14 +457,38 @@ cd "$WORKING_DIR"
 {worktree_guard}
 PROMPT=$(cat "$PROMPT_FILE")
 
-RESULT_JSON=$(claude -p "$PROMPT" \
-    --allowedTools "$ALLOWED_TOOLS" \
-    --max-turns "$MAX_TURNS" \
-    --model "$MODEL" \
-    --output-format json 2>> "$LOG_FILE") || {{
-    echo "$(date): FAILED (exit $?)" >> "$LOG_FILE"
-    werma fail "$TASK_ID"
-    exit 1
+run_claude() {{
+    local use_model="$1"
+    claude -p "$PROMPT" \
+        --allowedTools "$ALLOWED_TOOLS" \
+        --max-turns "$MAX_TURNS" \
+        --model "$use_model" \
+        --output-format json 2>> "$LOG_FILE"
+}}
+
+RESULT_JSON=$(run_claude "$MODEL") || {{
+    EXIT_CODE=$?
+    # Check if fallback model is configured and error looks like a rate limit
+    if [ -n "$FALLBACK_MODEL" ]; then
+        LAST_LINES=$(tail -20 "$LOG_FILE" 2>/dev/null || echo "")
+        if echo "$LAST_LINES" | grep -qiE "rate.?limit|overloaded|429|too many requests|quota|capacity"; then
+            echo "$(date): primary model $MODEL rate-limited (exit $EXIT_CODE), retrying with fallback $FALLBACK_MODEL" >> "$LOG_FILE"
+            RESULT_JSON=$(run_claude "$FALLBACK_MODEL") || {{
+                echo "$(date): FAILED with fallback model (exit $?)" >> "$LOG_FILE"
+                werma fail "$TASK_ID"
+                exit 1
+            }}
+            MODEL="$FALLBACK_MODEL"
+        else
+            echo "$(date): FAILED (exit $EXIT_CODE, no rate-limit match)" >> "$LOG_FILE"
+            werma fail "$TASK_ID"
+            exit 1
+        fi
+    else
+        echo "$(date): FAILED (exit $EXIT_CODE)" >> "$LOG_FILE"
+        werma fail "$TASK_ID"
+        exit 1
+    fi
 }}
 
 # Strategy 1: extract .result from JSON
@@ -804,6 +842,7 @@ mod tests {
             tools: "Read,Grep,Glob",
             max_turns: 15,
             model: "claude-sonnet-4-6",
+            fallback_model: None,
             log_file: Path::new("/home/user/.werma/logs/20260309-001.log"),
             is_write_task: false,
         });
@@ -822,6 +861,7 @@ mod tests {
             tools: "Read,Grep,Glob",
             max_turns: 15,
             model: "claude-sonnet-4-6",
+            fallback_model: None,
             log_file: Path::new("/tmp/log.log"),
             is_write_task: false,
         });
@@ -849,6 +889,7 @@ mod tests {
             tools: "Read",
             max_turns: 10,
             model: "claude-sonnet-4-6",
+            fallback_model: None,
             log_file: Path::new("/tmp/test.log"),
             is_write_task: false,
         });
@@ -874,12 +915,52 @@ mod tests {
             tools: "Read,Edit,Write,Bash",
             max_turns: 15,
             model: "claude-sonnet-4-6",
+            fallback_model: None,
             log_file: Path::new("/tmp/test.log"),
             is_write_task: true,
         });
 
         assert!(script.contains("SAFETY ABORT"));
         assert!(script.contains(".trees/"));
+    }
+
+    #[test]
+    fn exec_script_with_fallback_model() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "20260312-004",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Edit,Write,Bash",
+            max_turns: 15,
+            model: "claude-opus-4-6",
+            fallback_model: Some("claude-sonnet-4-6"),
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        assert!(script.contains("FALLBACK_MODEL='claude-sonnet-4-6'"));
+        assert!(script.contains("run_claude"));
+        assert!(script.contains("rate.?limit|overloaded|429|too many requests|quota|capacity"));
+        assert!(script.contains("retrying with fallback"));
+    }
+
+    #[test]
+    fn exec_script_without_fallback_no_retry() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "20260312-005",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read",
+            max_turns: 10,
+            model: "claude-sonnet-4-6",
+            fallback_model: None,
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        assert!(script.contains("FALLBACK_MODEL=''"));
     }
 
     #[test]
@@ -892,6 +973,7 @@ mod tests {
             tools: "Read,Grep,Glob",
             max_turns: 15,
             model: "claude-sonnet-4-6",
+            fallback_model: None,
             log_file: Path::new("/tmp/test.log"),
             is_write_task: false,
         });
