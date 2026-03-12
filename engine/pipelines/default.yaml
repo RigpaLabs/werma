@@ -4,7 +4,7 @@ max_concurrent: 5
 
 templates:
   verdict_instruction: "Output your verdict on the LAST line of your response"
-  nit_threshold: "3"
+  nit_threshold: "1"
 
 stages:
   analyst:

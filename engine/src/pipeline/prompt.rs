@@ -41,7 +41,7 @@ pub fn build_vars(
 ///   only. When threshold>=1, produces reject/approve rules with the threshold value.
 fn compute_derived_vars(vars: &mut HashMap<String, String>) {
     if let Some(threshold_str) = vars.get("nit_threshold").cloned() {
-        let threshold: u32 = threshold_str.parse().unwrap_or(3);
+        let threshold: u32 = threshold_str.parse().unwrap_or(1);
         let policy = if threshold == 0 {
             "   - Nits are informational only — list them but do not reject based on nit count alone\n   - **APPROVE** if no blockers".to_string()
         } else {
@@ -179,6 +179,20 @@ mod tests {
         let runtime = vars(&[]);
         let result = build_vars(&templates, &runtime);
         assert_eq!(result["nit_policy"], "custom policy", "explicit nit_policy should not be overridden");
+    }
+
+    #[test]
+    fn nit_policy_invalid_threshold_falls_back_to_default() {
+        let mut templates = IndexMap::new();
+        templates.insert("nit_threshold".to_string(), "abc".to_string());
+        let runtime = vars(&[]);
+        let result = build_vars(&templates, &runtime);
+        let policy = &result["nit_policy"];
+        // Invalid parse falls back to 1 (strict default)
+        assert!(
+            policy.contains("1+ nits"),
+            "invalid threshold should fall back to 1, got: {policy}"
+        );
     }
 
     #[test]
