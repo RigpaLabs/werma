@@ -20,6 +20,7 @@ pub fn render_prompt(template: &str, vars: &HashMap<String, String>) -> String {
 ///
 /// `templates` from the pipeline config are inserted first (lower priority).
 /// Runtime vars (issue data, stage data) override any template with the same key.
+/// Computed variables (e.g. `nit_policy`) are derived after merging.
 pub fn build_vars(
     templates: &IndexMap<String, String>,
     runtime: &HashMap<String, String>,
@@ -29,7 +30,27 @@ pub fn build_vars(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     vars.extend(runtime.iter().map(|(k, v)| (k.clone(), v.clone())));
+    compute_derived_vars(&mut vars);
     vars
+}
+
+/// Derive computed template variables from existing ones.
+///
+/// Currently handles:
+/// - `nit_policy`: generated from `nit_threshold`. When threshold=0, nits are informational
+///   only. When threshold>=1, produces reject/approve rules with the threshold value.
+fn compute_derived_vars(vars: &mut HashMap<String, String>) {
+    if let Some(threshold_str) = vars.get("nit_threshold").cloned() {
+        let threshold: u32 = threshold_str.parse().unwrap_or(3);
+        let policy = if threshold == 0 {
+            "   - Nits are informational only — list them but do not reject based on nit count alone\n   - **APPROVE** if no blockers".to_string()
+        } else {
+            format!(
+                "   - **REJECT** if there are {threshold}+ nits (accumulation of small issues signals low quality)\n   - **APPROVE** if no blockers and fewer than {threshold} nits"
+            )
+        };
+        vars.entry("nit_policy".to_string()).or_insert(policy);
+    }
 }
 
 #[cfg(test)]
@@ -117,6 +138,47 @@ mod tests {
         let template = "Before {x} after";
         let v = vars(&[("x", "")]);
         assert_eq!(render_prompt(template, &v), "Before  after");
+    }
+
+    #[test]
+    fn nit_policy_threshold_zero_is_informational() {
+        let mut templates = IndexMap::new();
+        templates.insert("nit_threshold".to_string(), "0".to_string());
+        let runtime = vars(&[]);
+        let result = build_vars(&templates, &runtime);
+        let policy = &result["nit_policy"];
+        assert!(
+            policy.contains("informational only"),
+            "threshold=0 should produce informational policy, got: {policy}"
+        );
+        assert!(
+            !policy.contains("REJECT"),
+            "threshold=0 should not mention REJECT, got: {policy}"
+        );
+    }
+
+    #[test]
+    fn nit_policy_threshold_nonzero() {
+        let mut templates = IndexMap::new();
+        templates.insert("nit_threshold".to_string(), "3".to_string());
+        let runtime = vars(&[]);
+        let result = build_vars(&templates, &runtime);
+        let policy = &result["nit_policy"];
+        assert!(policy.contains("3+ nits"), "should contain threshold value");
+        assert!(
+            policy.contains("fewer than 3"),
+            "should contain approve condition"
+        );
+    }
+
+    #[test]
+    fn nit_policy_not_overridden_by_computed() {
+        let mut templates = IndexMap::new();
+        templates.insert("nit_threshold".to_string(), "3".to_string());
+        templates.insert("nit_policy".to_string(), "custom policy".to_string());
+        let runtime = vars(&[]);
+        let result = build_vars(&templates, &runtime);
+        assert_eq!(result["nit_policy"], "custom policy", "explicit nit_policy should not be overridden");
     }
 
     #[test]
