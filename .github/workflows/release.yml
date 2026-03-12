@@ -146,8 +146,10 @@ jobs:
             echo 'CHANGELOG_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         if: steps.bump.outputs.skipped != 'true'
+        with:
+          toolchain: "1.88.0"
 
       - name: Bump Cargo.toml, tag & push
         if: steps.bump.outputs.skipped != 'true'
@@ -262,8 +264,9 @@ jobs:
         with:
           ref: ${{ needs.version.outputs.tag }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.88.0"
           targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
