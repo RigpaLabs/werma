@@ -715,7 +715,10 @@ pub fn infer_working_dir(title: &str, labels: &[&str]) -> String {
                 return dir.to_string();
             }
             // Unknown repo label — fall through to keyword matching
-            eprintln!("warning: unknown repo label 'repo:{}', falling back to keyword inference", repo);
+            eprintln!(
+                "warning: unknown repo label 'repo:{}', falling back to keyword inference",
+                repo
+            );
         }
     }
 
@@ -874,9 +877,18 @@ mod tests {
         assert_eq!(repo_label_to_dir("forge"), Some("~/projects/rigpa/werma"));
         assert_eq!(repo_label_to_dir("werma"), Some("~/projects/rigpa/werma"));
         assert_eq!(repo_label_to_dir("fathom"), Some("~/projects/rigpa/fathom"));
-        assert_eq!(repo_label_to_dir("hyper-liq"), Some("~/projects/rigpa/hyper-liq"));
-        assert_eq!(repo_label_to_dir("sui-bots"), Some("~/projects/rigpa/sui-bots"));
-        assert_eq!(repo_label_to_dir("ar-quant"), Some("~/projects/rigpa/ar-quant"));
+        assert_eq!(
+            repo_label_to_dir("hyper-liq"),
+            Some("~/projects/rigpa/hyper-liq")
+        );
+        assert_eq!(
+            repo_label_to_dir("sui-bots"),
+            Some("~/projects/rigpa/sui-bots")
+        );
+        assert_eq!(
+            repo_label_to_dir("ar-quant"),
+            Some("~/projects/rigpa/ar-quant")
+        );
         assert_eq!(
             repo_label_to_dir("ar-quant-alpha"),
             Some("~/projects/rigpa/ar-quant-alpha")
