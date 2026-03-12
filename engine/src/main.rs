@@ -1581,7 +1581,7 @@ fn main() -> anyhow::Result<()> {
         },
 
         cli::Commands::Update => {
-            update::update()?;
+            update::update()?; // UpdateResult printed by update() itself
         }
 
         cli::Commands::Review { target, dir, force } => {
