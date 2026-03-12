@@ -271,7 +271,21 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     // Set up worktree for write tasks — gives each agent an isolated copy
     let effective_dir = if crate::worktree::needs_worktree(&task.task_type) {
         let branch = crate::worktree::generate_branch_name(task);
-        crate::worktree::setup_worktree(&working_dir, &branch)?
+        let worktree_dir = crate::worktree::setup_worktree(&working_dir, &branch)?;
+
+        // SAFETY GUARD: verify the worktree is actually inside .trees/
+        // This prevents agents from accidentally working on the main checkout
+        // if worktree setup silently falls back to the main repo directory.
+        if !crate::worktree::is_inside_worktree(&worktree_dir) {
+            bail!(
+                "SAFETY: write task {} would run outside .trees/ (dir: {}). \
+                 Aborting to prevent main branch contamination.",
+                task_id,
+                worktree_dir.display()
+            );
+        }
+
+        worktree_dir
     } else {
         working_dir.clone()
     };
@@ -309,6 +323,7 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
         max_turns: task.max_turns,
         model,
         log_file: &log_file,
+        is_write_task: crate::worktree::needs_worktree(&task.task_type),
     });
 
     std::fs::write(&exec_script, &script)?;
@@ -355,6 +370,11 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     }
 }
 
+/// Resolve `~/` prefix to home directory. Public for use by daemon watchdog.
+pub fn resolve_home_pub(path: &str) -> PathBuf {
+    resolve_home(path)
+}
+
 fn resolve_home(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/")
         && let Some(home) = dirs::home_dir()
@@ -374,6 +394,7 @@ struct ExecScriptParams<'a> {
     max_turns: i32,
     model: &'a str,
     log_file: &'a Path,
+    is_write_task: bool,
 }
 
 /// Generate a self-contained bash exec script for tmux.
@@ -388,6 +409,20 @@ fn generate_exec_script(params: &ExecScriptParams<'_>) -> String {
     let tools = params.tools;
     let max_turns = params.max_turns;
     let model = params.model;
+
+    // For write tasks, add a bash guard that verifies cwd is inside .trees/
+    let worktree_guard = if params.is_write_task {
+        r#"
+# SAFETY GUARD: write tasks must run inside a .trees/ worktree, never on main checkout
+if [[ "$WORKING_DIR" != */.trees/* ]]; then
+    echo "$(date): SAFETY ABORT — write task $TASK_ID would run outside .trees/ (dir: $WORKING_DIR)" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+fi
+"#
+    } else {
+        ""
+    };
 
     format!(
         r##"#!/bin/bash
@@ -405,7 +440,7 @@ LOG_FILE='{log_file_str}'
 RESULT_FILE="${{LOG_FILE%.log}}-output.md"
 
 cd "$WORKING_DIR"
-
+{worktree_guard}
 PROMPT=$(cat "$PROMPT_FILE")
 
 RESULT_JSON=$(claude -p "$PROMPT" \
@@ -770,6 +805,7 @@ mod tests {
             max_turns: 15,
             model: "claude-sonnet-4-6",
             log_file: Path::new("/home/user/.werma/logs/20260309-001.log"),
+            is_write_task: false,
         });
 
         assert!(script.contains(r#"> "$RESULT_FILE""#));
@@ -787,6 +823,7 @@ mod tests {
             max_turns: 15,
             model: "claude-sonnet-4-6",
             log_file: Path::new("/tmp/log.log"),
+            is_write_task: false,
         });
 
         assert!(script.contains("TASK_ID='20260308-001'"));
@@ -813,6 +850,7 @@ mod tests {
             max_turns: 10,
             model: "claude-sonnet-4-6",
             log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
         });
 
         // Strategy 1: .result extraction
@@ -824,5 +862,40 @@ mod tests {
         // Guard: empty output detection and fail
         assert!(script.contains("EMPTY OUTPUT"));
         assert!(script.contains("werma fail \"$TASK_ID\""));
+    }
+
+    #[test]
+    fn exec_script_write_task_has_worktree_guard() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "20260312-002",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/home/user/project/.trees/feat--RIG-177"),
+            tools: "Read,Edit,Write,Bash",
+            max_turns: 15,
+            model: "claude-sonnet-4-6",
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: true,
+        });
+
+        assert!(script.contains("SAFETY ABORT"));
+        assert!(script.contains(".trees/"));
+    }
+
+    #[test]
+    fn exec_script_read_task_no_worktree_guard() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "20260312-003",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/home/user/project"),
+            tools: "Read,Grep,Glob",
+            max_turns: 15,
+            model: "claude-sonnet-4-6",
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        assert!(!script.contains("SAFETY ABORT"));
     }
 }

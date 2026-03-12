@@ -40,17 +40,20 @@ pub fn build_vars(
 /// - `nit_policy`: generated from `nit_threshold`. When threshold=0, nits are informational
 ///   only. When threshold>=1, produces reject/approve rules with the threshold value.
 fn compute_derived_vars(vars: &mut HashMap<String, String>) {
-    if let Some(threshold_str) = vars.get("nit_threshold").cloned() {
-        let threshold: u32 = threshold_str.parse().unwrap_or(1);
-        let policy = if threshold == 0 {
-            "   - Nits are informational only — list them but do not reject based on nit count alone\n   - **APPROVE** if no blockers".to_string()
-        } else {
-            format!(
-                "   - **REJECT** if there are {threshold}+ nits (accumulation of small issues signals low quality)\n   - **APPROVE** if no blockers and fewer than {threshold} nits"
-            )
-        };
-        vars.entry("nit_policy".to_string()).or_insert(policy);
-    }
+    let threshold: u32 = vars
+        .get("nit_threshold")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1);
+    let policy = if threshold == 0 {
+        "   - Nits are informational only — list them but do not reject based on nit count alone\n   - **APPROVE** if no blockers".to_string()
+    } else if threshold == 1 {
+        "   - **REJECT** if there are any nits (strict quality bar)\n   - **APPROVE** if no blockers and no nits".to_string()
+    } else {
+        format!(
+            "   - **REJECT** if there are {threshold}+ nits (accumulation of small issues signals low quality)\n   - **APPROVE** if no blockers and fewer than {threshold} nits"
+        )
+    };
+    vars.entry("nit_policy".to_string()).or_insert(policy);
 }
 
 #[cfg(test)]
@@ -191,10 +194,44 @@ mod tests {
         let runtime = vars(&[]);
         let result = build_vars(&templates, &runtime);
         let policy = &result["nit_policy"];
-        // Invalid parse falls back to 1 (strict default)
+        // Invalid parse falls back to 1 (strict default — special-cased phrasing)
         assert!(
-            policy.contains("1+ nits"),
+            policy.contains("any nits"),
             "invalid threshold should fall back to 1, got: {policy}"
+        );
+    }
+
+    #[test]
+    fn nit_policy_threshold_one_natural_phrasing() {
+        let mut templates = IndexMap::new();
+        templates.insert("nit_threshold".to_string(), "1".to_string());
+        let runtime = vars(&[]);
+        let result = build_vars(&templates, &runtime);
+        let policy = &result["nit_policy"];
+        assert!(
+            policy.contains("any nits"),
+            "threshold=1 should use natural phrasing, got: {policy}"
+        );
+        assert!(
+            policy.contains("no nits"),
+            "threshold=1 approve should say 'no nits', got: {policy}"
+        );
+        assert!(
+            !policy.contains("fewer than 1"),
+            "threshold=1 should not use 'fewer than 1', got: {policy}"
+        );
+    }
+
+    #[test]
+    fn nit_policy_defaults_when_nit_threshold_absent() {
+        let templates = IndexMap::new();
+        let runtime = vars(&[("issue_id", "RIG-1")]);
+        let result = build_vars(&templates, &runtime);
+        let policy = &result["nit_policy"];
+        // Should default to threshold=1 (strict)
+        assert!(
+            policy.contains("any nits"),
+            "absent nit_threshold should produce default policy, got: {policy}"
         );
     }
 
