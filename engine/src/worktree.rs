@@ -95,6 +95,7 @@ fn fetch_origin_main(working_dir: &Path) -> Result<()> {
 /// Set up a git worktree for the given branch.
 /// Creates .trees/{branch} inside working_dir.
 /// If the worktree already exists (resume case), returns its path.
+/// Installs a pre-commit hook to enforce cargo fmt in all worktrees.
 pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> {
     let trees_dir = working_dir.join(".trees");
     std::fs::create_dir_all(&trees_dir)
@@ -103,11 +104,18 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
     let dir_name = branch_name.replace('/', "--");
     let worktree_path = trees_dir.join(dir_name);
 
-    // Resume case: worktree already exists
-    if worktree_path.exists() {
-        return Ok(worktree_path);
+    if !worktree_path.exists() {
+        create_worktree_dir(working_dir, branch_name, &worktree_path)?;
     }
 
+    // Install pre-commit hook for both new and resumed worktrees (idempotent)
+    install_pre_commit_hook(&worktree_path)?;
+
+    Ok(worktree_path)
+}
+
+/// Create the git worktree directory for the given branch.
+fn create_worktree_dir(working_dir: &Path, branch_name: &str, worktree_path: &Path) -> Result<()> {
     // Fetch latest origin/main before branching to avoid stale base
     fetch_origin_main(working_dir)?;
 
@@ -126,7 +134,7 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
         .context("running git worktree add")?;
 
     if output.status.success() {
-        return Ok(worktree_path);
+        return Ok(());
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -145,7 +153,7 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
             .context("running git worktree add (existing branch)")?;
 
         if output2.status.success() {
-            return Ok(worktree_path);
+            return Ok(());
         }
 
         let stderr2 = String::from_utf8_lossy(&output2.stderr);
@@ -178,7 +186,7 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
             .context("running git worktree add (fallback to HEAD)")?;
 
         if output_head.status.success() {
-            return Ok(worktree_path);
+            return Ok(());
         }
 
         let stderr_head = String::from_utf8_lossy(&output_head.stderr);
@@ -194,6 +202,74 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
         branch_name,
         stderr.trim()
     );
+}
+
+/// Install a pre-commit hook that enforces `cargo fmt --check` before commits.
+/// Prevents agents from committing unformatted code — CI won't fail on fmt anymore.
+/// Idempotent: skips if hook already exists.
+fn install_pre_commit_hook(worktree_path: &Path) -> Result<()> {
+    // Resolve the actual git directory (worktrees use a .git file, not a directory)
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(worktree_path)
+        .output()
+        .context("resolving git dir for pre-commit hook")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git rev-parse --git-dir failed: {}", stderr.trim());
+    }
+
+    let git_dir_raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let git_dir = if Path::new(&git_dir_raw).is_absolute() {
+        PathBuf::from(&git_dir_raw)
+    } else {
+        worktree_path.join(&git_dir_raw)
+    };
+
+    let hooks_dir = git_dir.join("hooks");
+    std::fs::create_dir_all(&hooks_dir)
+        .with_context(|| format!("creating hooks dir at {}", hooks_dir.display()))?;
+
+    let hook_path = hooks_dir.join("pre-commit");
+
+    // Idempotent: don't overwrite existing hook
+    if hook_path.exists() {
+        return Ok(());
+    }
+
+    let hook_content = r#"#!/bin/sh
+# Auto-installed by werma — enforce cargo fmt before commit
+if [ -d "engine" ]; then
+    cargo fmt --check --manifest-path engine/Cargo.toml 2>&1
+    status=$?
+    if [ $status -ne 0 ]; then
+        echo ""
+        echo "ERROR: cargo fmt check failed. Run 'cargo fmt --manifest-path engine/Cargo.toml' to fix."
+        echo ""
+        exit 1
+    fi
+fi
+"#;
+
+    std::fs::write(&hook_path, hook_content)
+        .with_context(|| format!("writing pre-commit hook at {}", hook_path.display()))?;
+
+    // Make executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755)).with_context(
+            || {
+                format!(
+                    "setting pre-commit hook executable at {}",
+                    hook_path.display()
+                )
+            },
+        )?;
+    }
+
+    Ok(())
 }
 
 /// Remove a worktree (does NOT delete the branch).
@@ -570,23 +646,19 @@ mod tests {
 
     // --- setup_worktree + cleanup_worktree (integration) ---
 
-    #[test]
-    fn setup_worktree_creates_and_resumes() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo_dir = dir.path();
-
-        // Init a git repo with a "main" branch and a fake origin remote
+    /// Helper: create a test git repo with an "origin" remote.
+    fn init_repo_with_origin(dir: &tempfile::TempDir) -> PathBuf {
+        let repo_dir = dir.path().to_path_buf();
         Command::new("git")
             .args(["init", "-b", "main"])
-            .current_dir(repo_dir)
+            .current_dir(&repo_dir)
             .output()
             .unwrap();
         Command::new("git")
             .args(["commit", "--allow-empty", "-m", "init"])
-            .current_dir(repo_dir)
+            .current_dir(&repo_dir)
             .output()
             .unwrap();
-        // Create a bare clone to act as "origin" so fetch_origin_main works
         let origin_dir = dir.path().join("origin.git");
         Command::new("git")
             .args([
@@ -599,24 +671,85 @@ mod tests {
             .unwrap();
         Command::new("git")
             .args(["remote", "add", "origin", &origin_dir.to_string_lossy()])
-            .current_dir(repo_dir)
+            .current_dir(&repo_dir)
             .output()
             .unwrap();
+        repo_dir
+    }
+
+    #[test]
+    fn setup_worktree_creates_and_resumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = init_repo_with_origin(&dir);
 
         let branch = "feat/RIG-99-test-branch";
 
         // First call: creates worktree
-        let path = setup_worktree(repo_dir, branch).unwrap();
+        let path = setup_worktree(&repo_dir, branch).unwrap();
         assert!(path.exists());
         assert!(path.ends_with(".trees/feat--RIG-99-test-branch"));
 
         // Second call: returns same path (resume)
-        let path2 = setup_worktree(repo_dir, branch).unwrap();
+        let path2 = setup_worktree(&repo_dir, branch).unwrap();
         assert_eq!(path, path2);
 
         // Cleanup
-        cleanup_worktree(repo_dir, branch).unwrap();
+        cleanup_worktree(&repo_dir, branch).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn setup_worktree_installs_pre_commit_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = init_repo_with_origin(&dir);
+
+        let branch = "feat/RIG-200-hook-test";
+        let worktree_path = setup_worktree(&repo_dir, branch).unwrap();
+
+        // Resolve the git dir for this worktree and check hook exists
+        let output = Command::new("git")
+            .args(["rev-parse", "--git-dir"])
+            .current_dir(&worktree_path)
+            .output()
+            .unwrap();
+        let git_dir_raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let git_dir = if Path::new(&git_dir_raw).is_absolute() {
+            PathBuf::from(&git_dir_raw)
+        } else {
+            worktree_path.join(&git_dir_raw)
+        };
+
+        let hook_path = git_dir.join("hooks").join("pre-commit");
+        assert!(hook_path.exists(), "pre-commit hook should be installed");
+
+        let content = std::fs::read_to_string(&hook_path).unwrap();
+        assert!(
+            content.contains("cargo fmt --check"),
+            "hook should run cargo fmt"
+        );
+        assert!(
+            content.contains("Auto-installed by werma"),
+            "hook should have werma marker"
+        );
+
+        // Verify executable permission
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::metadata(&hook_path).unwrap().permissions();
+            assert!(perms.mode() & 0o111 != 0, "hook should be executable");
+        }
+
+        // Second call should be idempotent (not overwrite)
+        let content_before = std::fs::read_to_string(&hook_path).unwrap();
+        setup_worktree(&repo_dir, branch).unwrap();
+        let content_after = std::fs::read_to_string(&hook_path).unwrap();
+        assert_eq!(
+            content_before, content_after,
+            "hook should not be overwritten on resume"
+        );
+
+        cleanup_worktree(&repo_dir, branch).unwrap();
     }
 
     #[test]
