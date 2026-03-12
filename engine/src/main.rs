@@ -529,19 +529,40 @@ fn cmd_complete(db: &Db, id: &str, session: Option<&str>, result_file: Option<&s
         None => String::new(),
     };
 
-    // Pipeline callback: trigger stage transitions
-    if !task.pipeline_stage.is_empty()
-        && !task.linear_issue_id.is_empty()
-        && let Err(e) = pipeline::callback(
+    // Pipeline callback: trigger stage transitions.
+    // On success, mark linear_pushed=true so daemon doesn't re-process.
+    if !task.pipeline_stage.is_empty() && !task.linear_issue_id.is_empty() {
+        match pipeline::callback(
             db,
             id,
             &task.pipeline_stage,
             &result_text,
             &task.linear_issue_id,
             &task.working_dir,
-        )
-    {
-        eprintln!("pipeline callback error for {id}: {e}");
+        ) {
+            Ok(()) => {
+                db.set_linear_pushed(id, true)?;
+            }
+            Err(e) => {
+                // Log to both stderr and daemon.log for visibility.
+                // Daemon will retry via process_completed_pipeline_tasks.
+                eprintln!("pipeline callback error for {id}: {e}");
+                let werma_dir = dirs::home_dir()
+                    .map(|h| h.join(".werma"))
+                    .unwrap_or_default();
+                let log_path = werma_dir.join("logs/daemon.log");
+                let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
+                let line = format!(
+                    "{ts}: cmd_complete callback failed: {id} stage={} error={e}\n",
+                    task.pipeline_stage
+                );
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                    .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+            }
+        }
     }
 
     // Research completion: curator follow-up + Linear update
