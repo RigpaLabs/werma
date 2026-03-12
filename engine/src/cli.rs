@@ -75,9 +75,17 @@ pub enum Commands {
     /// Show task status summary
     #[command(alias = "st")]
     Status {
-        /// Watch mode: refresh every 5s
+        /// Watch mode: auto-refresh
         #[arg(short, long)]
         watch: bool,
+
+        /// Compact mode for narrow terminal panels
+        #[arg(short, long)]
+        compact: bool,
+
+        /// Refresh interval in seconds (default: 3)
+        #[arg(short, long, default_value_t = 3)]
+        interval: u64,
     },
 
     /// Show task details + output
