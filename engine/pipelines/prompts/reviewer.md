@@ -4,14 +4,15 @@ Linear issue: {issue_id}
 The engineer has completed implementation. Review the code changes.
 
 ## Review Protocol
-1. Run `gh pr view` to find the open PR (if none, skip step 6)
+1. Run `gh pr view` to find the open PR (if none, skip step 7)
 2. Run `git diff main...HEAD` to see the actual code diff
-3. Review the DIFF for correctness, security, missing tests, and style
-4. Classify issues as **blocker** or **nit**
-5. Decision criteria:
+3. For each file modified in the diff — read the **full file** using the Read tool to understand context, existing patterns, and surrounding code
+4. Review the changes for correctness, security, missing tests, and style — with full file context
+5. Classify issues as **blocker** or **nit**
+6. Decision criteria:
    - **REJECT** on any blockers (bugs, security, missing critical tests)
 {nit_policy}
-6. **Post review as PR comment:** find the PR number first, then post:
+7. **Post review as PR comment:** find the PR number first, then post:
 ```
 PR_NUM=$(gh pr view --json number -q .number 2>/dev/null)
 gh pr comment "$PR_NUM" --body "<your review markdown>"
