@@ -110,7 +110,7 @@ impl LinearClient {
 
         // Get workflow statuses for this team
         let states_query = r#"
-            query($teamId: ID!) {
+            query($teamId: String!) {
                 workflowStates(filter: { team: { id: { eq: $teamId } } }) {
                     nodes { id name type }
                 }
@@ -157,6 +157,9 @@ impl LinearClient {
         }
 
         // Name-based statuses
+        if let Some(id) = find_by_name("Blocked") {
+            statuses.insert("blocked".to_string(), id);
+        }
         if let Some(id) = find_by_name("In Progress") {
             statuses.insert("in_progress".to_string(), id);
         }
@@ -207,7 +210,7 @@ impl LinearClient {
             .context("'todo' status not found in linear.json")?;
 
         let issues_query = r#"
-            query($teamId: ID!, $stateId: ID!) {
+            query($teamId: String!, $stateId: String!) {
                 issues(
                     filter: {
                         team: { id: { eq: $teamId } },
@@ -433,7 +436,7 @@ impl LinearClient {
     fn move_issue(&self, issue_id: &str, state_id: &str) -> Result<()> {
         let uuid = self.resolve_uuid(issue_id)?;
         self.query(
-            r#"mutation($id: ID!, $stateId: ID!) {
+            r#"mutation($id: String!, $stateId: String!) {
                 issueUpdate(id: $id, input: { stateId: $stateId }) { success }
             }"#,
             &json!({"id": uuid, "stateId": state_id}),
@@ -455,7 +458,7 @@ impl LinearClient {
     pub fn comment(&self, issue_id: &str, body: &str) -> Result<()> {
         let uuid = self.resolve_uuid(issue_id)?;
         self.query(
-            r#"mutation($issueId: ID!, $body: String!) {
+            r#"mutation($issueId: String!, $body: String!) {
                 commentCreate(input: { issueId: $issueId, body: $body }) { success }
             }"#,
             &json!({"issueId": uuid, "body": body}),
@@ -467,7 +470,7 @@ impl LinearClient {
     pub fn update_estimate(&self, issue_id: &str, estimate: i32) -> Result<()> {
         let uuid = self.resolve_uuid(issue_id)?;
         self.query(
-            r#"mutation($id: ID!, $estimate: Int) {
+            r#"mutation($id: String!, $estimate: Int) {
                 issueUpdate(id: $id, input: { estimate: $estimate }) { success }
             }"#,
             &json!({"id": uuid, "estimate": estimate}),
@@ -479,7 +482,7 @@ impl LinearClient {
     pub fn get_issue(&self, issue_id: &str) -> Result<(String, String)> {
         let uuid = self.resolve_uuid(issue_id)?;
         let data = self.query(
-            r#"query($id: ID!) {
+            r#"query($id: String!) {
                 issue(id: $id) { title description }
             }"#,
             &json!({"id": uuid}),
@@ -507,7 +510,7 @@ impl LinearClient {
             .with_context(|| format!("invalid identifier: {identifier}"))?;
 
         let data = self.query(
-            r#"query($teamId: ID!, $number: Float!) {
+            r#"query($teamId: String!, $number: Float!) {
                 issues(filter: {
                     team: { id: { eq: $teamId } },
                     number: { eq: $number }
@@ -560,7 +563,7 @@ impl LinearClient {
         };
 
         let data = self.query(
-            r#"query($teamId: ID!, $stateId: ID!) {
+            r#"query($teamId: String!, $stateId: String!) {
                 issues(
                     filter: {
                         team: { id: { eq: $teamId } },
