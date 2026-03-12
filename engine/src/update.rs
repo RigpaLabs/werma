@@ -240,7 +240,68 @@ pub fn update() -> Result<()> {
         }
     }
 
+    // Restart daemon if it's running so it picks up the new binary.
+    restart_daemon_if_running();
+
     Ok(())
+}
+
+const LAUNCHD_LABEL: &str = "io.rigpalabs.werma.daemon";
+
+/// Check if the werma daemon is running via launchctl and restart it if so.
+/// Uses `launchctl kickstart -k` which kills the running process and immediately
+/// restarts it — launchd's KeepAlive ensures it comes back with the new binary.
+fn restart_daemon_if_running() {
+    // Check if daemon is loaded in launchctl
+    let check = std::process::Command::new("launchctl")
+        .args(["list", LAUNCHD_LABEL])
+        .output();
+
+    let is_running = matches!(check, Ok(ref o) if o.status.success());
+
+    if !is_running {
+        println!("daemon not running, skipping restart");
+        return;
+    }
+
+    // Get current user UID for the gui/ domain target (same approach as daemon.rs)
+    let uid = std::process::Command::new("id")
+        .args(["-u"])
+        .output()
+        .ok()
+        .and_then(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<u32>()
+                .ok()
+        })
+        .unwrap_or(501);
+    let service_target = format!("gui/{uid}/{LAUNCHD_LABEL}");
+
+    println!("restarting daemon...");
+    let result = std::process::Command::new("launchctl")
+        .args(["kickstart", "-k", &service_target])
+        .output();
+
+    match result {
+        Ok(o) if o.status.success() => {
+            println!("daemon restarted with new binary");
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            // Fallback: try stop + start (older macOS or different launchd version)
+            eprintln!("kickstart failed ({stderr}), trying stop+start...");
+            let _ = std::process::Command::new("launchctl")
+                .args(["stop", LAUNCHD_LABEL])
+                .output();
+            // launchd KeepAlive=true will auto-restart after stop
+            println!("daemon stopped (launchd will auto-restart with new binary)");
+        }
+        Err(e) => {
+            eprintln!("warning: could not restart daemon: {e}");
+            eprintln!("run manually: launchctl kickstart -k {service_target}");
+        }
+    }
 }
 
 #[cfg(test)]
