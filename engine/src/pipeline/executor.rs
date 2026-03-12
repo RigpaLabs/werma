@@ -345,8 +345,22 @@ pub fn poll(db: &Db) -> Result<()> {
             let task_id = db.next_task_id()?;
             let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
 
-            let max_turns = crate::default_turns(&stage_cfg.agent);
+            let issue_estimate = issue["estimate"].as_i64().unwrap_or(0) as i32;
+
+            let review_round: i64 = if *stage_name == "reviewer" {
+                db.count_completed_tasks_for_issue_stage(identifier, "reviewer")?
+            } else {
+                0
+            };
+
+            let max_turns = stage_cfg
+                .max_turns
+                .map(|t| t as i32)
+                .unwrap_or_else(|| crate::default_turns(&stage_cfg.agent));
             let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
+            let effective_model = stage_cfg
+                .effective_model(issue_estimate, review_round)
+                .to_string();
 
             let task = Task {
                 id: task_id.clone(),
@@ -359,7 +373,7 @@ pub fn poll(db: &Db) -> Result<()> {
                 prompt,
                 output_path: String::new(),
                 working_dir,
-                model: stage_cfg.model.clone(),
+                model: effective_model,
                 max_turns,
                 allowed_tools,
                 session_id: String::new(),
@@ -369,7 +383,7 @@ pub fn poll(db: &Db) -> Result<()> {
                 depends_on: vec![],
                 context_files: vec![],
                 repo_hash: crate::runtime_repo_hash(),
-                estimate: issue["estimate"].as_i64().unwrap_or(0) as i32,
+                estimate: issue_estimate,
             };
 
             db.insert_task(&task)?;
