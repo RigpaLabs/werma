@@ -253,29 +253,32 @@ fn cmd_list(db: &Db, status_filter: Option<&str>) -> Result<()> {
 }
 
 fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<()> {
+    let term_width = terminal_size::terminal_size()
+        .map(|(w, _)| w.0 as usize)
+        .unwrap_or(80);
+    let use_compact = compact || term_width < 60;
+    let auto_compacted = !compact && term_width < 60;
+
     if watch {
-        let term_width = terminal_size::terminal_size()
-            .map(|(w, _)| w.0 as usize)
-            .unwrap_or(80);
-        let use_compact = compact || term_width < 60;
-
-        if !compact && term_width < 60 {
-            eprintln!("tip: terminal width < 60, using compact mode (or pass -c)");
-        }
-
         loop {
             print!("\x1b[2J\x1b[H");
             std::io::Write::flush(&mut std::io::stdout()).ok();
+            if auto_compacted {
+                eprintln!("tip: terminal width < 60, using compact mode (or pass -c)");
+            }
             if use_compact {
-                render_compact(db, interval)?;
+                render_compact(db, Some(interval))?;
             } else {
                 render_status(db)?;
                 println!("{}", format!("                                                              ↻ {interval}s").dimmed());
             }
             std::thread::sleep(std::time::Duration::from_secs(interval));
         }
-    } else if compact {
-        render_compact(db, 0)?;
+    } else if use_compact {
+        if auto_compacted {
+            eprintln!("tip: terminal width < 60, using compact mode (or pass -c)");
+        }
+        render_compact(db, None)?;
     } else {
         render_status(db)?;
     }
@@ -417,7 +420,7 @@ fn compact_task_id(id: &str) -> &str {
     id.rsplit('-').next().unwrap_or(id)
 }
 
-fn render_compact(db: &Db, interval: u64) -> Result<()> {
+fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
     let running = db.list_tasks(Some(Status::Running))?;
     let pending = db.list_tasks(Some(Status::Pending))?;
     let completed = db.list_tasks(Some(Status::Completed))?;
@@ -521,8 +524,8 @@ fn render_compact(db: &Db, interval: u64) -> Result<()> {
 
     println!(" {sep}");
 
-    let refresh_str = if interval > 0 {
-        format!("  ↻ {interval}s")
+    let refresh_str = if let Some(secs) = interval {
+        format!("  ↻ {secs}s")
     } else {
         String::new()
     };
