@@ -119,23 +119,23 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 }
                 last_merge_check = Instant::now();
             }
+        }
 
-            // Periodic update check: fetch latest release and self-update if newer.
-            if last_update_check.elapsed() >= Duration::from_secs(update_interval_secs) {
-                last_update_check = Instant::now();
-                match crate::update::check_and_apply_update() {
-                    Ok(true) => {
-                        log_daemon(
-                            &log_path,
-                            "auto-update: new version installed, restarting daemon",
-                        );
-                        // Exit cleanly — launchd KeepAlive restarts with new binary.
-                        std::process::exit(0);
-                    }
-                    Ok(false) => {} // Already up to date — no-op.
-                    Err(e) => {
-                        log_daemon(&log_path, &format!("auto-update check failed: {e}"));
-                    }
+        // Periodic update check: outside DB guard — doesn't need DB access.
+        if last_update_check.elapsed() >= Duration::from_secs(update_interval_secs) {
+            last_update_check = Instant::now();
+            match crate::update::check_and_apply_update() {
+                Ok(true) => {
+                    log_daemon(
+                        &log_path,
+                        "auto-update: new version installed, restarting daemon",
+                    );
+                    // Exit cleanly — launchd KeepAlive restarts with new binary.
+                    std::process::exit(0);
+                }
+                Ok(false) => {} // Already up to date — no-op.
+                Err(e) => {
+                    log_daemon(&log_path, &format!("auto-update check failed: {e}"));
                 }
             }
         }

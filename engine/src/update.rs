@@ -92,25 +92,12 @@ fn latest_release(token: &str) -> Result<ReleaseInfo> {
     Ok(ReleaseInfo { tag, asset_api_url })
 }
 
-/// Check for a new release and apply the update silently.
-/// Returns `Ok(true)` if a new version was installed (caller should restart),
-/// `Ok(false)` if already up to date, or `Err` on failure.
-///
-/// Designed for daemon use — no spinners, no println, no interactive UI.
-pub fn check_and_apply_update() -> Result<bool> {
-    let current = env!("CARGO_PKG_VERSION");
-    let token = github_token()?;
-    let release = latest_release(&token)?;
-    let latest_version = release.tag.strip_prefix('v').unwrap_or(&release.tag);
-
-    if latest_version == current {
-        return Ok(false);
-    }
-
-    // New version available — download and install silently.
+/// Download a release asset and extract the binary to a temp directory.
+/// Returns the temp dir (must be kept alive) and the path to the extracted binary.
+fn download_and_extract(token: &str, release: &ReleaseInfo) -> Result<(tempfile::TempDir, std::path::PathBuf)> {
     let target = current_target();
     if target == "unknown" {
-        bail!("unsupported platform for auto-update");
+        bail!("unsupported platform — download manually from GitHub Releases");
     }
 
     let artifact_name = format!("werma-{target}");
@@ -160,6 +147,13 @@ pub fn check_and_apply_update() -> Result<bool> {
         bail!("extracted archive does not contain 'werma' binary");
     }
 
+    Ok((tmp_dir, new_binary))
+}
+
+/// Replace the current binary with a new one.
+/// Handles backup, copy, chmod, codesign (macOS), and rollback on failure.
+/// Returns `Ok(true)` if codesign succeeded (or N/A), `Ok(false)` if codesign failed.
+fn install_binary(new_binary: &std::path::Path) -> Result<bool> {
     let current_exe =
         std::env::current_exe().context("cannot determine current executable path")?;
     let current_exe = current_exe.canonicalize().unwrap_or(current_exe);
@@ -169,7 +163,7 @@ pub fn check_and_apply_update() -> Result<bool> {
 
     std::fs::rename(&current_exe, &backup_path).context("failed to backup current binary")?;
 
-    match std::fs::copy(&new_binary, &current_exe) {
+    match std::fs::copy(new_binary, &current_exe) {
         Ok(_) => {
             #[cfg(unix)]
             {
@@ -178,20 +172,43 @@ pub fn check_and_apply_update() -> Result<bool> {
             }
 
             #[cfg(target_os = "macos")]
-            {
-                let _ = std::process::Command::new("codesign")
+            let codesign_ok = {
+                let codesign = std::process::Command::new("codesign")
                     .args(["--force", "--sign", "-", &current_exe.to_string_lossy()])
                     .output();
-            }
+                matches!(codesign, Ok(ref out) if out.status.success())
+            };
+            #[cfg(not(target_os = "macos"))]
+            let codesign_ok = true;
 
             let _ = std::fs::remove_file(&backup_path);
-            Ok(true)
+            Ok(codesign_ok)
         }
         Err(e) => {
             let _ = std::fs::rename(&backup_path, &current_exe);
             bail!("failed to install new binary: {e}");
         }
     }
+}
+
+/// Check for a new release and apply the update silently.
+/// Returns `Ok(true)` if a new version was installed (caller should restart),
+/// `Ok(false)` if already up to date, or `Err` on failure.
+///
+/// Designed for daemon use — no spinners, no println, no interactive UI.
+pub fn check_and_apply_update() -> Result<bool> {
+    let current = env!("CARGO_PKG_VERSION");
+    let token = github_token()?;
+    let release = latest_release(&token)?;
+    let latest_version = release.tag.strip_prefix('v').unwrap_or(&release.tag);
+
+    if latest_version == current {
+        return Ok(false);
+    }
+
+    let (_tmp_dir, new_binary) = download_and_extract(&token, &release)?;
+    install_binary(&new_binary)?;
+    Ok(true)
 }
 
 /// Self-update werma binary from GitHub Releases.
@@ -210,136 +227,26 @@ pub fn update() -> Result<()> {
 
     println!("new version: {} (current: v{current})", release.tag);
 
-    let target = current_target();
-    if target == "unknown" {
-        bail!("unsupported platform — download manually from GitHub Releases");
-    }
-
-    let artifact_name = format!("werma-{target}");
-
-    // Use API URL if available (works for private repos), fall back to browser URL.
-    let download_url = match &release.asset_api_url {
-        Some(url) => url.clone(),
-        None => format!(
-            "https://github.com/{GITHUB_REPO}/releases/download/{}/{artifact_name}.tar.gz",
-            release.tag,
-        ),
-    };
-
+    let artifact_name = format!("werma-{}", current_target());
     let pb = crate::ui::waiting_spinner(&format!("Downloading {artifact_name}..."));
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("werma-updater")
-        .build()
-        .context("failed to build HTTP client")?;
-
-    let resp = client
-        .get(&download_url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/octet-stream")
-        .send()
-        .with_context(|| format!("failed to download from {download_url}"))?;
-
-    if !resp.status().is_success() {
-        bail!("download failed ({}): {download_url}", resp.status());
-    }
-
-    let bytes = resp.bytes().context("failed to read download")?;
+    let (_tmp_dir, new_binary) = download_and_extract(&token, &release)?;
     pb.finish_and_clear();
 
-    // Extract tar.gz to temp dir
-    let tmp_dir = tempfile::tempdir().context("failed to create temp dir")?;
-    let archive_path = tmp_dir.path().join(format!("{artifact_name}.tar.gz"));
-    std::fs::write(&archive_path, &bytes)?;
-
-    let status = std::process::Command::new("tar")
-        .args(["xzf", &archive_path.to_string_lossy()])
-        .current_dir(tmp_dir.path())
-        .status()
-        .context("failed to extract archive")?;
-
-    if !status.success() {
-        bail!("tar extraction failed");
-    }
-
-    let new_binary = tmp_dir.path().join("werma");
-    if !new_binary.exists() {
-        bail!("extracted archive does not contain 'werma' binary");
-    }
-
-    // Find current binary location
     let current_exe =
         std::env::current_exe().context("cannot determine current executable path")?;
     let current_exe = current_exe.canonicalize().unwrap_or(current_exe);
-
     println!("replacing {}...", current_exe.display());
 
-    // Atomic replace: rename old, copy new, remove old
-    let backup_path = current_exe.with_extension("old");
+    let codesign_ok = install_binary(&new_binary)?;
 
-    // Remove stale backup if exists
-    let _ = std::fs::remove_file(&backup_path);
-
-    std::fs::rename(&current_exe, &backup_path).context("failed to backup current binary")?;
-
-    match std::fs::copy(&new_binary, &current_exe) {
-        Ok(_) => {
-            // Set executable permission
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&current_exe, std::fs::Permissions::from_mode(0o755))?;
-            }
-
-            // macOS: re-sign with ad-hoc signature after copy.
-            // Copying invalidates the code signature, causing the kernel to SIGKILL on launch.
-            #[cfg(target_os = "macos")]
-            let codesign_ok = {
-                let codesign = std::process::Command::new("codesign")
-                    .args(["--force", "--sign", "-", &current_exe.to_string_lossy()])
-                    .output();
-                match codesign {
-                    Ok(out) if out.status.success() => {
-                        println!("re-signed binary (ad-hoc codesign)");
-                        true
-                    }
-                    Ok(out) => {
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        eprintln!("warning: codesign failed ({}): {stderr}", out.status);
-                        eprintln!(
-                            "you may need to run: codesign --force --sign - {}",
-                            current_exe.display()
-                        );
-                        false
-                    }
-                    Err(e) => {
-                        eprintln!("warning: could not run codesign: {e}");
-                        eprintln!(
-                            "you may need to run: codesign --force --sign - {}",
-                            current_exe.display()
-                        );
-                        false
-                    }
-                }
-            };
-            #[cfg(not(target_os = "macos"))]
-            let codesign_ok = true;
-
-            // Remove backup
-            let _ = std::fs::remove_file(&backup_path);
-            if codesign_ok {
-                println!("updated to {}", release.tag);
-            } else {
-                println!(
-                    "updated to {} (warning: manual codesign required)",
-                    release.tag
-                );
-            }
-        }
-        Err(e) => {
-            // Restore backup on failure
-            let _ = std::fs::rename(&backup_path, &current_exe);
-            bail!("failed to install new binary: {e}");
-        }
+    if codesign_ok {
+        println!("updated to {}", release.tag);
+    } else {
+        println!(
+            "updated to {} (warning: manual codesign required — run: codesign --force --sign - {})",
+            release.tag,
+            current_exe.display()
+        );
     }
 
     // Restart daemon if it's running so it picks up the new binary.
