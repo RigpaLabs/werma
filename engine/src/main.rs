@@ -501,7 +501,10 @@ fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
         println!(" {}", format!("  +{} more", pending.len() - 3).dimmed());
     }
 
-    println!(" {sep}");
+    // Only show separator if there were running or pending tasks above
+    if !running.is_empty() || !pending.is_empty() {
+        println!(" {sep}");
+    }
 
     // Recent completed (last 5, newest first)
     let recent: Vec<&Task> = completed.iter().rev().take(5).collect();

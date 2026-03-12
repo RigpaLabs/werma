@@ -6,6 +6,32 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::dashboard::truncate_line;
 use crate::models::{Status, Task};
 
+// ─── ANSI color helpers (for String buffers) ─────────────────────────────────
+
+fn green_bold(s: &str) -> String {
+    format!("\x1b[1;32m{s}\x1b[0m")
+}
+
+fn yellow(s: &str) -> String {
+    format!("\x1b[33m{s}\x1b[0m")
+}
+
+fn red(s: &str) -> String {
+    format!("\x1b[31m{s}\x1b[0m")
+}
+
+fn dimmed(s: &str) -> String {
+    format!("\x1b[2m{s}\x1b[0m")
+}
+
+fn blue(s: &str) -> String {
+    format!("\x1b[34m{s}\x1b[0m")
+}
+
+fn cyan(s: &str) -> String {
+    format!("\x1b[36m{s}\x1b[0m")
+}
+
 // ─── Spinner helpers ──────────────────────────────────────────────────────────
 
 const SPINNER_TICK_MS: u64 = 80;
@@ -157,13 +183,17 @@ pub fn write_task_line(buf: &mut String, task: &Task, time_str: &str, max_prompt
     let linear = if task.linear_issue_id.is_empty() {
         String::new()
     } else {
-        format!("  [{}]", task.linear_issue_id)
+        format!("  [{}]", cyan(&task.linear_issue_id))
     };
     let preview = truncate_line(&task.prompt, max_prompt);
     let _ = writeln!(
         buf,
         "   {}  {}{}  {}  {}",
-        task.id, task.task_type, linear, time_str, preview,
+        task.id,
+        blue(&task.task_type),
+        linear,
+        dimmed(time_str),
+        preview,
     );
 }
 
@@ -198,7 +228,12 @@ pub fn render_status_buf(
 
     // Running
     let spinner = braille_frame();
-    let _ = writeln!(buf, " {spinner} running ({})", running.len());
+    let _ = writeln!(
+        buf,
+        " {} {}",
+        green_bold(&format!("{spinner} ")),
+        green_bold(&format!("running ({})", running.len())),
+    );
     for task in running {
         let elapsed = task
             .started_at
@@ -209,21 +244,28 @@ pub fn render_status_buf(
     }
 
     // Pending
-    let _ = writeln!(buf, " ○ pending ({})", pending.len());
+    let _ = writeln!(
+        buf,
+        " {} {}",
+        yellow("○"),
+        yellow(&format!("pending ({})", pending.len())),
+    );
     for task in pending.iter().take(5) {
         let prio = format!("p{}", task.priority);
         write_task_line(&mut buf, task, &prio, 45);
     }
     if pending.len() > 5 {
-        let _ = writeln!(buf, "   ... +{} more", pending.len() - 5);
+        let _ = writeln!(buf, "   {}", dimmed(&format!("... +{} more", pending.len() - 5)));
     }
 
     // Completed + Failed
     let _ = writeln!(
         buf,
-        " ✓ completed ({})     ✗ failed ({})",
-        completed.len(),
-        failed.len(),
+        " {} {}     {} {}",
+        dimmed("✓"),
+        dimmed(&format!("completed ({})", completed.len())),
+        red("✗"),
+        red(&format!("failed ({})", failed.len())),
     );
 
     let recent: Vec<&Task> = completed.iter().rev().take(10).collect();
@@ -271,9 +313,11 @@ pub fn render_compact_buf(
 
     let _ = writeln!(
         buf,
-        " werma {spinner} {} running  ○ {} pending",
-        running.len(),
-        pending.len(),
+        " werma {} {} running  {} {} pending",
+        green_bold(spinner),
+        green_bold(&running.len().to_string()),
+        yellow("○"),
+        yellow(&pending.len().to_string()),
     );
     let _ = writeln!(buf, " {sep}");
 
@@ -283,32 +327,37 @@ pub fn render_compact_buf(
             .as_deref()
             .map(crate::format_elapsed_since)
             .unwrap_or_default();
-        let linear = compact_linear_label(&task.linear_issue_id);
+        let linear = compact_linear_label_colored(&task.linear_issue_id);
         let _ = writeln!(
             buf,
-            " {spinner} {} {}{} {}",
+            " {} {} {}{} {}",
+            green_bold(spinner),
             compact_task_id(&task.id),
-            compact_task_type(&task.task_type),
+            blue(compact_task_type(&task.task_type)),
             linear,
-            elapsed,
+            dimmed(&elapsed),
         );
     }
 
     for task in pending.iter().take(3) {
-        let linear = compact_linear_label(&task.linear_issue_id);
+        let linear = compact_linear_label_colored(&task.linear_issue_id);
         let _ = writeln!(
             buf,
-            " ○ {} {}{}",
+            " {} {} {}{}",
+            yellow("○"),
             compact_task_id(&task.id),
-            compact_task_type(&task.task_type),
+            blue(compact_task_type(&task.task_type)),
             linear,
         );
     }
     if pending.len() > 3 {
-        let _ = writeln!(buf, "   +{} more", pending.len() - 3);
+        let _ = writeln!(buf, " {}", dimmed(&format!("  +{} more", pending.len() - 3)));
     }
 
-    let _ = writeln!(buf, " {sep}");
+    // Only show separator if there were running or pending tasks above
+    if !running.is_empty() || !pending.is_empty() {
+        let _ = writeln!(buf, " {sep}");
+    }
 
     let recent: Vec<&Task> = completed.iter().rev().take(5).collect();
     for task in &recent {
@@ -316,14 +365,15 @@ pub fn render_compact_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label(&task.linear_issue_id);
+        let linear = compact_linear_label_dimmed(&task.linear_issue_id);
         let _ = writeln!(
             buf,
-            " ✓ {} {}{} {}",
+            " {} {} {}{} {}",
+            dimmed("✓"),
             compact_task_id(&task.id),
             compact_task_type(&task.task_type),
             linear,
-            dur,
+            dimmed(&dur),
         );
     }
 
@@ -333,14 +383,15 @@ pub fn render_compact_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label(&task.linear_issue_id);
+        let linear = compact_linear_label_dimmed(&task.linear_issue_id);
         let _ = writeln!(
             buf,
-            " ✗ {} {}{} {}",
+            " {} {} {}{} {}",
+            red("✗"),
             compact_task_id(&task.id),
             compact_task_type(&task.task_type),
             linear,
-            dur,
+            dimmed(&dur),
         );
     }
 
@@ -354,9 +405,9 @@ pub fn render_compact_buf(
     let _ = writeln!(
         buf,
         " {} done  {} fail{}",
-        completed.len(),
-        failed.len(),
-        refresh_str,
+        dimmed(&completed.len().to_string()),
+        red(&failed.len().to_string()),
+        dimmed(&refresh_str),
     );
 
     buf
@@ -381,6 +432,22 @@ fn compact_linear_label(linear_issue_id: &str) -> String {
         String::new()
     } else {
         format!(" [{linear_issue_id}]")
+    }
+}
+
+fn compact_linear_label_colored(linear_issue_id: &str) -> String {
+    if linear_issue_id.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", cyan(&format!("[{linear_issue_id}]")))
+    }
+}
+
+fn compact_linear_label_dimmed(linear_issue_id: &str) -> String {
+    if linear_issue_id.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", dimmed(&format!("[{linear_issue_id}]")))
     }
 }
 
@@ -442,13 +509,18 @@ mod tests {
         assert!(buf.contains("running (0)"));
         assert!(buf.contains("pending (0)"));
         assert!(buf.contains("↻ 3s"));
+        // Verify ANSI color codes are present
+        assert!(buf.contains("\x1b["), "expected ANSI color codes in output");
     }
 
     #[test]
     fn compact_buf_renders() {
         let buf = render_compact_buf(&[], &[], &[], &[], Some(5));
-        assert!(buf.contains("0 running"));
-        assert!(buf.contains("0 pending"));
+        // ANSI codes wrap the numbers, so check for the text without exact formatting
+        assert!(buf.contains("running"));
+        assert!(buf.contains("pending"));
         assert!(buf.contains("↻ 5s"));
+        // Verify ANSI color codes are present
+        assert!(buf.contains("\x1b["), "expected ANSI color codes in output");
     }
 }
