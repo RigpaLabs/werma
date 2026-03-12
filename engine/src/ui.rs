@@ -106,7 +106,9 @@ pub fn schedule_list_table(schedules: &[crate::models::Schedule], term_width: u1
 fn status_icon_cell(status: Status) -> Cell {
     match status {
         Status::Pending => Cell::new("○").fg(Color::Yellow),
-        Status::Running => Cell::new("◉").fg(Color::Green).add_attribute(Attribute::Bold),
+        Status::Running => Cell::new("◉")
+            .fg(Color::Green)
+            .add_attribute(Attribute::Bold),
         Status::Completed => Cell::new("✓").fg(Color::DarkGrey),
         Status::Failed => Cell::new("✗").fg(Color::Red),
     }
@@ -244,7 +246,10 @@ pub fn render_status_buf(
     }
 
     if let Some(secs) = interval {
-        let _ = writeln!(buf, "                                                              ↻ {secs}s");
+        let _ = writeln!(
+            buf,
+            "                                                              ↻ {secs}s"
+        );
     }
 
     buf
