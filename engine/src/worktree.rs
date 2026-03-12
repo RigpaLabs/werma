@@ -43,12 +43,25 @@ fn derive_branch_type(task: &Task) -> &'static str {
 }
 
 /// Generate a branch name from a task.
-/// With linear_issue_id → type/RIG-XX-short-name (e.g. feat/RIG-42-add-worktree-support)
+/// Pipeline tasks → type/RIG-XX-pipeline-{stage}-stage (deterministic, enables branch reuse on re-spawn)
+/// Non-pipeline with linear_issue_id → type/RIG-XX-short-name (e.g. feat/RIG-42-add-worktree-support)
 /// Without → werma-{task_id}
 pub fn generate_branch_name(task: &Task) -> String {
     if !task.linear_issue_id.is_empty() {
-        let slug = slugify_prompt(&task.prompt);
-        let rig_id = extract_rig_id(&task.prompt).unwrap_or_default();
+        // Try prompt first, then linear_issue_id (which is the identifier like "RIG-42")
+        let rig_id = extract_rig_id(&task.prompt)
+            .or_else(|| extract_rig_id_prefix(&task.linear_issue_id))
+            .unwrap_or_default();
+
+        // Pipeline tasks: deterministic branch name based on issue + stage.
+        // This ensures re-spawned tasks (e.g. engineer after reviewer rejection)
+        // reuse the same branch and worktree, so they can push to the existing PR.
+        let slug = if !task.pipeline_stage.is_empty() {
+            format!("pipeline-{}-stage", task.pipeline_stage)
+        } else {
+            slugify_prompt(&task.prompt)
+        };
+
         if rig_id.is_empty() {
             format!("werma-{}/{}", task.id, slug)
         } else {
@@ -454,6 +467,40 @@ mod tests {
     fn derive_type_reviewer() {
         let task = test_task("pipeline-reviewer", "x", "Review code");
         assert_eq!(derive_branch_type(&task), "review");
+    }
+
+    // --- pipeline branch naming (deterministic for re-spawn) ---
+
+    #[test]
+    fn branch_name_pipeline_engineer_deterministic() {
+        let mut task = test_task(
+            "pipeline-engineer",
+            "issue-abc-123",
+            "# Pipeline: Engineer Stage\nLinear issue: RIG-171\n\nImplement feature X",
+        );
+        task.pipeline_stage = "engineer".to_string();
+        let name = generate_branch_name(&task);
+        assert_eq!(name, "feat/RIG-171-pipeline-engineer-stage");
+    }
+
+    #[test]
+    fn branch_name_pipeline_engineer_respawn_same_branch() {
+        let mut task1 = test_task(
+            "pipeline-engineer",
+            "issue-abc-123",
+            "# Pipeline: Engineer Stage\nLinear issue: RIG-171\n\nImplement feature X",
+        );
+        task1.pipeline_stage = "engineer".to_string();
+
+        let mut task2 = test_task(
+            "pipeline-engineer",
+            "issue-abc-123",
+            "# Pipeline: Engineer Stage (Revision)\nLinear issue: RIG-171\n\n## Reviewer Feedback\n- blocker: no tests",
+        );
+        task2.id = "20260310-002".to_string();
+        task2.pipeline_stage = "engineer".to_string();
+
+        assert_eq!(generate_branch_name(&task1), generate_branch_name(&task2));
     }
 
     // --- extract_rig_id_prefix ---
