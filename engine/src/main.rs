@@ -1179,18 +1179,8 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
             continue;
         }
 
-        // Enforce max_concurrent from stage config
-        if let Some(stage_cfg) = config.stage(stage) {
-            let active_count = db.count_active_tasks_for_stage(stage)?;
-            if active_count >= stage_cfg.max_concurrent as i64 {
-                eprintln!(
-                    "  ~ {} skipped: stage '{}' at max_concurrent ({})",
-                    ident, stage, stage_cfg.max_concurrent
-                );
-                skipped += 1;
-                continue;
-            }
-        }
+        // Note: task is always created in pending state regardless of max_concurrent.
+        // The daemon's drain_queue respects concurrency limits when launching tasks.
 
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         let working_dir = linear::infer_working_dir(&title, &label_refs);

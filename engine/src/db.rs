@@ -512,13 +512,13 @@ impl Db {
         Ok(tasks)
     }
 
-    /// Count active (pending + running) tasks for a given pipeline stage.
-    pub fn count_active_tasks_for_stage(&self, stage: &str) -> Result<i64> {
+    /// Count all active (pending + running) pipeline tasks across all stages.
+    pub fn count_active_pipeline_tasks(&self) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM tasks
-             WHERE pipeline_stage = ?1
+             WHERE pipeline_stage != ''
                AND status IN ('pending', 'running')",
-            params![stage],
+            [],
             |row| row.get(0),
         )?)
     }

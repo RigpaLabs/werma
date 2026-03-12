@@ -15,7 +15,6 @@ use crate::{linear, pipeline, runner};
 const TICK_INTERVAL_SECS: u64 = 5;
 const PIPELINE_POLL_INTERVAL_SECS: u64 = 30;
 const MERGE_CHECK_INTERVAL_SECS: u64 = 60;
-const MAX_CONCURRENT_AGENTS: usize = 3;
 const MAX_LOG_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 
 /// Run the daemon loop. Blocks forever (or until killed).
@@ -43,6 +42,9 @@ pub fn run(werma_dir: &Path) -> Result<()> {
         );
     }
 
+    // Load max_concurrent once at startup (re-read on pipeline poll cycle).
+    let mut max_concurrent = pipeline::load_max_concurrent();
+
     // Trigger pipeline poll immediately on first tick.
     let mut last_pipeline_poll = Instant::now() - Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS);
     let mut last_merge_check = Instant::now() - Duration::from_secs(MERGE_CHECK_INTERVAL_SECS);
@@ -63,7 +65,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 log_daemon(&log_path, &format!("pipeline callback error: {e}"));
             }
 
-            if let Err(e) = drain_queue(&db, werma_dir) {
+            if let Err(e) = drain_queue(&db, werma_dir, max_concurrent) {
                 log_daemon(&log_path, &format!("queue drain error: {e}"));
             }
 
@@ -73,6 +75,8 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
             // Pipeline poll: check Linear for new issues at pipeline-relevant statuses.
             if last_pipeline_poll.elapsed() >= Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS) {
+                // Refresh max_concurrent from config (picks up runtime YAML changes)
+                max_concurrent = pipeline::load_max_concurrent();
                 if let Err(e) = pipeline::poll(&db) {
                     log_daemon(&log_path, &format!("pipeline poll error: {e}"));
                 }
@@ -303,14 +307,14 @@ fn process_completed_pipeline_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Drain pending tasks into tmux sessions, respecting max_concurrent.
-fn drain_queue(db: &Db, werma_dir: &Path) -> Result<()> {
+/// Drain pending tasks into tmux sessions, respecting pipeline max_concurrent.
+fn drain_queue(db: &Db, werma_dir: &Path, max_concurrent: usize) -> Result<()> {
     let active = count_werma_sessions();
-    if active >= MAX_CONCURRENT_AGENTS {
+    if active >= max_concurrent {
         return Ok(());
     }
 
-    let slots = MAX_CONCURRENT_AGENTS - active;
+    let slots = max_concurrent - active;
     for _ in 0..slots {
         match runner::run_next(db, werma_dir) {
             Ok(Some(id)) => {

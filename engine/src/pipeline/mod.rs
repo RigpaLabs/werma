@@ -7,6 +7,14 @@ pub mod verdict;
 // Re-export the public API that daemon.rs and main.rs call.
 pub use executor::{callback, create_initial_stage_task, poll};
 
+/// Load the global max_concurrent limit from pipeline config.
+/// Falls back to the compiled-in default if config loading fails.
+pub fn load_max_concurrent() -> usize {
+    loader::load_default()
+        .map(|c| c.max_concurrent as usize)
+        .unwrap_or(config::DEFAULT_GLOBAL_MAX_CONCURRENT as usize)
+}
+
 // ─── Research pipeline (unchanged from old pipeline.rs) ──────────────────────
 
 use anyhow::Result;
@@ -214,6 +222,7 @@ pub fn cmd_show(stage_filter: Option<&str>) -> Result<()> {
     let config = loader::load_default()?;
 
     println!("\nPipeline: {} — {}", config.pipeline, config.description);
+    println!("Max concurrent: {}", config.max_concurrent);
 
     if !config.templates.is_empty() {
         println!("\nTemplates:");

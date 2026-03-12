@@ -169,13 +169,6 @@ pub fn poll(db: &Db) -> Result<()> {
                     None => continue,
                 };
 
-                // Enforce max_concurrent: skip if stage already has enough active tasks
-                let active_count = db.count_active_tasks_for_stage(stage_name)?;
-                if active_count >= stage_cfg.max_concurrent as i64 {
-                    total_skipped += 1;
-                    continue;
-                }
-
                 // Skip if active task already exists for this issue + stage
                 let existing = db.tasks_by_linear_issue(identifier, Some(stage_name), true)?;
                 if !existing.is_empty() {

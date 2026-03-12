@@ -1,21 +1,28 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+/// Default global max concurrent pipeline tasks.
+pub const DEFAULT_GLOBAL_MAX_CONCURRENT: u32 = 5;
+
+fn default_global_max_concurrent() -> u32 {
+    DEFAULT_GLOBAL_MAX_CONCURRENT
+}
+
 /// Top-level pipeline configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PipelineConfig {
     pub pipeline: String,
     #[serde(default)]
     pub description: String,
+    /// Global limit on total concurrent pipeline tasks (across all stages).
+    #[serde(default = "default_global_max_concurrent")]
+    pub max_concurrent: u32,
     /// Reusable template snippets available as `{key}` in all prompts.
     #[serde(default)]
     pub templates: IndexMap<String, String>,
     /// Ordered map of stage name → stage config.
     pub stages: IndexMap<String, StageConfig>,
 }
-
-/// Default max concurrent tasks per stage.
-const DEFAULT_MAX_CONCURRENT: u32 = 2;
 
 /// Configuration for a single pipeline stage.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -28,9 +35,10 @@ pub struct StageConfig {
     pub agent: String,
     /// Model short name: "opus" | "sonnet" | "haiku".
     pub model: String,
-    /// Maximum concurrent tasks for this stage (default: 2).
-    #[serde(default = "default_max_concurrent")]
-    pub max_concurrent: u32,
+    /// Deprecated: per-stage max_concurrent is ignored. Use pipeline-level max_concurrent.
+    /// Kept for backward compatibility with existing YAML configs.
+    #[serde(default)]
+    pub max_concurrent: Option<u32>,
     /// How to handle issues with the `manual` label.
     #[serde(default)]
     pub manual: ManualBehavior,
@@ -40,10 +48,6 @@ pub struct StageConfig {
     /// Verdict → transition mapping.
     #[serde(default)]
     pub transitions: IndexMap<String, Transition>,
-}
-
-fn default_max_concurrent() -> u32 {
-    DEFAULT_MAX_CONCURRENT
 }
 
 /// Behavior when processing an issue that has the `manual` label.
@@ -302,6 +306,33 @@ stages:
         let results = config.stage_for_status("deploy");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "devops");
+    }
+
+    #[test]
+    fn max_concurrent_defaults_when_absent() {
+        let yaml = r#"
+pipeline: minimal
+stages:
+  test:
+    agent: pipeline-test
+    model: sonnet
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.max_concurrent, DEFAULT_GLOBAL_MAX_CONCURRENT);
+    }
+
+    #[test]
+    fn max_concurrent_explicit_value() {
+        let yaml = r#"
+pipeline: custom
+max_concurrent: 2
+stages:
+  test:
+    agent: pipeline-test
+    model: sonnet
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.max_concurrent, 2);
     }
 
     #[test]
