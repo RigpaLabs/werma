@@ -91,9 +91,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
             // Post-merge detection: check if PRs for "ready" issues have been merged.
             if last_merge_check.elapsed() >= Duration::from_secs(MERGE_CHECK_INTERVAL_SECS) {
-                if let Err(e) =
-                    check_merged_prs(&db, werma_dir, &mut pending_update_since)
-                {
+                if let Err(e) = check_merged_prs(&db, werma_dir, &mut pending_update_since) {
                     log_daemon(&log_path, &format!("merge check error: {e}"));
                 }
                 last_merge_check = Instant::now();
