@@ -269,7 +269,12 @@ fn restart_daemon_if_running() {
         .args(["-u"])
         .output()
         .ok()
-        .and_then(|out| String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().ok())
+        .and_then(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<u32>()
+                .ok()
+        })
         .unwrap_or(501);
     let service_target = format!("gui/{uid}/{LAUNCHD_LABEL}");
 
