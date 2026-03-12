@@ -231,7 +231,7 @@ pub fn render_status_buf(
     let _ = writeln!(
         buf,
         " {} {}",
-        green_bold(&format!("{spinner} ")),
+        green_bold(&format!("{spinner}")),
         green_bold(&format!("running ({})", running.len())),
     );
     for task in running {
