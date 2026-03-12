@@ -22,12 +22,16 @@ pub fn load_default() -> Result<PipelineConfig> {
     if let Some(runtime_dir) = runtime_pipelines_dir() {
         let override_path = runtime_dir.join("default.yaml");
         if override_path.exists() {
-            return load_from_file(&override_path);
+            let config = load_from_file(&override_path)?;
+            warn_deprecated_per_stage(&config);
+            return Ok(config);
         }
     }
 
     // Fall back to builtin.
-    load_from_str(BUILTIN_DEFAULT_YAML, "<builtin>")
+    let config = load_from_str(BUILTIN_DEFAULT_YAML, "<builtin>")?;
+    warn_deprecated_per_stage(&config);
+    Ok(config)
 }
 
 /// Load a pipeline config from a YAML file path.
@@ -43,6 +47,18 @@ pub fn load_from_str(yaml: &str, source: &str) -> Result<PipelineConfig> {
         .with_context(|| format!("failed to parse pipeline config from {source}"))?;
     validate(&config, source)?;
     Ok(config)
+}
+
+/// Warn if any stage still has the deprecated per-stage max_concurrent field set.
+fn warn_deprecated_per_stage(config: &PipelineConfig) {
+    for (name, stage) in &config.stages {
+        if stage.max_concurrent.is_some() {
+            eprintln!(
+                "warning: stage '{}' has per-stage max_concurrent (deprecated, ignored). Use pipeline-level max_concurrent: {}",
+                name, config.max_concurrent
+            );
+        }
+    }
 }
 
 /// Validate that the config is internally consistent.
