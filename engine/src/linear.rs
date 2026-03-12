@@ -431,7 +431,7 @@ impl LinearClient {
     fn move_issue(&self, issue_id: &str, state_id: &str) -> Result<()> {
         let uuid = self.resolve_uuid(issue_id)?;
         self.query(
-            r#"mutation($id: String!, $stateId: String!) {
+            r#"mutation($id: ID!, $stateId: String!) {
                 issueUpdate(id: $id, input: { stateId: $stateId }) { success }
             }"#,
             &json!({"id": uuid, "stateId": state_id}),
@@ -453,7 +453,7 @@ impl LinearClient {
     pub fn comment(&self, issue_id: &str, body: &str) -> Result<()> {
         let uuid = self.resolve_uuid(issue_id)?;
         self.query(
-            r#"mutation($issueId: String!, $body: String!) {
+            r#"mutation($issueId: ID!, $body: String!) {
                 commentCreate(input: { issueId: $issueId, body: $body }) { success }
             }"#,
             &json!({"issueId": uuid, "body": body}),
@@ -465,7 +465,7 @@ impl LinearClient {
     pub fn attach_url(&self, issue_id: &str, url: &str, title: &str) -> Result<()> {
         let uuid = self.resolve_uuid(issue_id)?;
         self.query(
-            r#"mutation($issueId: String!, $url: String!, $title: String!) {
+            r#"mutation($issueId: ID!, $url: String!, $title: String!) {
                 attachmentCreate(input: { issueId: $issueId, url: $url, title: $title }) {
                     success
                 }
@@ -479,7 +479,7 @@ impl LinearClient {
     pub fn update_estimate(&self, issue_id: &str, estimate: i32) -> Result<()> {
         let uuid = self.resolve_uuid(issue_id)?;
         self.query(
-            r#"mutation($id: String!, $estimate: Int) {
+            r#"mutation($id: ID!, $estimate: Int) {
                 issueUpdate(id: $id, input: { estimate: $estimate }) { success }
             }"#,
             &json!({"id": uuid, "estimate": estimate}),
