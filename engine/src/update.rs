@@ -187,6 +187,36 @@ pub fn update() -> Result<()> {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&current_exe, std::fs::Permissions::from_mode(0o755))?;
             }
+
+            // macOS: re-sign with ad-hoc signature after copy.
+            // Copying invalidates the code signature, causing the kernel to SIGKILL on launch.
+            #[cfg(target_os = "macos")]
+            {
+                let codesign = std::process::Command::new("codesign")
+                    .args(["--force", "--sign", "-", &current_exe.to_string_lossy()])
+                    .output();
+                match codesign {
+                    Ok(out) if out.status.success() => {
+                        println!("re-signed binary (ad-hoc codesign)");
+                    }
+                    Ok(out) => {
+                        let stderr = String::from_utf8_lossy(&out.stderr);
+                        eprintln!("warning: codesign failed ({}): {stderr}", out.status);
+                        eprintln!(
+                            "you may need to run: codesign --force --sign - {}",
+                            current_exe.display()
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("warning: could not run codesign: {e}");
+                        eprintln!(
+                            "you may need to run: codesign --force --sign - {}",
+                            current_exe.display()
+                        );
+                    }
+                }
+            }
+
             // Remove backup
             let _ = std::fs::remove_file(&backup_path);
             println!("updated to {}", release.tag);
