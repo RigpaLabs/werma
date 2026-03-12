@@ -8,6 +8,7 @@ const MIGRATION_SQL: &str = include_str!("../migrations/001_init.sql");
 const MIGRATION_002_SQL: &str = include_str!("../migrations/002_repo_hash.sql");
 const MIGRATION_003_SQL: &str = include_str!("../migrations/003_estimate.sql");
 const MIGRATION_004_SQL: &str = include_str!("../migrations/004_normalize_linear_ids.sql");
+const MIGRATION_005_SQL: &str = include_str!("../migrations/005_callback_fired_at.sql");
 
 pub struct Db {
     conn: Connection,
@@ -59,6 +60,13 @@ impl Db {
         self.conn
             .execute_batch(MIGRATION_004_SQL)
             .context("migration 004_normalize_linear_ids")?;
+        // 005: add callback_fired_at column (idempotent — ignore "duplicate column" error)
+        if let Err(e) = self.conn.execute_batch(MIGRATION_005_SQL) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(e).context("migration 005_callback_fired_at");
+            }
+        }
         Ok(())
     }
 
@@ -575,6 +583,46 @@ impl Db {
         Ok(count > 0)
     }
 
+    /// Check if callback was recently fired for a task (within `window_secs` seconds).
+    /// Used to prevent duplicate callback execution from overlapping daemon ticks.
+    pub fn is_callback_recently_fired(&self, task_id: &str, window_secs: i64) -> Result<bool> {
+        let fired_at: String = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(callback_fired_at, '') FROM tasks WHERE id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+
+        if fired_at.is_empty() {
+            return Ok(false);
+        }
+
+        if let Ok(ts) =
+            chrono::NaiveDateTime::parse_from_str(&fired_at, "%Y-%m-%dT%H:%M:%S")
+        {
+            let now = chrono::Local::now().naive_local();
+            let elapsed = now.signed_duration_since(ts).num_seconds();
+            return Ok(elapsed < window_secs);
+        }
+
+        Ok(false)
+    }
+
+    /// Set callback_fired_at to current timestamp.
+    /// Must be called synchronously before any callback work to prevent duplicates.
+    pub fn set_callback_fired_at(&self, task_id: &str) -> Result<()> {
+        let now = chrono::Local::now()
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        self.conn.execute(
+            "UPDATE tasks SET callback_fired_at = ?1 WHERE id = ?2",
+            params![now, task_id],
+        )?;
+        Ok(())
+    }
+
     /// Check if a review task for the same target is already running or pending.
     /// NOTE: dedup is coupled to the prompt format "# Code Review: {label}" in cmd_review().
     /// If that format changes, this query must be updated too.
@@ -1059,6 +1107,49 @@ mod tests {
         db.set_linear_pushed("20260308-001", true).unwrap();
         let fetched = db.task("20260308-001").unwrap().unwrap();
         assert!(fetched.linear_pushed);
+    }
+
+    #[test]
+    fn callback_guard_not_fired() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        // Not fired yet — should return false
+        assert!(!db.is_callback_recently_fired("20260308-001", 60).unwrap());
+    }
+
+    #[test]
+    fn callback_guard_recently_fired() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        db.set_callback_fired_at("20260308-001").unwrap();
+
+        // Just fired — should return true within 60s window
+        assert!(db.is_callback_recently_fired("20260308-001", 60).unwrap());
+
+        // With 0s window — should return false (already elapsed)
+        assert!(!db.is_callback_recently_fired("20260308-001", 0).unwrap());
+    }
+
+    #[test]
+    fn callback_guard_expired() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        // Set a timestamp far in the past
+        db.conn
+            .execute(
+                "UPDATE tasks SET callback_fired_at = '2020-01-01T00:00:00' WHERE id = ?1",
+                params!["20260308-001"],
+            )
+            .unwrap();
+
+        // Should be expired (>60s ago)
+        assert!(!db.is_callback_recently_fired("20260308-001", 60).unwrap());
     }
 
     #[test]

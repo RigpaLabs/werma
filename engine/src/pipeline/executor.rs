@@ -193,6 +193,17 @@ pub fn poll(db: &Db) -> Result<()> {
                     continue;
                 }
 
+                // For reviewer stage: skip if PR is already merged (manual merge while in Review)
+                if stage_name == "reviewer" && is_pr_merged_for_issue(&working_dir, identifier) {
+                    println!(
+                        "  ~ {} [{}] PR already merged, moving to Done",
+                        identifier, title
+                    );
+                    let _ = linear.move_issue_by_name(issue_id, "done");
+                    total_skipped += 1;
+                    continue;
+                }
+
                 // Build prompt from config
                 let prompt = build_poll_prompt(&config, stage_cfg, identifier, title, description);
 
@@ -318,6 +329,17 @@ pub fn poll(db: &Db) -> Result<()> {
                 continue;
             }
 
+            // For reviewer stage: skip if PR is already merged
+            if *stage_name == "reviewer" && is_pr_merged_for_issue(&working_dir, identifier) {
+                println!(
+                    "  ~ {} [{}] PR already merged, moving to Done",
+                    identifier, title
+                );
+                let _ = linear.move_issue_by_name(issue_id, "done");
+                total_skipped += 1;
+                continue;
+            }
+
             let prompt = build_poll_prompt(&config, stage_cfg, identifier, title, description);
 
             let task_id = db.next_task_id()?;
@@ -388,6 +410,16 @@ pub fn callback(
     linear_issue_id: &str,
     working_dir: &str,
 ) -> Result<()> {
+    // Dedup guard: if callback was recently fired for this task, skip to prevent
+    // duplicate Linear comments from overlapping daemon ticks / cmd_complete races.
+    if db.is_callback_recently_fired(task_id, 60)? {
+        eprintln!(
+            "callback: skipping duplicate for task {task_id} (fired <60s ago)"
+        );
+        return Ok(());
+    }
+    db.set_callback_fired_at(task_id)?;
+
     let config = load_default()?;
     let linear = LinearClient::new()?;
 
@@ -645,6 +677,37 @@ fn resolve_home(path: &str) -> PathBuf {
         return home.join(rest);
     }
     PathBuf::from(path)
+}
+
+/// Check if a merged PR exists for the given Linear issue identifier in the repo.
+/// Uses `gh pr list --search` to find merged PRs mentioning the issue.
+fn is_pr_merged_for_issue(working_dir: &str, identifier: &str) -> bool {
+    let working_dir = resolve_home(working_dir);
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--search",
+            identifier,
+            "--state",
+            "merged",
+            "--json",
+            "number",
+            "--limit",
+            "1",
+        ])
+        .current_dir(&working_dir)
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let text = text.trim();
+            // gh pr list returns "[]" if no results
+            text != "[]" && !text.is_empty()
+        }
+        _ => false,
+    }
 }
 
 /// Automatically create a GitHub PR from the engineer's worktree branch.
