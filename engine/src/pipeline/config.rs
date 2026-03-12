@@ -51,6 +51,23 @@ pub struct StageConfig {
     /// Verdict → transition mapping.
     #[serde(default)]
     pub transitions: IndexMap<String, Transition>,
+
+    // ─── Cost optimization fields (RIG-183) ─────────────────────────────
+    /// Model for re-review rounds (2+). Uses cheaper model to verify fixes.
+    #[serde(default)]
+    pub recheck_model: Option<String>,
+    /// Max review rejection cycles before escalating to Blocked.
+    #[serde(default)]
+    pub max_review_rounds: Option<u32>,
+    /// Max turns passed to `claude --max-turns`. Overrides default_turns().
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    /// Lighter model for low-SP tasks (e.g. sonnet instead of opus).
+    #[serde(default)]
+    pub light_model: Option<String>,
+    /// SP threshold: if task estimate <= this, use light_model. Default: 2.
+    #[serde(default)]
+    pub light_threshold: Option<u32>,
 }
 
 /// Behavior when processing an issue that has the `manual` label.
@@ -154,6 +171,33 @@ impl StageConfig {
             .map(|om| om.0.iter().map(String::as_str).collect())
             .unwrap_or_default()
     }
+
+    /// Pick the effective model for this stage given the task context.
+    ///
+    /// - For reviewer stages: uses `recheck_model` on round 2+ (re-reviews).
+    /// - For engineer stages: uses `light_model` for low-SP tasks.
+    /// - Falls back to `self.model` otherwise.
+    pub fn effective_model(&self, estimate: i32, review_round: i64) -> &str {
+        // Re-review: cheaper model to just verify fixes
+        if review_round >= 1 {
+            if let Some(ref m) = self.recheck_model {
+                return m;
+            }
+        }
+        // Light model for simple tasks
+        let threshold = self.light_threshold.unwrap_or(2) as i32;
+        if estimate > 0 && estimate <= threshold {
+            if let Some(ref m) = self.light_model {
+                return m;
+            }
+        }
+        &self.model
+    }
+
+    /// Returns the configured max_review_rounds, or None if unlimited.
+    pub fn review_round_limit(&self) -> Option<u32> {
+        self.max_review_rounds
+    }
 }
 
 #[cfg(test)]
@@ -184,7 +228,9 @@ stages:
   engineer:
     agent: pipeline-engineer
     model: opus
-    fallback: sonnet
+    fallback: sonnet    light_model: sonnet
+    light_threshold: 2
+    max_turns: 40
     manual: skip
     transitions:
       done:
@@ -194,6 +240,9 @@ stages:
     linear_status: review
     agent: pipeline-reviewer
     model: sonnet
+    recheck_model: haiku
+    max_review_rounds: 3
+    max_turns: 15
     manual: process
     prompt: prompts/reviewer.md
     transitions:
@@ -378,6 +427,75 @@ stages:
 
         let analyst = config.stage("analyst").unwrap();
         assert!(analyst.fallback.is_none());
+    }
+
+    #[test]
+    fn recheck_model_deserialized() {
+        let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
+        let reviewer = config.stage("reviewer").unwrap();
+        assert_eq!(reviewer.recheck_model.as_deref(), Some("haiku"));
+        assert_eq!(reviewer.max_review_rounds, Some(3));
+        assert_eq!(reviewer.max_turns, Some(15));
+    }
+
+    #[test]
+    fn light_model_deserialized() {
+        let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
+        let engineer = config.stage("engineer").unwrap();
+        assert_eq!(engineer.light_model.as_deref(), Some("sonnet"));
+        assert_eq!(engineer.light_threshold, Some(2));
+        assert_eq!(engineer.max_turns, Some(40));
+    }
+
+    #[test]
+    fn effective_model_uses_recheck_on_round2() {
+        let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
+        let reviewer = config.stage("reviewer").unwrap();
+        // Round 0 (first review): uses base model
+        assert_eq!(reviewer.effective_model(0, 0), "sonnet");
+        // Round 1+ (re-review): uses recheck_model
+        assert_eq!(reviewer.effective_model(0, 1), "haiku");
+        assert_eq!(reviewer.effective_model(0, 3), "haiku");
+    }
+
+    #[test]
+    fn effective_model_uses_light_for_low_sp() {
+        let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
+        let engineer = config.stage("engineer").unwrap();
+        // Low SP (1-2): uses light_model
+        assert_eq!(engineer.effective_model(1, 0), "sonnet");
+        assert_eq!(engineer.effective_model(2, 0), "sonnet");
+        // High SP (3+): uses base model
+        assert_eq!(engineer.effective_model(3, 0), "opus");
+        assert_eq!(engineer.effective_model(5, 0), "opus");
+        // No estimate (0): uses base model
+        assert_eq!(engineer.effective_model(0, 0), "opus");
+    }
+
+    #[test]
+    fn effective_model_no_light_config_uses_base() {
+        let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
+        let analyst = config.stage("analyst").unwrap();
+        // No light_model configured: always uses base
+        assert_eq!(analyst.effective_model(1, 0), "opus");
+    }
+
+    #[test]
+    fn new_fields_default_to_none() {
+        let yaml = r#"
+pipeline: minimal
+stages:
+  test:
+    agent: pipeline-test
+    model: sonnet
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        let stage = config.stage("test").unwrap();
+        assert!(stage.recheck_model.is_none());
+        assert!(stage.max_review_rounds.is_none());
+        assert!(stage.max_turns.is_none());
+        assert!(stage.light_model.is_none());
+        assert!(stage.light_threshold.is_none());
     }
 
     #[test]

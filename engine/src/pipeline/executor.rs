@@ -12,8 +12,8 @@ use crate::db::Db;
 use crate::linear::LinearClient;
 use crate::models::{Status, Task};
 
-/// Maximum number of review cycles before auto-approving to prevent infinite loops.
-const MAX_REVIEW_CYCLES: i64 = 3;
+/// Default maximum review cycles when not configured in YAML.
+const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 3;
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
@@ -205,8 +205,23 @@ pub fn poll(db: &Db) -> Result<()> {
                 let task_id = db.next_task_id()?;
                 let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
 
-                let max_turns = crate::default_turns(&stage_cfg.agent);
+                let issue_estimate = issue["estimate"].as_i64().unwrap_or(0) as i32;
+
+                // For polled stages (first invocation), review_round=0
+                let review_round: i64 = if stage_name == "reviewer" {
+                    db.count_completed_tasks_for_issue_stage(identifier, "reviewer")?
+                } else {
+                    0
+                };
+
+                let max_turns = stage_cfg
+                    .max_turns
+                    .map(|t| t as i32)
+                    .unwrap_or_else(|| crate::default_turns(&stage_cfg.agent));
                 let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
+                let effective_model = stage_cfg
+                    .effective_model(issue_estimate, review_round)
+                    .to_string();
 
                 let task = Task {
                     id: task_id.clone(),
@@ -219,7 +234,7 @@ pub fn poll(db: &Db) -> Result<()> {
                     prompt,
                     output_path: String::new(),
                     working_dir,
-                    model: stage_cfg.model.clone(),
+                    model: effective_model,
                     max_turns,
                     allowed_tools,
                     session_id: String::new(),
@@ -229,7 +244,7 @@ pub fn poll(db: &Db) -> Result<()> {
                     depends_on: vec![],
                     context_files: vec![],
                     repo_hash: crate::runtime_repo_hash(),
-                    estimate: issue["estimate"].as_i64().unwrap_or(0) as i32,
+                    estimate: issue_estimate,
                 };
 
                 db.insert_task(&task)?;
@@ -394,22 +409,26 @@ pub fn callback(
             // Spawn next stage if configured
             if let Some(ref next_stage) = t.spawn {
                 // Check review cycle limit: if reviewer has rejected too many times,
-                // force-approve instead to prevent infinite loops.
+                // escalate to Blocked to prevent infinite loops.
                 if stage == "reviewer" && next_stage == "engineer" {
                     let review_count =
                         db.count_completed_tasks_for_issue_stage(linear_issue_id, "reviewer")?;
-                    if review_count >= MAX_REVIEW_CYCLES {
+                    let max_rounds = stage_cfg
+                        .review_round_limit()
+                        .unwrap_or(DEFAULT_MAX_REVIEW_ROUNDS)
+                        as i64;
+                    if review_count >= max_rounds {
                         eprintln!(
-                            "review cycle limit ({MAX_REVIEW_CYCLES}) reached for issue {}, \
-                             force-approving",
+                            "review cycle limit ({max_rounds}) reached for issue {}, \
+                             escalating to blocked",
                             linear_issue_id
                         );
-                        linear.move_issue_by_name(linear_issue_id, "ready")?;
+                        linear.move_issue_by_name(linear_issue_id, "blocked")?;
                         linear.comment(
                             linear_issue_id,
                             &format!(
-                                "**Review cycle limit reached** ({MAX_REVIEW_CYCLES} cycles). \
-                                 Auto-moving to Ready. Manual review recommended."
+                                "**Review cycle limit reached** ({max_rounds} rounds). \
+                                 Moving to Blocked — manual review required."
                             ),
                         )?;
                         // Don't spawn another engineer cycle
@@ -463,8 +482,12 @@ pub fn create_initial_stage_task(
     let task_id = db.next_task_id()?;
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
 
-    let max_turns = crate::default_turns(&stage_cfg.agent);
+    let max_turns = stage_cfg
+        .max_turns
+        .map(|t| t as i32)
+        .unwrap_or_else(|| crate::default_turns(&stage_cfg.agent));
     let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
+    let effective_model = stage_cfg.effective_model(estimate, 0).to_string();
 
     let prompt = build_poll_prompt(config, stage_cfg, identifier, title, description);
 
@@ -486,7 +509,7 @@ pub fn create_initial_stage_task(
         prompt,
         output_path: String::new(),
         working_dir: effective_working_dir,
-        model: stage_cfg.model.clone(),
+        model: effective_model,
         max_turns,
         allowed_tools,
         session_id: String::new(),
@@ -870,13 +893,25 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
     let task_id = db.next_task_id()?;
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
 
-    // Engineer turns vary by track: heavy track gets more budget for complex work
-    let max_turns = if *next_stage == "engineer" {
+    // Determine review round for model selection (how many times reviewer has completed)
+    let review_round = if *next_stage == "reviewer" {
+        db.count_completed_tasks_for_issue_stage(linear_issue_id, "reviewer")?
+    } else {
+        0
+    };
+
+    // Max turns: config > heavy-track heuristic > default_turns
+    let max_turns = if let Some(t) = stage_cfg.max_turns {
+        t as i32
+    } else if *next_stage == "engineer" {
         if is_heavy_track(p.estimate) { 45 } else { 30 }
     } else {
         crate::default_turns(&stage_cfg.agent)
     };
     let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
+    let effective_model = stage_cfg
+        .effective_model(p.estimate, review_round)
+        .to_string();
 
     // Fetch issue title/description from Linear for template vars
     let (issue_title, issue_description) = linear
@@ -936,7 +971,7 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         prompt,
         output_path: String::new(),
         working_dir: effective_working_dir,
-        model: stage_cfg.model.clone(),
+        model: effective_model.clone(),
         max_turns,
         allowed_tools,
         session_id: String::new(),
@@ -951,8 +986,8 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
 
     db.insert_task(&task)?;
     println!(
-        "  + pipeline task: {} stage={} type={}",
-        task_id, next_stage, stage_cfg.agent
+        "  + pipeline task: {} stage={} type={} model={}",
+        task_id, next_stage, stage_cfg.agent, effective_model
     );
 
     Ok(())
