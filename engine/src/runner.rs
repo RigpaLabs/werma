@@ -418,8 +418,27 @@ RESULT_JSON=$(claude -p "$PROMPT" \
     exit 1
 }}
 
-RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.result // empty' 2>/dev/null || echo "$RESULT_JSON")
+# Strategy 1: extract .result from JSON
+RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.result // empty' 2>/dev/null)
+
+# Strategy 2: if .result is empty/null, try alternative fields
+if [ -z "$RESULT_TEXT" ]; then
+    RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.content // .message // .text // empty' 2>/dev/null)
+fi
+
+# Strategy 3: if still empty, use raw JSON (better than losing everything)
+if [ -z "$RESULT_TEXT" ]; then
+    RESULT_TEXT="$RESULT_JSON"
+fi
+
 SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+
+# Guard: if truly empty (claude returned nothing), log and fail
+if [ -z "$(echo "$RESULT_TEXT" | tr -d '[:space:]')" ]; then
+    echo "$(date): EMPTY OUTPUT — claude returned no parseable result" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+fi
 
 # Always save output to logs
 echo "$RESULT_TEXT" > "$RESULT_FILE"
@@ -781,5 +800,29 @@ mod tests {
         // No more raw sqlite3 or osascript — handled by werma complete/fail
         assert!(!script.contains("sqlite3"));
         assert!(!script.contains("osascript"));
+    }
+
+    #[test]
+    fn exec_script_multi_strategy_output_extraction() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "20260312-001",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read",
+            max_turns: 10,
+            model: "claude-sonnet-4-6",
+            log_file: Path::new("/tmp/test.log"),
+        });
+
+        // Strategy 1: .result extraction
+        assert!(script.contains(".result // empty"));
+        // Strategy 2: alternative fields
+        assert!(script.contains(".content // .message // .text // empty"));
+        // Strategy 3: raw JSON fallback
+        assert!(script.contains("RESULT_TEXT=\"$RESULT_JSON\""));
+        // Guard: empty output detection and fail
+        assert!(script.contains("EMPTY OUTPUT"));
+        assert!(script.contains("werma fail \"$TASK_ID\""));
     }
 }
