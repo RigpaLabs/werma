@@ -10,7 +10,7 @@ stages:
   analyst:
     # No linear_status — analyst is triggered manually, not auto-polled
     agent: pipeline-analyst
-    model: opus
+    model: sonnet
     manual: skip
     prompt: |
       # Pipeline: Analyst Stage
@@ -46,6 +46,7 @@ stages:
     linear_status: in_progress
     agent: pipeline-engineer
     model: opus
+    fallback: sonnet
     manual: skip
     prompt: prompts/engineer.md
     transitions:
