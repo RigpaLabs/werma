@@ -20,7 +20,7 @@ mod worktree;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
+use chrono::Local;
 use clap::Parser;
 use colored::Colorize;
 
@@ -284,7 +284,7 @@ fn format_elapsed_since(start: &str) -> String {
     let Some(s) = parse_timestamp(start) else {
         return String::new();
     };
-    format_duration_secs((Utc::now().naive_utc() - s).num_seconds().max(0))
+    format_duration_secs((Local::now().naive_local() - s).num_seconds().max(0))
 }
 
 fn format_duration_secs(secs: i64) -> String {
