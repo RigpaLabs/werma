@@ -25,5 +25,6 @@ You are implementing changes for a Linear issue. You may be:
 6. Push: `git push -u origin HEAD`
 7. Create PR: `gh pr create --title "RIG-XX type: description" --body "..." --label ai-generated`
    - If a PR already exists (rejection flow), push fixes to the existing branch instead
+   - After creating the PR, print the PR URL on its own line so the pipeline can link it to Linear
 
 {verdict_instruction}. Example: `VERDICT=DONE`
