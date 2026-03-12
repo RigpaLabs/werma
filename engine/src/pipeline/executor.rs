@@ -248,12 +248,140 @@ pub fn poll(db: &Db) -> Result<()> {
                 };
 
                 db.insert_task(&task)?;
+
+                // on_start: move issue to a different status when task is created
+                if let Some(ref on_start) = stage_cfg.on_start
+                    && let Err(e) = linear.move_issue_by_name(issue_id, &on_start.status)
+                {
+                    eprintln!(
+                        "  ! on_start move failed for {} -> {}: {e}",
+                        identifier, on_start.status
+                    );
+                }
+
                 println!(
                     "  + {} [{}] stage={} type={}",
                     task_id, identifier, stage_name, stage_cfg.agent
                 );
                 total_created += 1;
             }
+        }
+    }
+
+    // Label-based polling: iterate stages with linear_label
+    for (stage_name, stage_cfg) in &poll_stages {
+        let label = match &stage_cfg.linear_label {
+            Some(l) => l.clone(),
+            None => continue,
+        };
+
+        let issues = linear.get_issues_by_label(&label)?;
+
+        for issue in &issues {
+            let issue_id = issue["id"].as_str().unwrap_or("");
+            let identifier = issue["identifier"].as_str().unwrap_or("");
+            let title = issue["title"].as_str().unwrap_or("");
+            let description = issue["description"].as_str().unwrap_or("");
+
+            if issue_id.is_empty() {
+                continue;
+            }
+
+            let labels: Vec<&str> = issue["labels"]["nodes"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|l| l["name"].as_str())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            // Skip if active task already exists for this issue + stage
+            let existing = db.tasks_by_linear_issue(identifier, Some(stage_name), true)?;
+            if !existing.is_empty() {
+                total_skipped += 1;
+                continue;
+            }
+
+            // Skip if there's a completed-but-unpushed task for this issue + stage
+            if db.has_unpushed_completed_task(identifier, stage_name)? {
+                total_skipped += 1;
+                continue;
+            }
+
+            // Manual issues: skip execution stages
+            if crate::linear::is_manual_issue(&labels) && stage_cfg.skip_manual() {
+                total_skipped += 1;
+                continue;
+            }
+
+            let working_dir = crate::linear::infer_working_dir(title, &labels);
+            if crate::linear::validate_working_dir(&working_dir).is_none() {
+                eprintln!(
+                    "  ! skipping {} [{}] stage={}: working dir '{}' does not exist",
+                    identifier, title, stage_name, working_dir
+                );
+                total_skipped += 1;
+                continue;
+            }
+
+            let prompt = build_poll_prompt(&config, stage_cfg, identifier, title, description);
+
+            let task_id = db.next_task_id()?;
+            let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+
+            let max_turns = crate::default_turns(&stage_cfg.agent);
+            let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
+
+            let task = Task {
+                id: task_id.clone(),
+                status: Status::Pending,
+                priority: 1,
+                created_at: now,
+                started_at: None,
+                finished_at: None,
+                task_type: stage_cfg.agent.clone(),
+                prompt,
+                output_path: String::new(),
+                working_dir,
+                model: stage_cfg.model.clone(),
+                max_turns,
+                allowed_tools,
+                session_id: String::new(),
+                linear_issue_id: identifier.to_string(),
+                linear_pushed: false,
+                pipeline_stage: stage_name.to_string(),
+                depends_on: vec![],
+                context_files: vec![],
+                repo_hash: crate::runtime_repo_hash(),
+                estimate: issue["estimate"].as_i64().unwrap_or(0) as i32,
+            };
+
+            db.insert_task(&task)?;
+
+            // Remove the trigger label from the issue so it doesn't get picked up again
+            if let Err(e) = linear.remove_label(issue_id, &label) {
+                eprintln!(
+                    "  ! failed to remove label '{}' from {}: {e}",
+                    label, identifier
+                );
+            }
+
+            // on_start: move issue status
+            if let Some(ref on_start) = stage_cfg.on_start
+                && let Err(e) = linear.move_issue_by_name(issue_id, &on_start.status)
+            {
+                eprintln!(
+                    "  ! on_start move failed for {} -> {}: {e}",
+                    identifier, on_start.status
+                );
+            }
+
+            println!(
+                "  + {} [{}] stage={} type={} (label: {})",
+                task_id, identifier, stage_name, stage_cfg.agent, label
+            );
+            total_created += 1;
         }
     }
 

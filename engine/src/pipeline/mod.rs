@@ -259,13 +259,27 @@ pub fn cmd_show(stage_filter: Option<&str>) -> Result<()> {
             None => "(none)",
         };
 
+        let label_str = stage.linear_label.as_deref().unwrap_or("(none)");
+
+        let on_start_str = stage
+            .on_start
+            .as_ref()
+            .map(|o| o.status.as_str())
+            .unwrap_or("(none)");
+
         println!();
         println!("  {name}:");
-        println!("    status:  {status_str}");
-        println!("    agent:   {}", stage.agent);
-        println!("    model:   {}", stage.model);
-        println!("    manual:  {manual_str}");
-        println!("    prompt:  {prompt_str}");
+        println!("    status:    {status_str}");
+        if label_str != "(none)" {
+            println!("    label:     {label_str}");
+        }
+        if on_start_str != "(none)" {
+            println!("    on_start:  {on_start_str}");
+        }
+        println!("    agent:     {}", stage.agent);
+        println!("    model:     {}", stage.model);
+        println!("    manual:    {manual_str}");
+        println!("    prompt:    {prompt_str}");
 
         if !stage.transitions.is_empty() {
             println!("    transitions:");

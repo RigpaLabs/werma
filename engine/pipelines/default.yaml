@@ -77,3 +77,18 @@ stages:
       request_changes:
         status: in_progress
         spawn: engineer
+
+  deployer:
+    linear_status: deploy
+    agent: pipeline-deployer
+    model: haiku
+    manual: skip
+    prompt: prompts/deployer.md
+    transitions:
+      done:
+        status: done
+      conflicts:
+        status: in_progress
+        spawn: engineer
+      failed:
+        status: ready

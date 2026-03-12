@@ -603,6 +603,79 @@ impl LinearClient {
             .cloned()
             .unwrap_or_default())
     }
+    /// Get issues filtered by team and label name.
+    pub fn get_issues_by_label(&self, label_name: &str) -> Result<Vec<Value>> {
+        let config = load_config()?;
+
+        let data = self.query(
+            r#"query($teamId: ID!, $label: String!) {
+                issues(
+                    filter: {
+                        team: { id: { eq: $teamId } },
+                        labels: { name: { eqIgnoreCase: $label } }
+                    },
+                    orderBy: updatedAt
+                ) {
+                    nodes {
+                        id
+                        identifier
+                        title
+                        description
+                        priority
+                        estimate
+                        labels { nodes { id name } }
+                    }
+                }
+            }"#,
+            &json!({"teamId": config.team_id, "label": label_name}),
+        )?;
+
+        Ok(data["issues"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Remove a label from an issue by label name.
+    pub fn remove_label(&self, issue_id: &str, label_name: &str) -> Result<()> {
+        let uuid = self.resolve_uuid(issue_id)?;
+
+        // First, get the issue's current labels to find the label ID
+        let data = self.query(
+            r#"query($id: ID!) {
+                issue(id: $id) {
+                    labels { nodes { id name } }
+                }
+            }"#,
+            &json!({"id": uuid}),
+        )?;
+
+        let labels = data["issue"]["labels"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        // Collect label IDs, excluding the one to remove
+        let remaining_ids: Vec<String> = labels
+            .iter()
+            .filter(|l| {
+                !l["name"]
+                    .as_str()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(label_name))
+            })
+            .filter_map(|l| l["id"].as_str().map(String::from))
+            .collect();
+
+        // Update issue with remaining labels
+        self.query(
+            r#"mutation($id: String!, $labelIds: [String!]!) {
+                issueUpdate(id: $id, input: { labelIds: $labelIds }) { success }
+            }"#,
+            &json!({"id": uuid, "labelIds": remaining_ids}),
+        )?;
+
+        Ok(())
+    }
 }
 
 // --- Helper functions ---
