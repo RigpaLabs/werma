@@ -92,6 +92,108 @@ fn latest_release(token: &str) -> Result<ReleaseInfo> {
     Ok(ReleaseInfo { tag, asset_api_url })
 }
 
+/// Check for a new release and apply the update silently.
+/// Returns `Ok(true)` if a new version was installed (caller should restart),
+/// `Ok(false)` if already up to date, or `Err` on failure.
+///
+/// Designed for daemon use — no spinners, no println, no interactive UI.
+pub fn check_and_apply_update() -> Result<bool> {
+    let current = env!("CARGO_PKG_VERSION");
+    let token = github_token()?;
+    let release = latest_release(&token)?;
+    let latest_version = release.tag.strip_prefix('v').unwrap_or(&release.tag);
+
+    if latest_version == current {
+        return Ok(false);
+    }
+
+    // New version available — download and install silently.
+    let target = current_target();
+    if target == "unknown" {
+        bail!("unsupported platform for auto-update");
+    }
+
+    let artifact_name = format!("werma-{target}");
+
+    let download_url = match &release.asset_api_url {
+        Some(url) => url.clone(),
+        None => format!(
+            "https://github.com/{GITHUB_REPO}/releases/download/{}/{artifact_name}.tar.gz",
+            release.tag,
+        ),
+    };
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("werma-updater")
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let resp = client
+        .get(&download_url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/octet-stream")
+        .send()
+        .with_context(|| format!("failed to download from {download_url}"))?;
+
+    if !resp.status().is_success() {
+        bail!("download failed ({}): {download_url}", resp.status());
+    }
+
+    let bytes = resp.bytes().context("failed to read download")?;
+
+    let tmp_dir = tempfile::tempdir().context("failed to create temp dir")?;
+    let archive_path = tmp_dir.path().join(format!("{artifact_name}.tar.gz"));
+    std::fs::write(&archive_path, &bytes)?;
+
+    let status = std::process::Command::new("tar")
+        .args(["xzf", &archive_path.to_string_lossy()])
+        .current_dir(tmp_dir.path())
+        .status()
+        .context("failed to extract archive")?;
+
+    if !status.success() {
+        bail!("tar extraction failed");
+    }
+
+    let new_binary = tmp_dir.path().join("werma");
+    if !new_binary.exists() {
+        bail!("extracted archive does not contain 'werma' binary");
+    }
+
+    let current_exe =
+        std::env::current_exe().context("cannot determine current executable path")?;
+    let current_exe = current_exe.canonicalize().unwrap_or(current_exe);
+
+    let backup_path = current_exe.with_extension("old");
+    let _ = std::fs::remove_file(&backup_path);
+
+    std::fs::rename(&current_exe, &backup_path).context("failed to backup current binary")?;
+
+    match std::fs::copy(&new_binary, &current_exe) {
+        Ok(_) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&current_exe, std::fs::Permissions::from_mode(0o755))?;
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("codesign")
+                    .args(["--force", "--sign", "-", &current_exe.to_string_lossy()])
+                    .output();
+            }
+
+            let _ = std::fs::remove_file(&backup_path);
+            Ok(true)
+        }
+        Err(e) => {
+            let _ = std::fs::rename(&backup_path, &current_exe);
+            bail!("failed to install new binary: {e}");
+        }
+    }
+}
+
 /// Self-update werma binary from GitHub Releases.
 pub fn update() -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
