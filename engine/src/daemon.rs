@@ -15,6 +15,7 @@ use crate::{linear, pipeline, runner};
 const TICK_INTERVAL_SECS: u64 = 5;
 const PIPELINE_POLL_INTERVAL_SECS: u64 = 30;
 const MERGE_CHECK_INTERVAL_SECS: u64 = 60;
+const CLEANLINESS_CHECK_INTERVAL_SECS: u64 = 30; // rate-limit git status calls
 const CLEANLINESS_COOLDOWN_SECS: u64 = 300; // 5 minutes per-repo notification cooldown
 const MAX_LOG_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 
@@ -53,6 +54,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     // Per-repo cooldown for main-branch cleanliness notifications.
     let mut cleanliness_notified: std::collections::HashMap<PathBuf, Instant> =
         std::collections::HashMap::new();
+    let mut last_cleanliness_check = Instant::now() - Duration::from_secs(CLEANLINESS_CHECK_INTERVAL_SECS);
 
     loop {
         let tick_start = Instant::now();
@@ -78,9 +80,15 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 log_daemon(&log_path, &format!("log rotation error: {e}"));
             }
 
-            if let Err(e) = check_main_branch_cleanliness(&db, &log_path, &mut cleanliness_notified)
+            // Rate-limit cleanliness checks (git status is cheap but unnecessary every 5s tick)
+            if last_cleanliness_check.elapsed() >= Duration::from_secs(CLEANLINESS_CHECK_INTERVAL_SECS)
             {
-                log_daemon(&log_path, &format!("main branch check error: {e}"));
+                if let Err(e) =
+                    check_main_branch_cleanliness(&db, &log_path, &mut cleanliness_notified)
+                {
+                    log_daemon(&log_path, &format!("main branch check error: {e}"));
+                }
+                last_cleanliness_check = Instant::now();
             }
 
             // Pipeline poll: check Linear for new issues at pipeline-relevant statuses.
