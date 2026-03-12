@@ -191,13 +191,14 @@ pub fn update() -> Result<()> {
             // macOS: re-sign with ad-hoc signature after copy.
             // Copying invalidates the code signature, causing the kernel to SIGKILL on launch.
             #[cfg(target_os = "macos")]
-            {
+            let codesign_ok = {
                 let codesign = std::process::Command::new("codesign")
                     .args(["--force", "--sign", "-", &current_exe.to_string_lossy()])
                     .output();
                 match codesign {
                     Ok(out) if out.status.success() => {
                         println!("re-signed binary (ad-hoc codesign)");
+                        true
                     }
                     Ok(out) => {
                         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -206,6 +207,7 @@ pub fn update() -> Result<()> {
                             "you may need to run: codesign --force --sign - {}",
                             current_exe.display()
                         );
+                        false
                     }
                     Err(e) => {
                         eprintln!("warning: could not run codesign: {e}");
@@ -213,13 +215,20 @@ pub fn update() -> Result<()> {
                             "you may need to run: codesign --force --sign - {}",
                             current_exe.display()
                         );
+                        false
                     }
                 }
-            }
+            };
+            #[cfg(not(target_os = "macos"))]
+            let codesign_ok = true;
 
             // Remove backup
             let _ = std::fs::remove_file(&backup_path);
-            println!("updated to {}", release.tag);
+            if codesign_ok {
+                println!("updated to {}", release.tag);
+            } else {
+                println!("updated to {} (warning: manual codesign required)", release.tag);
+            }
         }
         Err(e) => {
             // Restore backup on failure
