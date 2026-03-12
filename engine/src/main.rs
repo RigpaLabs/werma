@@ -275,6 +275,13 @@ fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<()> 
         }
         let _guard = CursorGuard;
 
+        // SIGINT handler: restore cursor before exiting
+        ctrlc::set_handler(move || {
+            ui::show_cursor();
+            std::process::exit(0);
+        })
+        .ok();
+
         loop {
             let running = db.list_tasks(Some(Status::Running))?;
             let pending = db.list_tasks(Some(Status::Pending))?;

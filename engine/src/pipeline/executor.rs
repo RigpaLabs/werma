@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use super::config::PipelineConfig;
 use super::loader::{load_default, resolve_prompt};
 use super::prompt::{build_vars, render_prompt};
-use super::verdict::{extract_rejection_feedback, is_heavy_track, parse_estimate, parse_verdict};
+use super::verdict::{
+    extract_rejection_feedback, is_heavy_track, parse_estimate, parse_pr_url, parse_verdict,
+};
 use crate::db::Db;
 use crate::linear::LinearClient;
 use crate::models::{Status, Task};
@@ -520,16 +522,36 @@ pub fn callback(
 
             // Auto-create PR for engineer stage completion
             let pr_url = if stage == "engineer" && verdict_str == "done" {
-                let url = match auto_create_pr(working_dir, linear_issue_id, task_id) {
-                    Ok(url) => url,
-                    Err(e) => {
-                        eprintln!("auto-PR error: {e}");
-                        None
-                    }
-                };
+                // Try to extract PR URL from agent output first (agent may have created it)
+                let url_from_output = parse_pr_url(result);
 
-                // Also try to extract PR URL from task output (agent may have created it)
-                let url = url.or_else(|| extract_pr_url(result));
+                // Fallback: auto-create PR from worktree branch
+                let url = url_from_output.or_else(|| {
+                    match auto_create_pr(working_dir, linear_issue_id, task_id) {
+                        Ok(url) => url,
+                        Err(e) => {
+                            eprintln!("auto-PR error: {e}");
+                            None
+                        }
+                    }
+                });
+
+                // Validate: engineer DONE without PR is an error — pipeline stalls otherwise
+                if url.is_none() {
+                    eprintln!(
+                        "callback: engineer DONE but no PR_URL found for {linear_issue_id} (task {task_id}). \
+                         Keeping issue in current state for retry."
+                    );
+                    let _ = linear.comment(
+                        linear_issue_id,
+                        &format!(
+                            "**Engineer task `{task_id}` DONE but no PR created.** \
+                             The agent did not create a PR or include `PR_URL=` in its output. \
+                             Issue stays in current state — re-trigger needed."
+                        ),
+                    );
+                    return Ok(());
+                }
 
                 // Attach PR URL to Linear issue
                 if let Some(ref pr) = url {
@@ -805,26 +827,6 @@ fn auto_create_pr(
         eprintln!("auto-PR failed: {stderr}");
         Ok(None)
     }
-}
-
-/// Extract a GitHub PR URL from task output text.
-/// Looks for `https://github.com/.../pull/N` patterns.
-fn extract_pr_url(output: &str) -> Option<String> {
-    const PREFIX: &str = "https://github.com/";
-    for line in output.lines() {
-        if let Some(start) = line.find(PREFIX) {
-            let candidate = &line[start..];
-            // Take until whitespace or common delimiters
-            let url: String = candidate
-                .chars()
-                .take_while(|c| !c.is_whitespace() && *c != ')' && *c != '>' && *c != ']')
-                .collect();
-            if url.contains("/pull/") {
-                return Some(url);
-            }
-        }
-    }
-    None
 }
 
 /// Derive a short title from a GitHub PR URL (e.g. "PR #42").
@@ -1550,32 +1552,32 @@ mod tests {
     }
 
     #[test]
-    fn extract_pr_url_from_output() {
+    fn parse_pr_url_from_output() {
         let output = "Created PR: https://github.com/RigpaLabs/werma/pull/42\nVERDICT=DONE";
         assert_eq!(
-            extract_pr_url(output),
+            parse_pr_url(output),
             Some("https://github.com/RigpaLabs/werma/pull/42".to_string())
         );
     }
 
     #[test]
-    fn extract_pr_url_in_markdown() {
+    fn parse_pr_url_in_markdown() {
         let output = "PR created: [link](https://github.com/org/repo/pull/99)\nDone.";
         assert_eq!(
-            extract_pr_url(output),
+            parse_pr_url(output),
             Some("https://github.com/org/repo/pull/99".to_string())
         );
     }
 
     #[test]
-    fn extract_pr_url_none_when_absent() {
-        assert_eq!(extract_pr_url("just some output, no PR link"), None);
+    fn parse_pr_url_none_when_absent() {
+        assert_eq!(parse_pr_url("just some output, no PR link"), None);
     }
 
     #[test]
-    fn extract_pr_url_ignores_non_pull_github_urls() {
+    fn parse_pr_url_ignores_non_pull_github_urls() {
         let output = "See https://github.com/org/repo/issues/10 for context";
-        assert_eq!(extract_pr_url(output), None);
+        assert_eq!(parse_pr_url(output), None);
     }
 
     #[test]
