@@ -15,6 +15,8 @@ use crate::{linear, pipeline, runner};
 const TICK_INTERVAL_SECS: u64 = 5;
 const PIPELINE_POLL_INTERVAL_SECS: u64 = 30;
 const MERGE_CHECK_INTERVAL_SECS: u64 = 60;
+const PENDING_UPDATE_CHECK_INTERVAL_SECS: u64 = 30;
+const PENDING_UPDATE_TIMEOUT_SECS: u64 = 600; // 10 minutes
 const MAX_LOG_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 
 /// Run the daemon loop. Blocks forever (or until killed).
@@ -48,6 +50,10 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     // Trigger pipeline poll immediately on first tick.
     let mut last_pipeline_poll = Instant::now() - Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS);
     let mut last_merge_check = Instant::now() - Duration::from_secs(MERGE_CHECK_INTERVAL_SECS);
+
+    // Pending update state: set when a merge is detected, cleared when update succeeds or times out.
+    let mut pending_update_since: Option<Instant> = None;
+    let mut last_update_check = Instant::now();
 
     loop {
         let tick_start = Instant::now();
@@ -85,10 +91,44 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
             // Post-merge detection: check if PRs for "ready" issues have been merged.
             if last_merge_check.elapsed() >= Duration::from_secs(MERGE_CHECK_INTERVAL_SECS) {
-                if let Err(e) = check_merged_prs(&db, werma_dir) {
+                if let Err(e) = check_merged_prs(&db, werma_dir, &mut pending_update_since) {
                     log_daemon(&log_path, &format!("merge check error: {e}"));
                 }
                 last_merge_check = Instant::now();
+            }
+        }
+
+        // Pending update retry: poll GitHub for new release every ~30s after merge detected.
+        if let Some(since) = pending_update_since {
+            if since.elapsed() >= Duration::from_secs(PENDING_UPDATE_TIMEOUT_SECS) {
+                log_daemon(
+                    &log_path,
+                    "pending update timed out after 10min — CI build may have failed, giving up",
+                );
+                pending_update_since = None;
+            } else if last_update_check.elapsed()
+                >= Duration::from_secs(PENDING_UPDATE_CHECK_INTERVAL_SECS)
+            {
+                last_update_check = Instant::now();
+                match crate::update::update() {
+                    Ok(crate::update::UpdateResult::Updated(tag)) => {
+                        log_daemon(
+                            &log_path,
+                            &format!("auto-update: binary updated to {tag}, restarting daemon"),
+                        );
+                        // Exit cleanly — launchd will restart us with the new binary.
+                        std::process::exit(0);
+                    }
+                    Ok(crate::update::UpdateResult::AlreadyUpToDate) => {
+                        // CI hasn't published the new release yet — keep waiting.
+                    }
+                    Err(e) => {
+                        log_daemon(
+                            &log_path,
+                            &format!("pending update check failed (will retry): {e}"),
+                        );
+                    }
+                }
             }
         }
 
@@ -334,8 +374,13 @@ fn drain_queue(db: &Db, werma_dir: &Path, max_concurrent: usize) -> Result<()> {
 }
 
 /// Check for merged PRs on issues in "ready" status.
-/// When a PR is merged, move the issue to Done in Linear and trigger auto-update.
-fn check_merged_prs(_db: &Db, werma_dir: &Path) -> Result<()> {
+/// When a PR is merged, move the issue to Done in Linear and set pending_update flag
+/// so the daemon retries the update until CI publishes the new release.
+fn check_merged_prs(
+    _db: &Db,
+    werma_dir: &Path,
+    pending_update_since: &mut Option<Instant>,
+) -> Result<()> {
     let log_path = werma_dir.join("logs/daemon.log");
 
     let linear = match linear::LinearClient::new() {
@@ -404,18 +449,13 @@ fn check_merged_prs(_db: &Db, werma_dir: &Path) -> Result<()> {
                 )
                 .ok();
 
-            // Trigger auto-update: pull latest binary after merge.
-            log_daemon(&log_path, "triggering auto-update after merge");
-            match crate::update::update() {
-                Ok(()) => {
-                    log_daemon(&log_path, "auto-update: binary updated, restarting daemon");
-                    // Exit cleanly — launchd will restart us with the new binary (KeepAlive=true).
-                    std::process::exit(0);
-                }
-                Err(e) => {
-                    log_daemon(&log_path, &format!("auto-update failed (non-fatal): {e}"));
-                    // Continue running — update failure shouldn't block the daemon.
-                }
+            // Set pending update flag — daemon tick loop will retry until CI publishes the release.
+            if pending_update_since.is_none() {
+                log_daemon(
+                    &log_path,
+                    "merge detected — setting pending update (will retry every 30s for up to 10min)",
+                );
+                *pending_update_since = Some(Instant::now());
             }
         }
     }
