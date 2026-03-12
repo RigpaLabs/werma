@@ -380,7 +380,7 @@ fn compact_linear_label(linear_issue_id: &str) -> String {
     if linear_issue_id.is_empty() {
         String::new()
     } else {
-        format!(" [{}]", linear_issue_id)
+        format!(" [{linear_issue_id}]")
     }
 }
 

@@ -442,7 +442,7 @@ fn compact_linear_label(linear_issue_id: &str) -> String {
     if linear_issue_id.is_empty() {
         String::new()
     } else {
-        format!(" [{}]", linear_issue_id)
+        format!(" [{linear_issue_id}]")
     }
 }
 
@@ -1183,7 +1183,7 @@ fn cmd_review(
 
     // Info: mention if this PR was previously reviewed (completed)
     if let Some(n) = pr_number {
-        let pr_key = format!("{}:{}", working_dir, n);
+        let pr_key = format!("{working_dir}:{n}");
         if db.is_pr_reviewed(&pr_key)? {
             println!("note: {label} was previously reviewed — creating new review");
         }
@@ -1197,11 +1197,11 @@ fn cmd_review(
     let diff_path = logs_dir.join(format!("{task_id}-review-diff.patch"));
 
     let diff_cmd = if let Some(n) = pr_number {
-        format!("cd '{}' && gh pr diff {}", working_dir, n)
+        format!("cd '{working_dir}' && gh pr diff {n}")
     } else if let Some(t) = target {
-        format!("cd '{}' && git diff main...{}", working_dir, t)
+        format!("cd '{working_dir}' && git diff main...{t}")
     } else {
-        format!("cd '{}' && git diff main...HEAD", working_dir)
+        format!("cd '{working_dir}' && git diff main...HEAD")
     };
 
     let diff_output = std::process::Command::new("bash")
@@ -1312,8 +1312,7 @@ fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<()> {
         if config.stage(id).is_some() {
             if explicit_stage {
                 eprintln!(
-                    "warning: ignoring positional stage '{}' because --stage '{}' was explicitly set",
-                    id, effective_stage
+                    "warning: ignoring positional stage '{id}' because --stage '{effective_stage}' was explicitly set"
                 );
             } else {
                 effective_stage = id.clone();
@@ -1350,7 +1349,7 @@ fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<()> {
             match linear.get_issue_by_identifier(identifier) {
                 Ok(data) => data,
                 Err(e) => {
-                    eprintln!("  ! {}: {}", identifier, e);
+                    eprintln!("  ! {identifier}: {e}");
                     skipped += 1;
                     continue;
                 }
@@ -1360,10 +1359,7 @@ fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<()> {
         let existing = db.tasks_by_linear_issue(&ident, Some(&effective_stage), true)?;
         if !existing.is_empty() {
             let active_id = &existing[0].id;
-            eprintln!(
-                "  ~ {} already has active {} task ({})",
-                ident, effective_stage, active_id
-            );
+            eprintln!("  ~ {ident} already has active {effective_stage} task ({active_id})");
             skipped += 1;
             continue;
         }
@@ -1374,10 +1370,7 @@ fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<()> {
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         let working_dir = linear::infer_working_dir(&title, &label_refs);
         if linear::validate_working_dir(&working_dir).is_none() {
-            eprintln!(
-                "  ! skipping {} [{}]: working dir '{}' does not exist",
-                ident, title, working_dir
-            );
+            eprintln!("  ! skipping {ident} [{title}]: working dir '{working_dir}' does not exist");
             skipped += 1;
             continue;
         }
@@ -1394,11 +1387,11 @@ fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<()> {
             estimate,
         )?;
 
-        println!("  + {} [{}] stage={}", task_id, ident, effective_stage);
+        println!("  + {task_id} [{ident}] stage={effective_stage}");
         created += 1;
     }
 
-    println!("\nPipeline run: {} created, {} skipped", created, skipped);
+    println!("\nPipeline run: {created} created, {skipped} skipped");
     Ok(())
 }
 

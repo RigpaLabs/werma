@@ -54,7 +54,7 @@ pub fn handle_research_completion(db: &Db, task: &Task, output: &str) -> Result<
                 if output_file.is_empty() {
                     String::new()
                 } else {
-                    format!("File: `{}`", output_file)
+                    format!("File: `{output_file}`")
                 }
             ),
         )?;
@@ -174,12 +174,12 @@ pub fn status(db: &Db) -> Result<()> {
                         for issue in &issues {
                             let id = issue["identifier"].as_str().unwrap_or("?");
                             let title = issue["title"].as_str().unwrap_or("?");
-                            println!("    {} {}", id, title);
+                            println!("    {id} {title}");
                         }
                     }
                 }
                 Err(_) => {
-                    println!("  {} ({}): <error fetching>", label, key);
+                    println!("  {label} ({key}): <error fetching>");
                 }
             }
         }

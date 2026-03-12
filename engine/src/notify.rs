@@ -62,6 +62,21 @@ pub fn format_notify_label(task_id: &str, task_type: &str, linear_issue_id: &str
     }
 }
 
+/// Send macOS notification via osascript.
+pub fn notify_macos(title: &str, message: &str, sound: &str) {
+    let _ = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            &format!(
+                "display notification \"{}\" with title \"{}\" sound name \"{}\"",
+                message.replace('"', "\\\""),
+                title.replace('"', "\\\""),
+                sound
+            ),
+        ])
+        .status();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,19 +98,4 @@ mod tests {
         let label = format_notify_label("20260310-042", "code", "");
         assert_eq!(label, "#042 code");
     }
-}
-
-/// Send macOS notification via osascript.
-pub fn notify_macos(title: &str, message: &str, sound: &str) {
-    let _ = std::process::Command::new("osascript")
-        .args([
-            "-e",
-            &format!(
-                "display notification \"{}\" with title \"{}\" sound name \"{}\"",
-                message.replace('"', "\\\""),
-                title.replace('"', "\\\""),
-                sound
-            ),
-        ])
-        .status();
 }

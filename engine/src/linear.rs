@@ -103,10 +103,10 @@ impl LinearClient {
             for t in teams {
                 let name = t["name"].as_str().unwrap_or("?");
                 let key = t["key"].as_str().unwrap_or("?");
-                println!("  {} ({})", name, key);
+                println!("  {name} ({key})");
             }
         }
-        println!("Team: {} ({})", team_name, team_key);
+        println!("Team: {team_name} ({team_key})");
 
         // Get workflow statuses for this team
         let states_query = r#"
@@ -191,7 +191,7 @@ impl LinearClient {
         // Print discovered statuses
         println!("\nStatuses:");
         for (name, id) in &config.statuses {
-            println!("  {}: {}", name, id);
+            println!("  {name}: {id}");
         }
 
         Ok(())
@@ -279,8 +279,7 @@ impl LinearClient {
             let working_dir = infer_working_dir(title, &labels);
             if validate_working_dir(&working_dir).is_none() {
                 eprintln!(
-                    "  ! skipping {} [{}]: working dir '{}' does not exist",
-                    identifier, title, working_dir
+                    "  ! skipping {identifier} [{title}]: working dir '{working_dir}' does not exist"
                 );
                 skipped += 1;
                 continue;
@@ -289,9 +288,9 @@ impl LinearClient {
 
             // Build prompt
             let prompt = if description.is_empty() {
-                format!("[{}] {}", identifier, title)
+                format!("[{identifier}] {title}")
             } else {
-                format!("[{}] {}\n\n{}", identifier, title, description)
+                format!("[{identifier}] {title}\n\n{description}")
             };
 
             let task_id = db.next_task_id()?;
@@ -331,11 +330,11 @@ impl LinearClient {
                 let _ = self.move_issue(issue_id, ip_id);
             }
 
-            println!("  + {} [{}] p{}", task_id, identifier, werma_priority);
+            println!("  + {task_id} [{identifier}] p{werma_priority}");
             added += 1;
         }
 
-        println!("\nSync: {} added, {} skipped", added, skipped);
+        println!("\nSync: {added} added, {skipped} skipped");
         Ok(())
     }
 
@@ -365,14 +364,10 @@ impl LinearClient {
 
         // Build comment
         let status_str = task.status.to_string();
-        let mut comment = format!(
-            "**Werma task `{}`** — status: **{}**\n",
-            task_id, status_str
-        );
+        let mut comment = format!("**Werma task `{task_id}`** — status: **{status_str}**\n");
         if !output_preview.is_empty() {
             comment.push_str(&format!(
-                "\n<details><summary>Output preview</summary>\n\n```\n{}\n```\n</details>",
-                output_preview
+                "\n<details><summary>Output preview</summary>\n\n```\n{output_preview}\n```\n</details>"
             ));
         }
 
@@ -412,7 +407,7 @@ impl LinearClient {
             }
         }
 
-        println!("\npush-all: {} pushed", pushed);
+        println!("\npush-all: {pushed} pushed");
         Ok(())
     }
 
@@ -806,8 +801,7 @@ pub fn infer_working_dir(title: &str, labels: &[&str]) -> String {
             }
             // Unknown repo label — fall through to keyword matching
             eprintln!(
-                "warning: unknown repo label 'repo:{}', falling back to keyword inference",
-                repo
+                "warning: unknown repo label 'repo:{repo}', falling back to keyword inference"
             );
         }
     }

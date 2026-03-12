@@ -71,16 +71,14 @@ pub fn poll(db: &Db) -> Result<()> {
         let working_dir = crate::linear::infer_working_dir(title, &labels);
         if crate::linear::validate_working_dir(&working_dir).is_none() {
             eprintln!(
-                "  ! skipping {} [{}]: working dir '{}' does not exist",
-                identifier, title, working_dir
+                "  ! skipping {identifier} [{title}]: working dir '{working_dir}' does not exist"
             );
             total_skipped += 1;
             continue;
         }
         let prompt = format!(
-            "[{}] {}\n\n{}\n\nSave the research output as a markdown file in docs/research/. \
-             On the last line of your output, write: OUTPUT_FILE=<path-to-saved-file>",
-            identifier, title, description
+            "[{identifier}] {title}\n\n{description}\n\nSave the research output as a markdown file in docs/research/. \
+             On the last line of your output, write: OUTPUT_FILE=<path-to-saved-file>"
         );
 
         let task_id = db.next_task_id()?;
@@ -115,10 +113,7 @@ pub fn poll(db: &Db) -> Result<()> {
         db.insert_task(&task)?;
         // Move to In Progress so it doesn't get picked up again
         let _ = linear.move_issue_by_name(issue_id, "in_progress");
-        println!(
-            "  + {} [{}] type=research (research pipeline)",
-            task_id, identifier
-        );
+        println!("  + {task_id} [{identifier}] type=research (research pipeline)");
         total_created += 1;
     }
 
@@ -192,8 +187,7 @@ pub fn poll(db: &Db) -> Result<()> {
                 let working_dir = crate::linear::infer_working_dir(title, &labels);
                 if crate::linear::validate_working_dir(&working_dir).is_none() {
                     eprintln!(
-                        "  ! skipping {} [{}] stage={}: working dir '{}' does not exist",
-                        identifier, title, stage_name, working_dir
+                        "  ! skipping {identifier} [{title}] stage={stage_name}: working dir '{working_dir}' does not exist"
                     );
                     total_skipped += 1;
                     continue;
@@ -318,8 +312,7 @@ pub fn poll(db: &Db) -> Result<()> {
             let working_dir = crate::linear::infer_working_dir(title, &labels);
             if crate::linear::validate_working_dir(&working_dir).is_none() {
                 eprintln!(
-                    "  ! skipping {} [{}] stage={}: working dir '{}' does not exist",
-                    identifier, title, stage_name, working_dir
+                    "  ! skipping {identifier} [{title}] stage={stage_name}: working dir '{working_dir}' does not exist"
                 );
                 total_skipped += 1;
                 continue;
@@ -361,10 +354,7 @@ pub fn poll(db: &Db) -> Result<()> {
 
             // Remove the trigger label from the issue so it doesn't get picked up again
             if let Err(e) = linear.remove_label(issue_id, &label) {
-                eprintln!(
-                    "  ! failed to remove label '{}' from {}: {e}",
-                    label, identifier
-                );
+                eprintln!("  ! failed to remove label '{label}' from {identifier}: {e}");
             }
 
             // on_start: move issue status
@@ -385,10 +375,7 @@ pub fn poll(db: &Db) -> Result<()> {
         }
     }
 
-    println!(
-        "\nPipeline poll: {} created, {} skipped",
-        total_created, total_skipped
-    );
+    println!("\nPipeline poll: {total_created} created, {total_skipped} skipped");
     Ok(())
 }
 
@@ -441,8 +428,7 @@ pub fn callback(
 
     if verdict.is_none() && has_explicit_transitions && stage != "engineer" && stage != "analyst" {
         eprintln!(
-            "warning: no verdict found for task {} (stage={}), keeping current state",
-            task_id, stage
+            "warning: no verdict found for task {task_id} (stage={stage}), keeping current state"
         );
         linear.comment(
             linear_issue_id,
@@ -528,10 +514,7 @@ pub fn callback(
                 pr_url.as_deref(),
             );
             if let Err(e) = linear.comment(linear_issue_id, &comment) {
-                eprintln!(
-                    "callback: failed to post comment on {}: {e}",
-                    linear_issue_id
-                );
+                eprintln!("callback: failed to post comment on {linear_issue_id}: {e}");
             }
 
             // Spawn next stage if configured
@@ -547,9 +530,8 @@ pub fn callback(
                         as i64;
                     if review_count >= max_rounds {
                         eprintln!(
-                            "review cycle limit ({max_rounds}) reached for issue {}, \
-                             escalating to blocked",
-                            linear_issue_id
+                            "review cycle limit ({max_rounds}) reached for issue {linear_issue_id}, \
+                             escalating to blocked"
                         );
                         linear.move_issue_by_name(linear_issue_id, "blocked")?;
                         linear.comment(
@@ -581,8 +563,7 @@ pub fn callback(
         }
         None => {
             eprintln!(
-                "stage '{}': no transition for verdict '{}' — no action taken",
-                stage, verdict_str
+                "stage '{stage}': no transition for verdict '{verdict_str}' — no action taken"
             );
         }
     }
@@ -1008,8 +989,7 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
     let existing = db.tasks_by_linear_issue(linear_issue_id, Some(next_stage), true)?;
     if !existing.is_empty() {
         eprintln!(
-            "skip spawn: active task already exists for {} stage={}",
-            linear_issue_id, next_stage
+            "skip spawn: active task already exists for {linear_issue_id} stage={next_stage}"
         );
         return Ok(());
     }
