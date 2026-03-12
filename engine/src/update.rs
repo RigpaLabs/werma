@@ -214,7 +214,9 @@ pub fn check_and_apply_update() -> Result<bool> {
     if !codesign_ok {
         // Binary installed but codesign failed — macOS will SIGKILL it on next exec.
         // Log and bail so the daemon does not restart into a broken binary.
-        anyhow::bail!("update applied but codesign failed — run: codesign --force --sign - $(which werma)");
+        anyhow::bail!(
+            "update applied but codesign failed — run: codesign --force --sign - $(which werma)"
+        );
     }
     Ok(true)
 }
