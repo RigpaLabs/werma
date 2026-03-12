@@ -229,7 +229,8 @@ stages:
   engineer:
     agent: pipeline-engineer
     model: opus
-    fallback: sonnet    light_model: sonnet
+    fallback: sonnet
+    light_model: sonnet
     light_threshold: 2
     max_turns: 40
     manual: skip
