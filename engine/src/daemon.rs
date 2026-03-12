@@ -54,7 +54,8 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     // Per-repo cooldown for main-branch cleanliness notifications.
     let mut cleanliness_notified: std::collections::HashMap<PathBuf, Instant> =
         std::collections::HashMap::new();
-    let mut last_cleanliness_check = Instant::now() - Duration::from_secs(CLEANLINESS_CHECK_INTERVAL_SECS);
+    let mut last_cleanliness_check =
+        Instant::now() - Duration::from_secs(CLEANLINESS_CHECK_INTERVAL_SECS);
 
     loop {
         let tick_start = Instant::now();
@@ -81,7 +82,8 @@ pub fn run(werma_dir: &Path) -> Result<()> {
             }
 
             // Rate-limit cleanliness checks (git status is cheap but unnecessary every 5s tick)
-            if last_cleanliness_check.elapsed() >= Duration::from_secs(CLEANLINESS_CHECK_INTERVAL_SECS)
+            if last_cleanliness_check.elapsed()
+                >= Duration::from_secs(CLEANLINESS_CHECK_INTERVAL_SECS)
             {
                 if let Err(e) =
                     check_main_branch_cleanliness(&db, &log_path, &mut cleanliness_notified)

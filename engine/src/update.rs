@@ -98,9 +98,7 @@ pub fn update() -> Result<()> {
     println!("current: v{current}");
 
     let token = github_token()?;
-    let release = crate::ui::with_spinner("Checking for updates...", || {
-        latest_release(&token)
-    })?;
+    let release = crate::ui::with_spinner("Checking for updates...", || latest_release(&token))?;
     let latest_version = release.tag.strip_prefix('v').unwrap_or(&release.tag);
 
     if latest_version == current {
