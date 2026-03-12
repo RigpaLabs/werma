@@ -663,7 +663,7 @@ impl LinearClient {
 
         // Update issue with remaining labels
         self.query(
-            r#"mutation($id: String!, $labelIds: [String!]!) {
+            r#"mutation($id: ID!, $labelIds: [String!]!) {
                 issueUpdate(id: $id, input: { labelIds: $labelIds }) { success }
             }"#,
             &json!({"id": uuid, "labelIds": remaining_ids}),
