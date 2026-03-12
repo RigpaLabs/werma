@@ -1283,12 +1283,25 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
     let linear = linear::LinearClient::new()?;
     let config = pipeline::loader::load_default()?;
 
+    // Detect if a stage name was passed as a positional arg (e.g. `werma pipeline run RIG-178 analyst`).
+    // The CLI defines `issues` as a greedy Vec<String>, so "analyst" gets consumed as an identifier.
+    // Filter it out and use it as the effective stage.
+    let mut effective_stage = stage.to_string();
+    let mut filtered: Vec<&str> = Vec::new();
+    for id in identifiers {
+        if config.stage(id).is_some() {
+            effective_stage = id.clone();
+        } else {
+            filtered.push(id);
+        }
+    }
+
     // Validate stage exists
-    if config.stage(stage).is_none() {
+    if config.stage(&effective_stage).is_none() {
         let available: Vec<_> = config.stages.keys().collect();
         bail!(
             "unknown stage '{}'. Available: {}",
-            stage,
+            effective_stage,
             available
                 .iter()
                 .map(|s| s.as_str())
@@ -1297,10 +1310,14 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
         );
     }
 
+    if filtered.is_empty() {
+        bail!("no issue identifiers provided. Usage: werma pipeline run RIG-XX [--stage <stage>]");
+    }
+
     let mut created = 0;
     let mut skipped = 0;
 
-    for identifier in identifiers {
+    for identifier in &filtered {
         // Fetch issue from Linear
         let (_issue_id, ident, title, description, labels) =
             match linear.get_issue_by_identifier(identifier) {
@@ -1313,12 +1330,12 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
             };
 
         // Skip if active task already exists for this issue + stage
-        let existing = db.tasks_by_linear_issue(&ident, Some(stage), true)?;
+        let existing = db.tasks_by_linear_issue(&ident, Some(&effective_stage), true)?;
         if !existing.is_empty() {
             let active_id = &existing[0].id;
             eprintln!(
                 "  ~ {} already has active {} task ({})",
-                ident, stage, active_id
+                ident, effective_stage, active_id
             );
             skipped += 1;
             continue;
@@ -1342,7 +1359,7 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
         let task_id = pipeline::create_initial_stage_task(
             &db,
             &config,
-            stage,
+            &effective_stage,
             &ident,
             &title,
             &description,
@@ -1350,7 +1367,7 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
             estimate,
         )?;
 
-        println!("  + {} [{}] stage={}", task_id, ident, stage);
+        println!("  + {} [{}] stage={}", task_id, ident, effective_stage);
         created += 1;
     }
 
