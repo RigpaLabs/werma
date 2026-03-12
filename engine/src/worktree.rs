@@ -66,7 +66,7 @@ pub fn generate_branch_name(task: &Task) -> String {
             format!("werma-{}/{}", task.id, slug)
         } else {
             let branch_type = derive_branch_type(task);
-            format!("{}/{}-{}", branch_type, rig_id, slug)
+            format!("{branch_type}/{rig_id}-{slug}")
         }
     } else {
         format!("werma-{}", task.id)
@@ -240,10 +240,25 @@ fn install_pre_commit_hook(worktree_path: &Path) -> Result<()> {
 # Auto-installed by werma — enforce cargo fmt before commit
 if [ -d "engine" ]; then
     cargo fmt --check --manifest-path engine/Cargo.toml 2>&1
-    status=$?
-    if [ $status -ne 0 ]; then
+    if [ $? -ne 0 ]; then
         echo ""
-        echo "ERROR: cargo fmt check failed. Run 'cargo fmt --manifest-path engine/Cargo.toml' to fix."
+        echo "ERROR: cargo fmt check failed. Run: cargo fmt --manifest-path engine/Cargo.toml"
+        echo ""
+        exit 1
+    fi
+
+    cargo clippy --manifest-path engine/Cargo.toml -- -D warnings 2>&1
+    if [ $? -ne 0 ]; then
+        echo ""
+        echo "ERROR: cargo clippy failed. Fix all warnings before committing."
+        echo ""
+        exit 1
+    fi
+
+    cargo test --manifest-path engine/Cargo.toml 2>&1
+    if [ $? -ne 0 ]; then
+        echo ""
+        echo "ERROR: cargo test failed. Fix all test failures before committing."
         echo ""
         exit 1
     fi

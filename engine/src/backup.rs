@@ -19,7 +19,7 @@ pub fn backup_db(werma_dir: &Path) -> Result<String> {
         .context("sqlite3 backup command failed")?;
 
     if !status.success() {
-        anyhow::bail!("sqlite3 backup exited with {}", status);
+        anyhow::bail!("sqlite3 backup exited with {status}");
     }
 
     prune_backups(&backup_dir, 7)?;
@@ -94,7 +94,7 @@ mod tests {
 
         let count_before: usize = std::fs::read_dir(&backup_dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .count();
         assert_eq!(count_before, 10);
 
@@ -102,7 +102,7 @@ mod tests {
 
         let remaining: Vec<String> = std::fs::read_dir(&backup_dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
 
@@ -133,7 +133,7 @@ mod tests {
 
         let count: usize = std::fs::read_dir(&backup_dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .count();
         assert_eq!(count, 3);
     }
@@ -154,7 +154,7 @@ mod tests {
 
         let db_count: usize = std::fs::read_dir(&backup_dir)
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "db"))
             .count();
         assert_eq!(db_count, 2);

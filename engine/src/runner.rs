@@ -209,10 +209,7 @@ pub fn run_all(db: &Db, werma_dir: &Path) -> Result<()> {
     }
 
     let (p, r, c, f) = db.task_counts()?;
-    println!(
-        "\nrun-all complete: {} pending, {} running, {} completed, {} failed",
-        p, r, c, f
-    );
+    println!("\nrun-all complete: {p} pending, {r} running, {c} completed, {f} failed");
     Ok(())
 }
 
