@@ -97,6 +97,45 @@ pub fn extract_rejection_feedback(output: &str) -> String {
     }
 }
 
+/// Extract `PR_URL=<url>` from result text.
+/// Falls back to scanning for `https://github.com/.../pull/N` patterns.
+pub fn parse_pr_url(result: &str) -> Option<String> {
+    // First: look for explicit PR_URL= marker
+    for line in result.lines().rev() {
+        let line = line.trim();
+        if let Some(rest) = line
+            .strip_prefix("PR_URL=")
+            .or_else(|| line.find("PR_URL=").map(|pos| &line[pos + "PR_URL=".len()..]))
+        {
+            let url: String = rest
+                .trim()
+                .chars()
+                .take_while(|c| !c.is_whitespace())
+                .collect();
+            if url.contains("/pull/") {
+                return Some(url);
+            }
+        }
+    }
+
+    // Fallback: scan for GitHub PR URLs
+    const PREFIX: &str = "https://github.com/";
+    for line in result.lines() {
+        if let Some(start) = line.find(PREFIX) {
+            let candidate = &line[start..];
+            let url: String = candidate
+                .chars()
+                .take_while(|c| !c.is_whitespace() && *c != ')' && *c != '>' && *c != ']')
+                .collect();
+            if url.contains("/pull/") {
+                return Some(url);
+            }
+        }
+    }
+
+    None
+}
+
 /// Story point thresholds for track routing.
 const HEAVY_TRACK_THRESHOLD: i32 = 8;
 
@@ -232,6 +271,42 @@ mod tests {
     #[test]
     fn parse_estimate_last_match_wins() {
         assert_eq!(parse_estimate("ESTIMATE=3\nESTIMATE=8"), 8);
+    }
+
+    #[test]
+    fn parse_pr_url_explicit_marker() {
+        let output = "All done.\nPR_URL=https://github.com/RigpaLabs/werma/pull/42\nVERDICT=DONE";
+        assert_eq!(
+            parse_pr_url(output),
+            Some("https://github.com/RigpaLabs/werma/pull/42".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_pr_url_inline_marker() {
+        let output = "Created PR_URL=https://github.com/org/repo/pull/7 successfully";
+        assert_eq!(
+            parse_pr_url(output),
+            Some("https://github.com/org/repo/pull/7".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_pr_url_fallback_to_raw_url() {
+        let output = "PR: https://github.com/org/repo/pull/99\nVERDICT=DONE";
+        assert_eq!(
+            parse_pr_url(output),
+            Some("https://github.com/org/repo/pull/99".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_pr_url_none_without_pull() {
+        assert_eq!(parse_pr_url("No PR here"), None);
+        assert_eq!(
+            parse_pr_url("PR_URL=https://github.com/org/repo/issues/10"),
+            None
+        );
     }
 
     #[test]
