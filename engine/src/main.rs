@@ -1137,6 +1137,14 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
 
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         let working_dir = linear::infer_working_dir(&title, &label_refs);
+        if linear::validate_working_dir(&working_dir).is_none() {
+            eprintln!(
+                "  ! skipping {} [{}]: working dir '{}' does not exist",
+                ident, title, working_dir
+            );
+            skipped += 1;
+            continue;
+        }
         let estimate = 0; // Will be set by analyst if applicable
 
         let task_id = pipeline::create_initial_stage_task(
