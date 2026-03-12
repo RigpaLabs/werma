@@ -96,10 +96,9 @@ fn latest_release(token: &str) -> Result<ReleaseInfo> {
 pub fn update() -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     println!("current: v{current}");
-    println!("checking for updates...");
 
     let token = github_token()?;
-    let release = latest_release(&token)?;
+    let release = crate::ui::with_spinner("Checking for updates...", || latest_release(&token))?;
     let latest_version = release.tag.strip_prefix('v').unwrap_or(&release.tag);
 
     if latest_version == current {
@@ -125,7 +124,7 @@ pub fn update() -> Result<()> {
         ),
     };
 
-    println!("downloading {artifact_name}...");
+    let pb = crate::ui::waiting_spinner(&format!("Downloading {artifact_name}..."));
     let client = reqwest::blocking::Client::builder()
         .user_agent("werma-updater")
         .build()
@@ -143,6 +142,7 @@ pub fn update() -> Result<()> {
     }
 
     let bytes = resp.bytes().context("failed to read download")?;
+    pb.finish_and_clear();
 
     // Extract tar.gz to temp dir
     let tmp_dir = tempfile::tempdir().context("failed to create temp dir")?;

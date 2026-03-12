@@ -233,12 +233,10 @@ fn install_pre_commit_hook(worktree_path: &Path) -> Result<()> {
 
     let hook_path = hooks_dir.join("pre-commit");
 
-    // Idempotent: don't overwrite existing hook
-    if hook_path.exists() {
-        return Ok(());
-    }
-
-    let hook_content = r#"#!/bin/sh
+    const HOOK_VERSION: &str = "2";
+    let hook_content = format!(
+        r#"#!/bin/sh
+# werma-hook-version: {HOOK_VERSION}
 # Auto-installed by werma — enforce cargo fmt before commit
 if [ -d "engine" ]; then
     cargo fmt --check --manifest-path engine/Cargo.toml 2>&1
@@ -250,7 +248,18 @@ if [ -d "engine" ]; then
         exit 1
     fi
 fi
-"#;
+"#
+    );
+
+    // Check if existing hook is current version — overwrite if stale
+    if hook_path.exists() {
+        let existing = std::fs::read_to_string(&hook_path).unwrap_or_default();
+        let version_marker = format!("# werma-hook-version: {HOOK_VERSION}");
+        if existing.contains(&version_marker) {
+            return Ok(());
+        }
+        // Stale or unversioned hook — overwrite with current version
+    }
 
     std::fs::write(&hook_path, hook_content)
         .with_context(|| format!("writing pre-commit hook at {}", hook_path.display()))?;

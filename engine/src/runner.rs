@@ -218,6 +218,8 @@ pub fn run_all(db: &Db, werma_dir: &Path) -> Result<()> {
 
 /// Poll every 5 seconds until no running tasks remain (check tmux sessions).
 fn wait_for_running(db: &Db) -> Result<()> {
+    let spinner = crate::ui::waiting_spinner("Waiting for running tasks...");
+
     loop {
         std::thread::sleep(std::time::Duration::from_secs(5));
 
@@ -225,6 +227,8 @@ fn wait_for_running(db: &Db) -> Result<()> {
         if running.is_empty() {
             break;
         }
+
+        spinner.set_message(format!("Waiting for {} running task(s)...", running.len()));
 
         let mut any_alive = false;
         for task in &running {
@@ -257,6 +261,8 @@ fn wait_for_running(db: &Db) -> Result<()> {
             break;
         }
     }
+
+    spinner.finish_and_clear();
     Ok(())
 }
 

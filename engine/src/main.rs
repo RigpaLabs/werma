@@ -14,6 +14,7 @@ mod models;
 mod notify;
 mod pipeline;
 mod runner;
+mod ui;
 mod update;
 mod worktree;
 
@@ -233,20 +234,13 @@ fn cmd_list(db: &Db, status_filter: Option<&str>) -> Result<()> {
         return Ok(());
     }
 
+    let term_width = terminal_size::terminal_size()
+        .map(|(w, _)| w.0)
+        .unwrap_or(100);
+
     println!();
-    for task in &tasks {
-        let icon = status_icon(task.status);
-        let deps_str = if task.depends_on.is_empty() {
-            String::new()
-        } else {
-            format!(" [->{}]", task.depends_on.join(","))
-        };
-        let prompt_preview = truncate(&task.prompt, 50);
-        println!(
-            " {icon}  {:<14} {:<9} p{}  {:<7}  {prompt_preview}{deps_str}",
-            task.id, task.task_type, task.priority, task.model
-        );
-    }
+    let table = ui::task_list_table(&tasks, term_width);
+    println!("{table}");
     println!();
 
     Ok(())
@@ -263,15 +257,39 @@ fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<()> 
         if auto_compacted {
             eprintln!("tip: terminal width < 60, using compact mode (or pass -c)");
         }
-        loop {
-            print!("\x1b[2J\x1b[H");
-            std::io::Write::flush(&mut std::io::stdout()).ok();
-            if use_compact {
-                render_compact(db, Some(interval))?;
-            } else {
-                render_status(db)?;
-                println!("{}", format!("                                                              ↻ {interval}s").dimmed());
+
+        // Flicker-free watch: hide cursor, use cursor repositioning
+        ui::hide_cursor();
+        // Initial clear
+        print!("\x1b[2J\x1b[H");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let mut prev_lines = 0;
+
+        // Ensure cursor is restored on exit (Ctrl+C via panic/unwind)
+        struct CursorGuard;
+        impl Drop for CursorGuard {
+            fn drop(&mut self) {
+                ui::show_cursor();
             }
+        }
+        let _guard = CursorGuard;
+
+        loop {
+            let running = db.list_tasks(Some(Status::Running))?;
+            let pending = db.list_tasks(Some(Status::Pending))?;
+            let completed = db.list_tasks(Some(Status::Completed))?;
+            let failed = db.list_tasks(Some(Status::Failed))?;
+
+            let content = if use_compact {
+                ui::render_compact_buf(&running, &pending, &completed, &failed, Some(interval))
+            } else {
+                ui::render_status_buf(&running, &pending, &completed, &failed, Some(interval))
+            };
+
+            ui::refresh_screen(&content, prev_lines);
+            prev_lines = content.lines().count();
+
             std::thread::sleep(std::time::Duration::from_secs(interval));
         }
     } else if use_compact {
@@ -1036,15 +1054,16 @@ fn cmd_sched_list(db: &Db) -> Result<()> {
     if schedules.is_empty() {
         println!("  (empty)");
     } else {
+        let term_width = terminal_size::terminal_size()
+            .map(|(w, _)| w.0)
+            .unwrap_or(100);
+        let table = ui::schedule_list_table(&schedules, term_width);
+        println!("{table}");
+
+        // Show last_enqueued for schedules that have it
         for s in &schedules {
-            let icon = if s.enabled { "✓" } else { "○" };
-            let prompt_preview = truncate(&s.prompt, 42);
-            println!(
-                " {icon}  {:<16} {:<15} {:<8} {:<7} {prompt_preview}",
-                s.id, s.cron_expr, s.schedule_type, s.model
-            );
             if !s.last_enqueued.is_empty() {
-                println!("    last: {}", s.last_enqueued);
+                println!("    {} last: {}", s.id, s.last_enqueued);
             }
         }
     }
@@ -1563,12 +1582,12 @@ fn main() -> anyhow::Result<()> {
         cli::Commands::Linear { action } => match action {
             cli::LinearAction::Setup => {
                 let client = linear::LinearClient::new()?;
-                client.setup()?;
+                ui::with_spinner("Discovering Linear workspace...", || client.setup())?;
             }
             cli::LinearAction::Sync => {
                 let db = open_db()?;
                 let client = linear::LinearClient::new()?;
-                client.sync(&db)?;
+                ui::with_spinner("Syncing issues from Linear...", || client.sync(&db))?;
             }
             cli::LinearAction::Push { id } => {
                 let db = open_db()?;
@@ -1585,11 +1604,11 @@ fn main() -> anyhow::Result<()> {
         cli::Commands::Pipeline { action } => match action {
             cli::PipelineAction::Poll => {
                 let db = open_db()?;
-                pipeline::poll(&db)?;
+                ui::with_spinner("Polling Linear statuses...", || pipeline::poll(&db))?;
             }
             cli::PipelineAction::Status => {
                 let db = open_db()?;
-                pipeline::status(&db)?;
+                ui::with_spinner("Fetching pipeline status...", || pipeline::status(&db))?;
             }
             cli::PipelineAction::Show { stage } => {
                 pipeline::cmd_show(stage.as_deref())?;
