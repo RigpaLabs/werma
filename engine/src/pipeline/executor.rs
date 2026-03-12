@@ -291,6 +291,14 @@ pub fn poll(db: &Db) -> Result<()> {
                 continue;
             }
 
+            // Label-based triggers only fire on Backlog issues.
+            // Issues in any other status (In Progress, Review, etc.) are ignored.
+            let state_type = issue["state"]["type"].as_str().unwrap_or("");
+            if state_type != "backlog" {
+                total_skipped += 1;
+                continue;
+            }
+
             let labels: Vec<&str> = issue["labels"]["nodes"]
                 .as_array()
                 .map(|arr| {
@@ -299,6 +307,12 @@ pub fn poll(db: &Db) -> Result<()> {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+
+            // Manual issues: never auto-process via label triggers.
+            if crate::linear::is_manual_issue(&labels) {
+                total_skipped += 1;
+                continue;
+            }
 
             // Skip if active task already exists for this issue + stage
             let existing = db.tasks_by_linear_issue(identifier, Some(stage_name), true)?;
@@ -309,12 +323,6 @@ pub fn poll(db: &Db) -> Result<()> {
 
             // Skip if there's a completed-but-unpushed task for this issue + stage
             if db.has_unpushed_completed_task(identifier, stage_name)? {
-                total_skipped += 1;
-                continue;
-            }
-
-            // Manual issues: skip execution stages
-            if crate::linear::is_manual_issue(&labels) && stage_cfg.skip_manual() {
                 total_skipped += 1;
                 continue;
             }

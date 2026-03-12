@@ -618,6 +618,7 @@ impl LinearClient {
                         description
                         priority
                         estimate
+                        state { type }
                         labels { nodes { id name } }
                     }
                 }
