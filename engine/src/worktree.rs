@@ -16,8 +16,34 @@ pub fn needs_worktree(task_type: &str) -> bool {
     )
 }
 
+/// Derive a git branch type prefix from task type and prompt content.
+/// Pipeline stages map to: engineer→feat/fix, reviewer→review, analyst→chore, devops→chore.
+/// Regular tasks: code→feat, refactor→refactor, full→feat.
+/// If the prompt's first line contains "fix:" or "fix!:", overrides to "fix".
+fn derive_branch_type(task: &Task) -> &'static str {
+    // Check prompt for fix indicators (conventional commit prefix or keywords)
+    let prompt_lower = task.prompt.to_lowercase();
+    let first_line = prompt_lower.lines().next().unwrap_or("");
+    let is_fix = first_line.contains("fix:") || first_line.contains("fix!:");
+
+    match task.task_type.as_str() {
+        "pipeline-engineer" | "code" | "full" => {
+            if is_fix {
+                "fix"
+            } else {
+                "feat"
+            }
+        }
+        "refactor" => "refactor",
+        "pipeline-reviewer" | "pipeline-qa" => "review",
+        "pipeline-analyst" => "chore",
+        "pipeline-devops" => "chore",
+        _ => "feat",
+    }
+}
+
 /// Generate a branch name from a task.
-/// With linear_issue_id → RIG-XX/slugified-title
+/// With linear_issue_id → type/RIG-XX-short-name (e.g. feat/RIG-42-add-worktree-support)
 /// Without → werma-{task_id}
 pub fn generate_branch_name(task: &Task) -> String {
     if !task.linear_issue_id.is_empty() {
@@ -26,11 +52,31 @@ pub fn generate_branch_name(task: &Task) -> String {
         if rig_id.is_empty() {
             format!("werma-{}/{}", task.id, slug)
         } else {
-            format!("{}/{}", rig_id, slug)
+            let branch_type = derive_branch_type(task);
+            format!("{}/{}-{}", branch_type, rig_id, slug)
         }
     } else {
         format!("werma-{}", task.id)
     }
+}
+
+/// Fetch latest origin/main so worktrees branch from current HEAD.
+fn fetch_origin_main(working_dir: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .args(["fetch", "origin", "main", "--quiet"])
+        .current_dir(working_dir)
+        .output()
+        .context("running git fetch origin main")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Non-fatal: log warning but don't fail (offline, no remote, etc.)
+        eprintln!(
+            "warning: git fetch origin main failed (branching from potentially stale ref): {}",
+            stderr.trim()
+        );
+    }
+    Ok(())
 }
 
 /// Set up a git worktree for the given branch.
@@ -49,7 +95,10 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
         return Ok(worktree_path);
     }
 
-    // Try creating with a new branch first
+    // Fetch latest origin/main before branching to avoid stale base
+    fetch_origin_main(working_dir)?;
+
+    // Try creating with a new branch from origin/main
     let output = Command::new("git")
         .args([
             "worktree",
@@ -57,6 +106,7 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
             &worktree_path.to_string_lossy(),
             "-b",
             branch_name,
+            "origin/main",
         ])
         .current_dir(working_dir)
         .output()
@@ -66,8 +116,9 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
         return Ok(worktree_path);
     }
 
-    // Branch might already exist (e.g. from a previous failed task) — attach to it
     let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Branch already exists (e.g. from a previous failed task) — attach to it
     if stderr.contains("already exists") {
         let output2 = Command::new("git")
             .args([
@@ -89,6 +140,39 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
             "git worktree add failed for existing branch '{}': {}",
             branch_name,
             stderr2.trim()
+        );
+    }
+
+    // origin/main ref unresolvable (network failure, no cached ref) — fall back to HEAD
+    if stderr.contains("bad revision")
+        || stderr.contains("invalid reference")
+        || stderr.contains("pathspec")
+    {
+        eprintln!(
+            "warning: origin/main not resolvable, branching from HEAD: {}",
+            stderr.trim()
+        );
+        let output_head = Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                &worktree_path.to_string_lossy(),
+                "-b",
+                branch_name,
+            ])
+            .current_dir(working_dir)
+            .output()
+            .context("running git worktree add (fallback to HEAD)")?;
+
+        if output_head.status.success() {
+            return Ok(worktree_path);
+        }
+
+        let stderr_head = String::from_utf8_lossy(&output_head.stderr);
+        bail!(
+            "git worktree add failed (HEAD fallback) for '{}': {}",
+            branch_name,
+            stderr_head.trim()
         );
     }
 
@@ -274,8 +358,8 @@ mod tests {
         );
         let name = generate_branch_name(&task);
         assert!(
-            name.starts_with("RIG-42/"),
-            "expected RIG-42/ prefix, got: {name}"
+            name.starts_with("feat/RIG-42-"),
+            "expected feat/RIG-42- prefix, got: {name}"
         );
         assert!(name.contains("worktree"));
     }
@@ -302,6 +386,74 @@ mod tests {
             name.starts_with("werma-20260310-001/"),
             "expected werma- prefix, got: {name}"
         );
+    }
+
+    #[test]
+    fn branch_name_fix_type_from_prompt() {
+        let task = test_task(
+            "pipeline-engineer",
+            "issue-abc-123",
+            "RIG-169 fix: engineer agent creates branches from stale main",
+        );
+        let name = generate_branch_name(&task);
+        assert!(
+            name.starts_with("fix/RIG-169-"),
+            "expected fix/ prefix for fix: prompt, got: {name}"
+        );
+    }
+
+    #[test]
+    fn branch_name_refactor_pipeline() {
+        let task = test_task(
+            "refactor",
+            "issue-abc-123",
+            "[RIG-100] Cleanup module structure",
+        );
+        let name = generate_branch_name(&task);
+        assert!(
+            name.starts_with("refactor/RIG-100-"),
+            "expected refactor/ prefix, got: {name}"
+        );
+    }
+
+    #[test]
+    fn branch_name_reviewer_type() {
+        let task = test_task(
+            "pipeline-reviewer",
+            "issue-abc-123",
+            "[RIG-50] Review the changes",
+        );
+        let name = generate_branch_name(&task);
+        assert!(
+            name.starts_with("review/RIG-50-"),
+            "expected review/ prefix, got: {name}"
+        );
+    }
+
+    // --- derive_branch_type ---
+
+    #[test]
+    fn derive_type_engineer_default_feat() {
+        let task = test_task("pipeline-engineer", "x", "RIG-42 Add new feature");
+        assert_eq!(derive_branch_type(&task), "feat");
+    }
+
+    #[test]
+    fn derive_type_engineer_fix_from_prompt() {
+        let task = test_task("pipeline-engineer", "x", "RIG-42 fix: broken thing");
+        assert_eq!(derive_branch_type(&task), "fix");
+    }
+
+    #[test]
+    fn derive_type_refactor() {
+        let task = test_task("refactor", "x", "Cleanup stuff");
+        assert_eq!(derive_branch_type(&task), "refactor");
+    }
+
+    #[test]
+    fn derive_type_reviewer() {
+        let task = test_task("pipeline-reviewer", "x", "Review code");
+        assert_eq!(derive_branch_type(&task), "review");
     }
 
     // --- extract_rig_id_prefix ---
@@ -376,9 +528,58 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo_dir = dir.path();
 
-        // Init a git repo
+        // Init a git repo with a "main" branch and a fake origin remote
         Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        // Create a bare clone to act as "origin" so fetch_origin_main works
+        let origin_dir = dir.path().join("origin.git");
+        Command::new("git")
+            .args([
+                "clone",
+                "--bare",
+                &repo_dir.to_string_lossy(),
+                &origin_dir.to_string_lossy(),
+            ])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["remote", "add", "origin", &origin_dir.to_string_lossy()])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+
+        let branch = "feat/RIG-99-test-branch";
+
+        // First call: creates worktree
+        let path = setup_worktree(repo_dir, branch).unwrap();
+        assert!(path.exists());
+        assert!(path.ends_with(".trees/feat--RIG-99-test-branch"));
+
+        // Second call: returns same path (resume)
+        let path2 = setup_worktree(repo_dir, branch).unwrap();
+        assert_eq!(path, path2);
+
+        // Cleanup
+        cleanup_worktree(repo_dir, branch).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn setup_worktree_falls_back_to_head_without_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = dir.path();
+
+        // Init a git repo with NO origin remote — origin/main will be unresolvable
+        Command::new("git")
+            .args(["init", "-b", "main"])
             .current_dir(repo_dir)
             .output()
             .unwrap();
@@ -388,20 +589,15 @@ mod tests {
             .output()
             .unwrap();
 
-        let branch = "RIG-99/test-branch";
+        let branch = "feat/RIG-100-no-origin";
 
-        // First call: creates worktree
+        // Should succeed by falling back to HEAD (no origin remote at all)
         let path = setup_worktree(repo_dir, branch).unwrap();
         assert!(path.exists());
-        assert!(path.ends_with(".trees/RIG-99--test-branch"));
-
-        // Second call: returns same path (resume)
-        let path2 = setup_worktree(repo_dir, branch).unwrap();
-        assert_eq!(path, path2);
+        assert!(path.ends_with(".trees/feat--RIG-100-no-origin"));
 
         // Cleanup
         cleanup_worktree(repo_dir, branch).unwrap();
-        assert!(!path.exists());
     }
 
     #[test]
