@@ -451,7 +451,7 @@ fn check_main_branch_cleanliness(
         }
 
         // Infer the main repo dir by stripping .trees/... from the working_dir
-        let working_dir = runner::resolve_home_pub(&task.working_dir);
+        let working_dir = runner::resolve_home(&task.working_dir);
         let working_dir_str = working_dir.to_string_lossy();
         let repo_dir = if let Some(trees_pos) = working_dir_str.find("/.trees/") {
             PathBuf::from(&working_dir_str[..trees_pos])

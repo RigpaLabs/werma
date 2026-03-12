@@ -308,7 +308,7 @@ pub enum PipelineAction {
         issues: Vec<String>,
 
         /// Pipeline stage to run (default: analyst)
-        #[arg(short, long, default_value = "analyst")]
-        stage: String,
+        #[arg(short, long)]
+        stage: Option<String>,
     },
 }

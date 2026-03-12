@@ -372,12 +372,8 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     }
 }
 
-/// Resolve `~/` prefix to home directory. Public for use by daemon watchdog.
-pub fn resolve_home_pub(path: &str) -> PathBuf {
-    resolve_home(path)
-}
-
-fn resolve_home(path: &str) -> PathBuf {
+/// Resolve `~/` prefix to home directory.
+pub fn resolve_home(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/")
         && let Some(home) = dirs::home_dir()
     {
@@ -393,7 +389,10 @@ fn resolve_fallback_model(task: &Task) -> Option<String> {
     }
     let config = crate::pipeline::loader::load_default().ok()?;
     let stage_cfg = config.stage(&task.pipeline_stage)?;
-    stage_cfg.fallback.as_ref().map(|f| model_flag(f).to_string())
+    stage_cfg
+        .fallback
+        .as_ref()
+        .map(|f| model_flag(f).to_string())
 }
 
 /// Parameters for exec script generation — avoids too-many-arguments.

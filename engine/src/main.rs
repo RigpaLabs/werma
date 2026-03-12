@@ -1278,7 +1278,7 @@ fn cmd_review(
     Ok(())
 }
 
-fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
+fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<()> {
     let db = open_db()?;
     let linear = linear::LinearClient::new()?;
     let config = pipeline::loader::load_default()?;
@@ -1286,15 +1286,15 @@ fn cmd_pipeline_run(identifiers: &[String], stage: &str) -> Result<()> {
     // Detect if a stage name was passed as a positional arg (e.g. `werma pipeline run RIG-178 analyst`).
     // The CLI defines `issues` as a greedy Vec<String>, so "analyst" gets consumed as an identifier.
     // Filter it out and use it as the effective stage — but only when --stage wasn't explicitly set.
-    let explicit_stage = stage != "analyst";
-    let mut effective_stage = stage.to_string();
+    let explicit_stage = stage.is_some();
+    let mut effective_stage = stage.unwrap_or("analyst").to_string();
     let mut filtered: Vec<&str> = Vec::new();
     for id in identifiers {
         if config.stage(id).is_some() {
             if explicit_stage {
                 eprintln!(
                     "warning: ignoring positional stage '{}' because --stage '{}' was explicitly set",
-                    id, stage
+                    id, effective_stage
                 );
             } else {
                 effective_stage = id.clone();
@@ -1601,7 +1601,7 @@ fn main() -> anyhow::Result<()> {
                 pipeline::cmd_eject()?;
             }
             cli::PipelineAction::Run { issues, stage } => {
-                cmd_pipeline_run(&issues, &stage)?;
+                cmd_pipeline_run(&issues, stage.as_deref())?;
             }
         },
 

@@ -61,9 +61,33 @@ fn warn_deprecated_per_stage(config: &PipelineConfig) {
     }
 }
 
+/// Known model short names accepted in pipeline YAML.
+const VALID_MODELS: &[&str] = &["opus", "sonnet", "haiku"];
+
 /// Validate that the config is internally consistent.
 pub fn validate(config: &PipelineConfig, source: &str) -> Result<()> {
     for (stage_name, stage) in &config.stages {
+        // Validate model names.
+        if !VALID_MODELS.contains(&stage.model.as_str()) {
+            anyhow::bail!(
+                "pipeline config {source}: stage '{stage_name}' has unknown model '{}' \
+                 (expected one of: {})",
+                stage.model,
+                VALID_MODELS.join(", ")
+            );
+        }
+        if let Some(ref fallback) = stage.fallback
+            && !VALID_MODELS.contains(&fallback.as_str())
+        {
+            anyhow::bail!(
+                "pipeline config {source}: stage '{stage_name}' has unknown fallback model '{}' \
+                 (expected one of: {})",
+                fallback,
+                VALID_MODELS.join(", ")
+            );
+        }
+
+        // Validate spawn targets exist.
         for (verdict, transition) in &stage.transitions {
             if let Some(ref spawn_target) = transition.spawn
                 && !config.stages.contains_key(spawn_target.as_str())
@@ -199,6 +223,37 @@ mod tests {
         let config = load_from_str(BUILTIN_DEFAULT_YAML, "<test>").unwrap();
         // validate is called inside load_from_str — if we got here, it passed
         let _ = config;
+    }
+
+    #[test]
+    fn validate_invalid_model_fails() {
+        let yaml = r#"
+pipeline: bad
+stages:
+  test:
+    agent: pipeline-test
+    model: gpt4
+"#;
+        let result = load_from_str(yaml, "<test>");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unknown model 'gpt4'"));
+    }
+
+    #[test]
+    fn validate_invalid_fallback_model_fails() {
+        let yaml = r#"
+pipeline: bad
+stages:
+  test:
+    agent: pipeline-test
+    model: opus
+    fallback: typo
+"#;
+        let result = load_from_str(yaml, "<test>");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unknown fallback model 'typo'"));
     }
 
     #[test]
