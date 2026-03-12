@@ -607,7 +607,7 @@ impl LinearClient {
                 issues(
                     filter: {
                         team: { id: { eq: $teamId } },
-                        labels: { name: { eqIgnoreCase: $label } }
+                        labels: { some: { name: { eqIgnoreCase: $label } } }
                     },
                     orderBy: updatedAt
                 ) {
