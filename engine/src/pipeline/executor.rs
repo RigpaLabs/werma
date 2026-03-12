@@ -173,18 +173,18 @@ pub fn poll(db: &Db) -> Result<()> {
                 continue;
             }
 
+            // Re-check global max_concurrent once per issue (may have been reached by tasks created earlier)
+            let active_count = db.count_active_pipeline_tasks()?;
+            if active_count >= config.max_concurrent as i64 {
+                total_skipped += stage_names.len();
+                continue;
+            }
+
             for stage_name in stage_names {
                 let stage_cfg = match config.stage(stage_name) {
                     Some(s) => s,
                     None => continue,
                 };
-
-                // Re-check global max_concurrent (may have been reached by tasks created in this loop)
-                let active_count = db.count_active_pipeline_tasks()?;
-                if active_count >= config.max_concurrent as i64 {
-                    total_skipped += 1;
-                    continue;
-                }
 
                 // Skip if active task already exists for this issue + stage
                 let existing = db.tasks_by_linear_issue(identifier, Some(stage_name), true)?;

@@ -15,7 +15,6 @@ use crate::{linear, pipeline, runner};
 const TICK_INTERVAL_SECS: u64 = 5;
 const PIPELINE_POLL_INTERVAL_SECS: u64 = 30;
 const MERGE_CHECK_INTERVAL_SECS: u64 = 60;
-const MAX_CONCURRENT_AGENTS: usize = 3;
 const MAX_LOG_SIZE_BYTES: u64 = 5 * 1024 * 1024;
 
 /// Run the daemon loop. Blocks forever (or until killed).
@@ -303,14 +302,15 @@ fn process_completed_pipeline_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Drain pending tasks into tmux sessions, respecting max_concurrent.
+/// Drain pending tasks into tmux sessions, respecting pipeline max_concurrent.
 fn drain_queue(db: &Db, werma_dir: &Path) -> Result<()> {
+    let max_concurrent = pipeline::load_max_concurrent();
     let active = count_werma_sessions();
-    if active >= MAX_CONCURRENT_AGENTS {
+    if active >= max_concurrent {
         return Ok(());
     }
 
-    let slots = MAX_CONCURRENT_AGENTS - active;
+    let slots = max_concurrent - active;
     for _ in 0..slots {
         match runner::run_next(db, werma_dir) {
             Ok(Some(id)) => {

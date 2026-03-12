@@ -2,7 +2,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 /// Default global max concurrent pipeline tasks.
-const DEFAULT_GLOBAL_MAX_CONCURRENT: u32 = 5;
+pub const DEFAULT_GLOBAL_MAX_CONCURRENT: u32 = 5;
 
 fn default_global_max_concurrent() -> u32 {
     DEFAULT_GLOBAL_MAX_CONCURRENT
@@ -306,6 +306,33 @@ stages:
         let results = config.stage_for_status("deploy");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "devops");
+    }
+
+    #[test]
+    fn max_concurrent_defaults_when_absent() {
+        let yaml = r#"
+pipeline: minimal
+stages:
+  test:
+    agent: pipeline-test
+    model: sonnet
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.max_concurrent, DEFAULT_GLOBAL_MAX_CONCURRENT);
+    }
+
+    #[test]
+    fn max_concurrent_explicit_value() {
+        let yaml = r#"
+pipeline: custom
+max_concurrent: 2
+stages:
+  test:
+    agent: pipeline-test
+    model: sonnet
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.max_concurrent, 2);
     }
 
     #[test]
