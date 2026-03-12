@@ -8,7 +8,7 @@ templates:
 
 stages:
   analyst:
-    # No linear_status — analyst is triggered manually, not auto-polled
+    linear_label: analyze
     agent: pipeline-analyst
     model: sonnet
     max_turns: 20
