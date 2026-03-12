@@ -539,9 +539,8 @@ pub fn callback(
                 // Validate: engineer DONE without PR is an error — pipeline stalls otherwise
                 if url.is_none() {
                     eprintln!(
-                        "callback: engineer DONE but no PR_URL found for {} (task {}). \
-                         Keeping issue in current state for retry.",
-                        linear_issue_id, task_id
+                        "callback: engineer DONE but no PR_URL found for {linear_issue_id} (task {task_id}). \
+                         Keeping issue in current state for retry."
                     );
                     let _ = linear.comment(
                         linear_issue_id,
@@ -829,7 +828,6 @@ fn auto_create_pr(
         Ok(None)
     }
 }
-
 
 /// Derive a short title from a GitHub PR URL (e.g. "PR #42").
 fn pr_title_from_url(url: &str) -> String {

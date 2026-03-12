@@ -100,13 +100,14 @@ pub fn extract_rejection_feedback(output: &str) -> String {
 /// Extract `PR_URL=<url>` from result text.
 /// Falls back to scanning for `https://github.com/.../pull/N` patterns.
 pub fn parse_pr_url(result: &str) -> Option<String> {
-    // First: look for explicit PR_URL= marker
+    // First: look for explicit PR_URL= marker (scan backwards — agents typically
+    // emit PR_URL= near the end of output, so reverse scan finds it faster)
     for line in result.lines().rev() {
         let line = line.trim();
-        if let Some(rest) = line
-            .strip_prefix("PR_URL=")
-            .or_else(|| line.find("PR_URL=").map(|pos| &line[pos + "PR_URL=".len()..]))
-        {
+        if let Some(rest) = line.strip_prefix("PR_URL=").or_else(|| {
+            line.find("PR_URL=")
+                .map(|pos| &line[pos + "PR_URL=".len()..])
+        }) {
             let url: String = rest
                 .trim()
                 .chars()
@@ -118,7 +119,8 @@ pub fn parse_pr_url(result: &str) -> Option<String> {
         }
     }
 
-    // Fallback: scan for GitHub PR URLs
+    // Fallback: scan forward for raw GitHub PR URLs (first occurrence wins —
+    // unlike PR_URL= marker above which scans in reverse for last-wins semantics)
     const PREFIX: &str = "https://github.com/";
     for line in result.lines() {
         if let Some(start) = line.find(PREFIX) {
