@@ -231,7 +231,7 @@ pub fn render_status_buf(
     let _ = writeln!(
         buf,
         " {} {}",
-        green_bold(&format!("{spinner}")),
+        green_bold(spinner),
         green_bold(&format!("running ({})", running.len())),
     );
     for task in running {
@@ -435,6 +435,7 @@ fn compact_task_id(id: &str) -> &str {
     id.rsplit('-').next().unwrap_or(id)
 }
 
+#[allow(dead_code)]
 fn compact_linear_label(linear_issue_id: &str) -> String {
     if linear_issue_id.is_empty() {
         String::new()
