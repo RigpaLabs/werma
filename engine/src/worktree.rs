@@ -28,7 +28,11 @@ fn derive_branch_type(task: &Task) -> &'static str {
 
     match task.task_type.as_str() {
         "pipeline-engineer" | "code" | "full" => {
-            if is_fix { "fix" } else { "feat" }
+            if is_fix {
+                "fix"
+            } else {
+                "feat"
+            }
         }
         "refactor" => "refactor",
         "pipeline-reviewer" | "pipeline-qa" => "review",
@@ -547,12 +551,7 @@ mod tests {
             .output()
             .unwrap();
         Command::new("git")
-            .args([
-                "remote",
-                "add",
-                "origin",
-                &origin_dir.to_string_lossy(),
-            ])
+            .args(["remote", "add", "origin", &origin_dir.to_string_lossy()])
             .current_dir(repo_dir)
             .output()
             .unwrap();
