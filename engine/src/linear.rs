@@ -110,7 +110,7 @@ impl LinearClient {
 
         // Get workflow statuses for this team
         let states_query = r#"
-            query($teamId: String!) {
+            query($teamId: ID!) {
                 workflowStates(filter: { team: { id: { eq: $teamId } } }) {
                     nodes { id name type }
                 }
@@ -210,7 +210,7 @@ impl LinearClient {
             .context("'todo' status not found in linear.json")?;
 
         let issues_query = r#"
-            query($teamId: String!, $stateId: String!) {
+            query($teamId: ID!, $stateId: ID!) {
                 issues(
                     filter: {
                         team: { id: { eq: $teamId } },
@@ -482,7 +482,7 @@ impl LinearClient {
     pub fn get_issue(&self, issue_id: &str) -> Result<(String, String)> {
         let uuid = self.resolve_uuid(issue_id)?;
         let data = self.query(
-            r#"query($id: String!) {
+            r#"query($id: ID!) {
                 issue(id: $id) { title description }
             }"#,
             &json!({"id": uuid}),
@@ -510,7 +510,7 @@ impl LinearClient {
             .with_context(|| format!("invalid identifier: {identifier}"))?;
 
         let data = self.query(
-            r#"query($teamId: String!, $number: Float!) {
+            r#"query($teamId: ID!, $number: Float!) {
                 issues(filter: {
                     team: { id: { eq: $teamId } },
                     number: { eq: $number }
@@ -563,7 +563,7 @@ impl LinearClient {
         };
 
         let data = self.query(
-            r#"query($teamId: String!, $stateId: String!) {
+            r#"query($teamId: ID!, $stateId: ID!) {
                 issues(
                     filter: {
                         team: { id: { eq: $teamId } },
