@@ -227,7 +227,10 @@ pub fn update() -> Result<()> {
             if codesign_ok {
                 println!("updated to {}", release.tag);
             } else {
-                println!("updated to {} (warning: manual codesign required)", release.tag);
+                println!(
+                    "updated to {} (warning: manual codesign required)",
+                    release.tag
+                );
             }
         }
         Err(e) => {
