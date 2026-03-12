@@ -529,6 +529,42 @@ fn cmd_complete(db: &Db, id: &str, session: Option<&str>, result_file: Option<&s
         None => String::new(),
     };
 
+    // Validate non-empty output: if empty, mark as failed instead of completed
+    if result_text.trim().is_empty() {
+        eprintln!("warning: empty output for task {id} — marking as failed");
+        db.set_task_status(id, Status::Failed)?;
+        // Log to daemon.log for visibility
+        let werma_dir = dirs::home_dir()
+            .map(|h| h.join(".werma"))
+            .unwrap_or_default();
+        let log_path = werma_dir.join("logs/daemon.log");
+        let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
+        let line = format!(
+            "{ts}: EMPTY OUTPUT — task {id} stage={} marked failed (result_file: {})\n",
+            task.pipeline_stage,
+            result_file.unwrap_or("none"),
+        );
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+
+        let label = notify::format_notify_label(id, &task.task_type, &task.linear_issue_id);
+        notify::notify_macos(
+            "werma",
+            &format!("{label} EMPTY OUTPUT — marked failed"),
+            "Basso",
+        );
+        notify::notify_slack(
+            "#werma",
+            &format!(":warning: {label} EMPTY OUTPUT — marked failed"),
+        );
+
+        println!("failed (empty output): {id}");
+        return Ok(());
+    }
+
     // Pipeline callback: trigger stage transitions.
     // On success, mark linear_pushed=true so daemon doesn't re-process.
     if !task.pipeline_stage.is_empty() && !task.linear_issue_id.is_empty() {

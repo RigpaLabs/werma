@@ -268,6 +268,21 @@ pub fn callback(
     let config = load_default()?;
     let linear = LinearClient::new()?;
 
+    // Guard: if output is empty, post a comment and return early.
+    // cmd_complete should have already marked this as failed, but this is a safety net
+    // for daemon retries that re-read the same empty output file.
+    if result.trim().is_empty() {
+        eprintln!("callback: empty output for task {task_id} (stage={stage}), skipping transition");
+        let _ = linear.comment(
+            linear_issue_id,
+            &format!(
+                "**Werma task `{task_id}`** (stage: {stage}) produced empty output. \
+                 Task marked as failed. Re-trigger needed."
+            ),
+        );
+        return Ok(());
+    }
+
     let stage_cfg = if let Some(s) = config.stage(stage) {
         s
     } else {
