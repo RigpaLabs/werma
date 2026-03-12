@@ -4,4 +4,5 @@
 engine/target/
 .trees/
 .worktrees/
+.claude/
 CHANGELOG.md
