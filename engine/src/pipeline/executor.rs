@@ -427,9 +427,7 @@ pub fn callback(
     // Dedup guard: if callback was recently fired for this task, skip to prevent
     // duplicate Linear comments from overlapping daemon ticks / cmd_complete races.
     if db.is_callback_recently_fired(task_id, 60)? {
-        eprintln!(
-            "callback: skipping duplicate for task {task_id} (fired <60s ago)"
-        );
+        eprintln!("callback: skipping duplicate for task {task_id} (fired <60s ago)");
         return Ok(());
     }
     db.set_callback_fired_at(task_id)?;
@@ -699,16 +697,8 @@ fn is_pr_merged_for_issue(working_dir: &str, identifier: &str) -> bool {
     let working_dir = resolve_home(working_dir);
     let output = Command::new("gh")
         .args([
-            "pr",
-            "list",
-            "--search",
-            identifier,
-            "--state",
-            "merged",
-            "--json",
-            "number",
-            "--limit",
-            "1",
+            "pr", "list", "--search", identifier, "--state", "merged", "--json", "number",
+            "--limit", "1",
         ])
         .current_dir(&working_dir)
         .output();

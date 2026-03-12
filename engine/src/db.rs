@@ -599,9 +599,7 @@ impl Db {
             return Ok(false);
         }
 
-        if let Ok(ts) =
-            chrono::NaiveDateTime::parse_from_str(&fired_at, "%Y-%m-%dT%H:%M:%S")
-        {
+        if let Ok(ts) = chrono::NaiveDateTime::parse_from_str(&fired_at, "%Y-%m-%dT%H:%M:%S") {
             let now = chrono::Local::now().naive_local();
             let elapsed = now.signed_duration_since(ts).num_seconds();
             return Ok(elapsed < window_secs);
@@ -613,9 +611,7 @@ impl Db {
     /// Set callback_fired_at to current timestamp.
     /// Must be called synchronously before any callback work to prevent duplicates.
     pub fn set_callback_fired_at(&self, task_id: &str) -> Result<()> {
-        let now = chrono::Local::now()
-            .format("%Y-%m-%dT%H:%M:%S")
-            .to_string();
+        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
         self.conn.execute(
             "UPDATE tasks SET callback_fired_at = ?1 WHERE id = ?2",
             params![now, task_id],
