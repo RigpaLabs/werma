@@ -227,19 +227,6 @@ fn process_completed_pipeline_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
             let output_file = werma_dir.join(format!("logs/{}-output.md", task.id));
             let output = std::fs::read_to_string(&output_file).unwrap_or_default();
 
-            // Guard: skip callback for empty output — mark linear_pushed to stop retries
-            if output.trim().is_empty() {
-                log_daemon(
-                    &log_path,
-                    &format!(
-                        "pipeline callback skipped (empty output): {} stage={}",
-                        task.id, task.pipeline_stage
-                    ),
-                );
-                db.set_linear_pushed(&task.id, true)?;
-                continue;
-            }
-
             match pipeline::callback(
                 db,
                 &task.id,
