@@ -35,7 +35,7 @@ pub fn waiting_spinner(msg: &str) -> ProgressBar {
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::with_template("{spinner:.yellow} {msg}")
-            .expect("valid template")
+            .unwrap_or_default()
             .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
     );
     pb.set_message(msg.to_string());
@@ -125,13 +125,13 @@ pub fn refresh_screen(content: &str, prev_lines: usize) {
     // Write content
     for line in content.lines() {
         // Write line + clear to end of line + newline
-        let _ = write!(stdout, "{line}\x1b[K\n");
+        let _ = writeln!(stdout, "{line}\x1b[K");
     }
     // Clear any remaining lines from previous render
     let current_lines = content.lines().count();
     if current_lines < prev_lines {
         for _ in 0..(prev_lines - current_lines) {
-            let _ = write!(stdout, "\x1b[K\n");
+            let _ = writeln!(stdout, "\x1b[K");
         }
     }
     let _ = stdout.flush();
