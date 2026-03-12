@@ -35,7 +35,7 @@ pub fn waiting_spinner(msg: &str) -> ProgressBar {
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::with_template("{spinner:.yellow} {msg}")
-            .unwrap_or_default()
+            .unwrap_or_else(|_| ProgressStyle::default_spinner())
             .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"),
     );
     pb.set_message(msg.to_string());
