@@ -178,7 +178,10 @@ mod tests {
         templates.insert("nit_policy".to_string(), "custom policy".to_string());
         let runtime = vars(&[]);
         let result = build_vars(&templates, &runtime);
-        assert_eq!(result["nit_policy"], "custom policy", "explicit nit_policy should not be overridden");
+        assert_eq!(
+            result["nit_policy"], "custom policy",
+            "explicit nit_policy should not be overridden"
+        );
     }
 
     #[test]
