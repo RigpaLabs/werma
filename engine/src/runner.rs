@@ -474,7 +474,7 @@ RESULT_JSON=$(run_claude "$MODEL") || {{
     # Check if fallback model is configured and error looks like a rate limit
     if [ -n "$FALLBACK_MODEL" ]; then
         LAST_LINES=$(tail -20 "$LOG_FILE" 2>/dev/null || echo "")
-        if echo "$LAST_LINES" | grep -qiE "rate.?limit|overloaded|429|too many requests|quota|capacity"; then
+        if echo "$LAST_LINES" | grep -qiE "rate.?limit|429|too many requests|quota.?exceeded|server.?overloaded|api.?capacity"; then
             echo "$(date): primary model $MODEL rate-limited (exit $EXIT_CODE), retrying with fallback $FALLBACK_MODEL" >> "$LOG_FILE"
             RESULT_JSON=$(run_claude "$FALLBACK_MODEL") || {{
                 echo "$(date): FAILED with fallback model (exit $?)" >> "$LOG_FILE"
@@ -944,7 +944,7 @@ mod tests {
 
         assert!(script.contains("FALLBACK_MODEL='claude-sonnet-4-6'"));
         assert!(script.contains("run_claude"));
-        assert!(script.contains("rate.?limit|overloaded|429|too many requests|quota|capacity"));
+        assert!(script.contains("rate.?limit|429|too many requests|quota.?exceeded|server.?overloaded|api.?capacity"));
         assert!(script.contains("retrying with fallback"));
     }
 
