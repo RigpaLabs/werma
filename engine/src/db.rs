@@ -560,6 +560,21 @@ impl Db {
         Ok(tasks)
     }
 
+    /// Check if there's a completed but unpushed task for a given issue + stage.
+    /// Used to prevent poll from spawning duplicates while callback is pending.
+    pub fn has_unpushed_completed_task(&self, issue_id: &str, stage: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE linear_issue_id = ?1
+               AND pipeline_stage = ?2
+               AND status = 'completed'
+               AND linear_pushed = 0",
+            params![issue_id, stage],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Check if a review task for the same target is already running or pending.
     /// NOTE: dedup is coupled to the prompt format "# Code Review: {label}" in cmd_review().
     /// If that format changes, this query must be updated too.
@@ -1044,6 +1059,48 @@ mod tests {
         db.set_linear_pushed("20260308-001", true).unwrap();
         let fetched = db.task("20260308-001").unwrap().unwrap();
         assert!(fetched.linear_pushed);
+    }
+
+    #[test]
+    fn has_unpushed_completed_task() {
+        let db = Db::open_in_memory().unwrap();
+
+        // No tasks: should be false
+        assert!(
+            !db.has_unpushed_completed_task("RIG-105", "engineer")
+                .unwrap()
+        );
+
+        // Insert a completed, unpushed pipeline task
+        let mut task = make_test_task("20260312-001");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-105".to_string();
+        task.pipeline_stage = "engineer".to_string();
+        task.linear_pushed = false;
+        db.insert_task(&task).unwrap();
+
+        // Should find it
+        assert!(
+            db.has_unpushed_completed_task("RIG-105", "engineer")
+                .unwrap()
+        );
+        // Different issue: not found
+        assert!(
+            !db.has_unpushed_completed_task("RIG-999", "engineer")
+                .unwrap()
+        );
+        // Different stage: not found
+        assert!(
+            !db.has_unpushed_completed_task("RIG-105", "reviewer")
+                .unwrap()
+        );
+
+        // After marking pushed: should not find it
+        db.set_linear_pushed("20260312-001", true).unwrap();
+        assert!(
+            !db.has_unpushed_completed_task("RIG-105", "engineer")
+                .unwrap()
+        );
     }
 
     #[test]

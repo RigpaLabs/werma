@@ -181,6 +181,13 @@ pub fn poll(db: &Db) -> Result<()> {
                     continue;
                 }
 
+                // Skip if there's a completed-but-unpushed task for this issue + stage.
+                // The callback hasn't run yet — spawning another task would cause duplicates.
+                if db.has_unpushed_completed_task(identifier, stage_name)? {
+                    total_skipped += 1;
+                    continue;
+                }
+
                 // Manual issues: skip execution stages (skip_manual=true)
                 if crate::linear::is_manual_issue(&labels) && stage_cfg.skip_manual() {
                     total_skipped += 1;
@@ -324,11 +331,24 @@ pub fn callback(
 
     match transition {
         Some(t) => {
-            linear.move_issue_by_name(linear_issue_id, &t.status)?;
+            // Move the issue first — this is the critical operation.
+            if let Err(e) = linear.move_issue_by_name(linear_issue_id, &t.status) {
+                // Log and return error so the caller knows the move failed.
+                eprintln!(
+                    "callback: failed to move {} to '{}': {e}",
+                    linear_issue_id, t.status
+                );
+                return Err(e);
+            }
 
-            // Post a comment summarizing what happened
+            // Post a comment — non-critical, don't fail the callback if this errors.
             let comment = format_callback_comment(task_id, stage, &verdict_str, t.spawn.as_deref());
-            linear.comment(linear_issue_id, &comment)?;
+            if let Err(e) = linear.comment(linear_issue_id, &comment) {
+                eprintln!(
+                    "callback: failed to post comment on {}: {e}",
+                    linear_issue_id
+                );
+            }
 
             // Spawn next stage if configured
             if let Some(ref next_stage) = t.spawn {
@@ -646,6 +666,18 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         working_dir,
         estimate: _,
     } = p;
+
+    // Guard: don't spawn if an active task already exists for this issue + stage.
+    // Prevents duplicates from double-callback (cmd_complete + daemon).
+    let existing = db.tasks_by_linear_issue(linear_issue_id, Some(next_stage), true)?;
+    if !existing.is_empty() {
+        eprintln!(
+            "skip spawn: active task already exists for {} stage={}",
+            linear_issue_id, next_stage
+        );
+        return Ok(());
+    }
+
     let stage_cfg = config
         .stage(next_stage)
         .with_context(|| format!("no config for stage '{next_stage}'"))?;
