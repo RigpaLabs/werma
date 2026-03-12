@@ -179,17 +179,18 @@ impl StageConfig {
     /// - Falls back to `self.model` otherwise.
     pub fn effective_model(&self, estimate: i32, review_round: i64) -> &str {
         // Re-review: cheaper model to just verify fixes
-        if review_round >= 1 {
-            if let Some(ref m) = self.recheck_model {
-                return m;
-            }
+        if review_round >= 1
+            && let Some(ref m) = &self.recheck_model
+        {
+            return m;
         }
         // Light model for simple tasks
         let threshold = self.light_threshold.unwrap_or(2) as i32;
-        if estimate > 0 && estimate <= threshold {
-            if let Some(ref m) = self.light_model {
-                return m;
-            }
+        if estimate > 0
+            && estimate <= threshold
+            && let Some(ref m) = &self.light_model
+        {
+            return m;
         }
         &self.model
     }
