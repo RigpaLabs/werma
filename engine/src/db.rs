@@ -523,6 +523,17 @@ impl Db {
         )?)
     }
 
+    /// Count all active (pending + running) pipeline tasks across all stages.
+    pub fn count_active_pipeline_tasks(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE pipeline_stage != ''
+               AND status IN ('pending', 'running')",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Count completed tasks for a given Linear issue and pipeline stage.
     /// Used to track review cycles (how many times reviewer has run for an issue).
     pub fn count_completed_tasks_for_issue_stage(

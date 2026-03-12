@@ -136,6 +136,16 @@ pub fn poll(db: &Db) -> Result<()> {
         }
     }
 
+    // Check global max_concurrent: skip poll entirely if at capacity
+    let active_pipeline_count = db.count_active_pipeline_tasks()?;
+    if active_pipeline_count >= config.max_concurrent as i64 {
+        println!(
+            "\nPipeline poll: at global max_concurrent ({}/{}), skipping",
+            active_pipeline_count, config.max_concurrent
+        );
+        return Ok(());
+    }
+
     for (status_key, stage_names) in &status_to_stages {
         let issues = linear.get_issues_by_status(status_key)?;
 
@@ -169,9 +179,9 @@ pub fn poll(db: &Db) -> Result<()> {
                     None => continue,
                 };
 
-                // Enforce max_concurrent: skip if stage already has enough active tasks
-                let active_count = db.count_active_tasks_for_stage(stage_name)?;
-                if active_count >= stage_cfg.max_concurrent as i64 {
+                // Re-check global max_concurrent (may have been reached by tasks created in this loop)
+                let active_count = db.count_active_pipeline_tasks()?;
+                if active_count >= config.max_concurrent as i64 {
                     total_skipped += 1;
                     continue;
                 }

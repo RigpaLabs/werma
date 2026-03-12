@@ -214,6 +214,7 @@ pub fn cmd_show(stage_filter: Option<&str>) -> Result<()> {
     let config = loader::load_default()?;
 
     println!("\nPipeline: {} — {}", config.pipeline, config.description);
+    println!("Max concurrent: {}", config.max_concurrent);
 
     if !config.templates.is_empty() {
         println!("\nTemplates:");
