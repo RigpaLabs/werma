@@ -639,6 +639,16 @@ impl Db {
         Ok(())
     }
 
+    /// Clear callback_fired_at (set to NULL) so the dedup guard no longer blocks retries.
+    /// Called when callback_inner() fails — allows the next daemon tick to retry.
+    pub fn clear_callback_fired_at(&self, task_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET callback_fired_at = NULL WHERE id = ?1",
+            params![task_id],
+        )?;
+        Ok(())
+    }
+
     /// Check if a review task for the same target is already running or pending.
     /// NOTE: dedup is coupled to the prompt format "# Code Review: {label}" in cmd_review().
     /// If that format changes, this query must be updated too.
@@ -1165,6 +1175,21 @@ mod tests {
             .unwrap();
 
         // Should be expired (>60s ago)
+        assert!(!db.is_callback_recently_fired("20260308-001", 60).unwrap());
+    }
+
+    #[test]
+    fn callback_guard_clear_allows_retry() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        // Set the guard
+        db.set_callback_fired_at("20260308-001").unwrap();
+        assert!(db.is_callback_recently_fired("20260308-001", 60).unwrap());
+
+        // Clear it — should allow retry
+        db.clear_callback_fired_at("20260308-001").unwrap();
         assert!(!db.is_callback_recently_fired("20260308-001", 60).unwrap());
     }
 

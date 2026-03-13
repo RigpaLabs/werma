@@ -423,6 +423,7 @@ pub fn poll(db: &Db) -> Result<()> {
 }
 
 /// Handle pipeline callback when a task completes.
+/// Sets dedup guard before work; clears it on failure so retries aren't blocked.
 pub fn callback(
     db: &Db,
     task_id: &str,
@@ -439,6 +440,25 @@ pub fn callback(
     }
     db.set_callback_fired_at(task_id)?;
 
+    let res = callback_inner(db, task_id, stage, result, linear_issue_id, working_dir);
+    if res.is_err() {
+        // Clear the guard so the next daemon tick can retry
+        if let Err(clear_err) = db.clear_callback_fired_at(task_id) {
+            eprintln!("callback: failed to clear fired_at for {task_id}: {clear_err}");
+        }
+    }
+    res
+}
+
+/// Inner callback logic, separated so the outer function can clear the dedup guard on failure.
+fn callback_inner(
+    db: &Db,
+    task_id: &str,
+    stage: &str,
+    result: &str,
+    linear_issue_id: &str,
+    working_dir: &str,
+) -> Result<()> {
     let config = load_default()?;
     let linear = LinearClient::new()?;
 
