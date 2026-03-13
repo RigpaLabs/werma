@@ -497,13 +497,18 @@ pub fn callback(
         eprintln!(
             "warning: no verdict found for task {task_id} (stage={stage}), keeping current state"
         );
-        linear.comment(
+        if let Err(e) = linear.comment(
             linear_issue_id,
             &format!(
                 "**Werma task `{task_id}`** (stage: {stage}) completed but no verdict found. \
                  Manual review needed."
             ),
-        )?;
+        ) {
+            eprintln!("callback: failed to post no-verdict comment on {linear_issue_id}: {e}");
+        }
+        if let Err(e) = db.set_callback_fired_at(task_id) {
+            eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
+        }
         return Ok(());
     }
 
@@ -603,6 +608,9 @@ pub fn callback(
                             "callback: failed to post no-PR comment on {linear_issue_id}: {e}"
                         );
                     }
+                    if let Err(e) = db.set_callback_fired_at(task_id) {
+                        eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
+                    }
                     return Ok(());
                 }
 
@@ -647,13 +655,20 @@ pub fn callback(
                              escalating to blocked"
                         );
                         linear.move_issue_by_name(linear_issue_id, "blocked")?;
-                        linear.comment(
+                        if let Err(e) = linear.comment(
                             linear_issue_id,
                             &format!(
                                 "**Review cycle limit reached** ({max_rounds} rounds). \
                                  Moving to Blocked — manual review required."
                             ),
-                        )?;
+                        ) {
+                            eprintln!(
+                                "callback: failed to post escalation comment on {linear_issue_id}: {e}"
+                            );
+                        }
+                        if let Err(e) = db.set_callback_fired_at(task_id) {
+                            eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
+                        }
                         // Don't spawn another engineer cycle
                         return Ok(());
                     }

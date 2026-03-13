@@ -810,10 +810,7 @@ fn callback_already_done_blocked_by_open_pr() {
     db.insert_task(&task).unwrap();
 
     // Analyst says ALREADY_DONE, but there's an open PR.
-    // callback calls move_issue_by_name first (for the transition),
-    // then checks for open PRs via `gh pr list --state open`.
-    // Actually: the ALREADY_DONE guard runs BEFORE the move.
-    // The `has_open_pr_for_issue` is called with `working_dir` and `identifier`.
+    // The ALREADY_DONE guard checks for open PRs BEFORE calling move_issue_by_name.
     // FakeCommandRunner: gh pr list --search RIG-222 --state open → returns a PR
     cmd.push_success(r#"[{"number":42}]"#);
 
