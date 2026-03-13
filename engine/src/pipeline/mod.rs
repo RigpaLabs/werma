@@ -110,7 +110,12 @@ pub fn handle_research_completion(
         println!("  + curator task: {} for research {}", curator_id, task.id);
     }
 
-    let _ = linear.move_issue_by_name(&task.linear_issue_id, "done");
+    if let Err(e) = linear.move_issue_by_name(&task.linear_issue_id, "done") {
+        eprintln!(
+            "warn: failed to move {} to done after research: {e}",
+            task.linear_issue_id
+        );
+    }
 
     Ok(())
 }

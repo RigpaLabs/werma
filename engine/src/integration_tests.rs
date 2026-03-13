@@ -233,3 +233,57 @@ fn poll_research_move_failure_nonfatal() {
     );
     assert_eq!(tasks[0].task_type, "research");
 }
+
+// ─── Test 7: callback_retry_after_move_failure (RIG-211 regression guard) ───
+
+#[test]
+fn callback_retry_after_move_failure() {
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+
+    let mut task = make_test_task("20260313-300");
+    task.status = Status::Completed;
+    task.linear_issue_id = "RIG-300".to_string();
+    task.pipeline_stage = "engineer".to_string();
+    db.insert_task(&task).unwrap();
+
+    let result = "## Implementation\nDone.\n\nVERDICT=DONE";
+
+    // First callback: move fails → should return Err, dedup guard NOT set
+    linear.fail_next_n_moves(1);
+    let err = callback(
+        &db,
+        "20260313-300",
+        "engineer",
+        result,
+        "RIG-300",
+        "~/projects/rigpa/werma",
+        &linear,
+        &cmd,
+    );
+    assert!(err.is_err(), "first callback should fail when move fails");
+
+    // Dedup guard should NOT be set — verify by calling callback again
+    // (if guard was set, this would silently return Ok without moving)
+    let ok = callback(
+        &db,
+        "20260313-300",
+        "engineer",
+        result,
+        "RIG-300",
+        "~/projects/rigpa/werma",
+        &linear,
+        &cmd,
+    );
+    assert!(ok.is_ok(), "retry callback should succeed");
+
+    // The retry should have moved the issue to "review"
+    let moves = linear.move_calls.borrow();
+    assert!(
+        moves
+            .iter()
+            .any(|(id, status)| id == "RIG-300" && status == "review"),
+        "retry should move to 'review', got: {moves:?}"
+    );
+}

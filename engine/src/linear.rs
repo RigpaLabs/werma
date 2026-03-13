@@ -387,7 +387,9 @@ impl LinearClient {
 
             // Move issue to In Progress
             if let Some(ip_id) = config.statuses.get("in_progress") {
-                let _ = self.move_issue(issue_id, ip_id);
+                if let Err(e) = self.move_issue(issue_id, ip_id) {
+                    eprintln!("warn: failed to move {identifier} to in_progress during sync: {e}");
+                }
             }
 
             println!("  + {task_id} [{identifier}] p{werma_priority}");

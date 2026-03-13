@@ -202,7 +202,9 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 if stage_name == "reviewer" && is_pr_merged_for_issue(cmd, &working_dir, identifier)
                 {
                     println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
-                    let _ = linear.move_issue_by_name(issue_id, "done");
+                    if let Err(e) = linear.move_issue_by_name(issue_id, "done") {
+                        eprintln!("  ! failed to move {identifier} to done: {e}");
+                    }
                     total_skipped += 1;
                     continue;
                 }
@@ -357,7 +359,9 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             // For reviewer stage: skip if PR is already merged
             if *stage_name == "reviewer" && is_pr_merged_for_issue(cmd, &working_dir, identifier) {
                 println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
-                let _ = linear.move_issue_by_name(issue_id, "done");
+                if let Err(e) = linear.move_issue_by_name(issue_id, "done") {
+                    eprintln!("  ! failed to move {identifier} to done: {e}");
+                }
                 total_skipped += 1;
                 continue;
             }
@@ -449,13 +453,14 @@ pub fn callback(
     linear: &dyn LinearApi,
     cmd: &dyn CommandRunner,
 ) -> Result<()> {
-    // Dedup guard: if callback was recently fired for this task, skip to prevent
+    // Dedup guard: if callback SUCCEEDED recently, skip to prevent
     // duplicate Linear comments from overlapping daemon ticks / cmd_complete races.
+    // Note: callback_fired_at is set AFTER successful transition (not before),
+    // so failed callbacks can be retried on the next tick (RIG-211 fix).
     if db.is_callback_recently_fired(task_id, 60)? {
         eprintln!("callback: skipping duplicate for task {task_id} (fired <60s ago)");
         return Ok(());
     }
-    db.set_callback_fired_at(task_id)?;
 
     let config = load_default()?;
 
@@ -464,13 +469,15 @@ pub fn callback(
     // for daemon retries that re-read the same empty output file.
     if result.trim().is_empty() {
         eprintln!("callback: empty output for task {task_id} (stage={stage}), skipping transition");
-        let _ = linear.comment(
+        if let Err(e) = linear.comment(
             linear_issue_id,
             &format!(
                 "**Werma task `{task_id}`** (stage: {stage}) produced empty output. \
                  Task marked as failed. Re-trigger needed."
             ),
-        );
+        ) {
+            eprintln!("callback: failed to post empty-output comment on {linear_issue_id}: {e}");
+        }
         return Ok(());
     }
 
@@ -540,13 +547,15 @@ pub fn callback(
                     "callback: blocking ALREADY_DONE→done for {linear_issue_id} — open PR exists. \
                      Issue stays in current state."
                 );
-                let _ = linear.comment(
+                if let Err(e) = linear.comment(
                     linear_issue_id,
                     &format!(
                         "**Analyst ALREADY_DONE blocked** (task: `{task_id}`): open PR exists for this issue. \
                          An open PR means work is in progress, not done. Issue stays in current state."
                     ),
-                );
+                ) {
+                    eprintln!("callback: failed to post ALREADY_DONE comment on {linear_issue_id}: {e}");
+                }
                 return Ok(());
             }
 
@@ -582,14 +591,18 @@ pub fn callback(
                         "callback: engineer DONE but no PR_URL found for {linear_issue_id} (task {task_id}). \
                          Keeping issue in current state for retry."
                     );
-                    let _ = linear.comment(
+                    if let Err(e) = linear.comment(
                         linear_issue_id,
                         &format!(
                             "**Engineer task `{task_id}` DONE but no PR created.** \
                              The agent did not create a PR or include `PR_URL=` in its output. \
                              Issue stays in current state — re-trigger needed."
                         ),
-                    );
+                    ) {
+                        eprintln!(
+                            "callback: failed to post no-PR comment on {linear_issue_id}: {e}"
+                        );
+                    }
                     return Ok(());
                 }
 
@@ -659,6 +672,12 @@ pub fn callback(
                     estimate,
                     pr_url: pr_url.as_deref(),
                 })?;
+            }
+
+            // RIG-211: set callback_fired_at AFTER successful transition,
+            // so failed callbacks can be retried on the next daemon tick.
+            if let Err(e) = db.set_callback_fired_at(task_id) {
+                eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
             }
         }
         None => {
