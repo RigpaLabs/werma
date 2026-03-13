@@ -1603,4 +1603,269 @@ mod tests {
             "Pull Request"
         );
     }
+
+    // ─── format_callback_comment: edge cases ────────────────────────────────
+
+    #[test]
+    fn format_callback_comment_done_no_spawn() {
+        let comment = format_callback_comment("task-001", "engineer", "done", None, None);
+        assert!(comment.contains("DONE"));
+        assert!(comment.contains("task-001"));
+        assert!(comment.contains("Engineer")); // first letter capitalized
+    }
+
+    #[test]
+    fn format_callback_comment_with_spawn_and_pr() {
+        let comment = format_callback_comment(
+            "task-002",
+            "engineer",
+            "done",
+            Some("reviewer"),
+            Some("https://github.com/org/repo/pull/5"),
+        );
+        assert!(comment.contains("reviewer"));
+        assert!(comment.contains("pull/5"));
+    }
+
+    // ─── build_handoff_prompt: qa rejection ─────────────────────────────────
+
+    #[test]
+    fn build_handoff_prompt_from_qa() {
+        let config = test_config();
+        // If qa stage exists in config, test it; otherwise skip gracefully
+        if config.stage("qa").is_some() {
+            let prompt = build_handoff_prompt(
+                &config,
+                "engineer",
+                "qa",
+                "issue-456",
+                "QA Failed Issue",
+                "Description",
+                "QA found bugs\nVERDICT=REJECTED",
+            );
+            assert!(
+                prompt.contains("issue-456")
+                    || prompt.contains("QA")
+                    || prompt.contains("REJECTED")
+            );
+        }
+    }
+
+    // ─── parse_pr_url: multiple URLs ────────────────────────────────────────
+
+    #[test]
+    fn parse_pr_url_first_match() {
+        let output = "Created https://github.com/a/b/pull/1\nAlso https://github.com/a/b/pull/2";
+        assert_eq!(
+            parse_pr_url(output),
+            Some("https://github.com/a/b/pull/1".to_string())
+        );
+    }
+
+    // ─── truncate_lines: edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn truncate_lines_empty() {
+        assert_eq!(truncate_lines("", 10), "");
+    }
+
+    #[test]
+    fn truncate_lines_exact_limit() {
+        let text = "a\nb\nc\nd\ne";
+        assert_eq!(truncate_lines(text, 5), text);
+    }
+
+    // ─── is_research_issue: edge cases ──────────────────────────────────────
+
+    #[test]
+    fn research_issue_mixed_labels() {
+        assert!(is_research_issue(&["Feature", "Research", "repo:werma"]));
+        assert!(!is_research_issue(&["researcher"])); // partial match should not trigger
+    }
+
+    // ─── create_initial_stage_task ─────────────────────────────────────────
+
+    #[test]
+    fn create_initial_stage_task_creates_pending_task() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let config = test_config();
+
+        let task_id = create_initial_stage_task(
+            &db,
+            &config,
+            "analyst",
+            "RIG-200",
+            "Test issue title",
+            "Test description",
+            "~/projects/rigpa/werma",
+            3,
+        )
+        .unwrap();
+
+        let task = db.task(&task_id).unwrap().unwrap();
+        assert_eq!(task.pipeline_stage, "analyst");
+        assert_eq!(task.linear_issue_id, "RIG-200");
+        assert_eq!(task.status, Status::Pending);
+        assert_eq!(task.estimate, 3);
+        assert_eq!(task.working_dir, "~/projects/rigpa/werma");
+        assert!(task.prompt.contains("RIG-200"));
+    }
+
+    #[test]
+    fn create_initial_stage_task_unknown_stage_errors() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let config = test_config();
+
+        let result = create_initial_stage_task(
+            &db,
+            &config,
+            "nonexistent_stage",
+            "RIG-201",
+            "Title",
+            "Desc",
+            "/tmp",
+            0,
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unknown pipeline stage")
+        );
+    }
+
+    #[test]
+    fn create_initial_stage_task_infers_working_dir_from_existing() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let config = test_config();
+
+        // Insert a prior task with a custom working dir
+        let prior = Task {
+            id: "20260313-001".to_string(),
+            linear_issue_id: "RIG-202".to_string(),
+            working_dir: "~/projects/rigpa/fathom".to_string(),
+            pipeline_stage: "analyst".to_string(),
+            task_type: "pipeline-analyst".to_string(),
+            ..Default::default()
+        };
+        db.insert_task(&prior).unwrap();
+
+        // When working_dir is default werma path, should infer from existing task
+        let task_id = create_initial_stage_task(
+            &db,
+            &config,
+            "analyst",
+            "RIG-202",
+            "Fathom task",
+            "Description",
+            "~/projects/rigpa/werma",
+            0,
+        )
+        .unwrap();
+
+        let task = db.task(&task_id).unwrap().unwrap();
+        assert_eq!(task.working_dir, "~/projects/rigpa/fathom");
+    }
+
+    // ─── create_next_stage_task: duplicate guard ──────────────────────────
+
+    #[test]
+    fn create_next_stage_task_skips_if_active_exists() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let config = test_config();
+
+        // Insert an active (pending) engineer task
+        let existing = Task {
+            id: "20260313-050".to_string(),
+            status: Status::Pending,
+            linear_issue_id: "RIG-300".to_string(),
+            pipeline_stage: "engineer".to_string(),
+            task_type: "pipeline-engineer".to_string(),
+            ..Default::default()
+        };
+        db.insert_task(&existing).unwrap();
+
+        // Try to spawn another engineer for the same issue
+        create_next_stage_task(&NextStageParams {
+            db: &db,
+            config: &config,
+            linear: None,
+            linear_issue_id: "RIG-300",
+            next_stage: "engineer",
+            previous_output: "spec output",
+            prev_task_id: "20260313-001",
+            prev_stage: "analyst",
+            working_dir: "~/projects/rigpa/werma",
+            estimate: 0,
+            pr_url: None,
+        })
+        .unwrap();
+
+        // Should still be only 1 engineer task (duplicate blocked)
+        let tasks = db
+            .tasks_by_linear_issue("RIG-300", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+    }
+
+    // ─── build_poll_prompt: no prompt in config ──────────────────────────
+
+    #[test]
+    fn build_poll_prompt_fallback_when_no_prompt() {
+        let yaml = r#"
+pipeline: minimal
+stages:
+  bare:
+    agent: pipeline-test
+    model: sonnet
+"#;
+        let config = crate::pipeline::loader::load_from_str(yaml, "<test>").unwrap();
+        let stage_cfg = config.stage("bare").unwrap();
+        let prompt = build_poll_prompt(&config, stage_cfg, "RIG-99", "Bare title", "Bare desc");
+        assert!(prompt.contains("RIG-99"));
+        assert!(prompt.contains("Bare title"));
+        assert!(prompt.contains("pipeline-test")); // agent name in fallback
+    }
+
+    // ─── build_handoff_prompt: no prompt in config ──────────────────────
+
+    #[test]
+    fn build_handoff_prompt_fallback_when_no_config() {
+        let yaml = r#"
+pipeline: minimal
+stages:
+  unknown:
+    agent: pipeline-test
+    model: sonnet
+"#;
+        let config = crate::pipeline::loader::load_from_str(yaml, "<test>").unwrap();
+        // When next_stage doesn't exist in config, should use fallback
+        let prompt = build_handoff_prompt(
+            &config,
+            "nonexistent",
+            "analyst",
+            "RIG-99",
+            "Title",
+            "Desc",
+            "prev output",
+        );
+        assert!(prompt.contains("RIG-99"));
+        assert!(prompt.contains("nonexistent"));
+    }
+
+    // ─── resolve_home ────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_home_expands_tilde() {
+        let result = resolve_home("~/test/path");
+        assert!(!result.to_string_lossy().starts_with("~/"));
+        assert!(result.to_string_lossy().ends_with("/test/path"));
+    }
+
+    #[test]
+    fn resolve_home_absolute_path_unchanged() {
+        let result = resolve_home("/absolute/path");
+        assert_eq!(result, std::path::PathBuf::from("/absolute/path"));
+    }
 }

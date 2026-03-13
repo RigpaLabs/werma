@@ -129,4 +129,42 @@ mod tests {
         let parsed: Status = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, status);
     }
+
+    #[test]
+    fn task_default_values() {
+        let task = Task::default();
+        assert_eq!(task.status, Status::Pending);
+        assert!(task.id.is_empty());
+        assert!(task.depends_on.is_empty());
+        assert!(task.context_files.is_empty());
+        assert_eq!(task.estimate, 0);
+        assert!(!task.linear_pushed);
+    }
+
+    #[test]
+    fn task_serde_roundtrip() {
+        let task = Task {
+            id: "20260313-001".to_string(),
+            status: Status::Running,
+            priority: 1,
+            task_type: "code".to_string(),
+            prompt: "do stuff".to_string(),
+            depends_on: vec!["dep-1".to_string()],
+            context_files: vec!["ctx.md".to_string()],
+            estimate: 5,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&task).unwrap();
+        let parsed: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id, "20260313-001");
+        assert_eq!(parsed.status, Status::Running);
+        assert_eq!(parsed.depends_on, vec!["dep-1"]);
+        assert_eq!(parsed.estimate, 5);
+    }
+
+    #[test]
+    fn status_default_is_pending() {
+        assert_eq!(Status::default(), Status::Pending);
+    }
 }
