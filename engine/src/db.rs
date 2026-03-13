@@ -583,6 +583,26 @@ impl Db {
         Ok(count > 0)
     }
 
+    /// Check if any non-failed task exists for a given issue + stage.
+    /// Covers pending, running, AND completed tasks (regardless of linear_pushed).
+    /// Used by poll() to prevent re-spawning tasks for issues that have already been
+    /// processed — even when the callback succeeded but the Linear status didn't move.
+    pub fn has_any_nonfailed_task_for_issue_stage(
+        &self,
+        issue_id: &str,
+        stage: &str,
+    ) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE linear_issue_id = ?1
+               AND pipeline_stage = ?2
+               AND status IN ('pending', 'running', 'completed')",
+            params![issue_id, stage],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Check if callback was recently fired for a task (within `window_secs` seconds).
     /// Used to prevent duplicate callback execution from overlapping daemon ticks.
     pub fn is_callback_recently_fired(&self, task_id: &str, window_secs: i64) -> Result<bool> {
@@ -1186,6 +1206,67 @@ mod tests {
         db.set_linear_pushed("20260312-001", true).unwrap();
         assert!(
             !db.has_unpushed_completed_task("RIG-105", "engineer")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn has_any_nonfailed_task_for_issue_stage() {
+        let db = Db::open_in_memory().unwrap();
+
+        // No tasks: should be false
+        assert!(
+            !db.has_any_nonfailed_task_for_issue_stage("RIG-209", "analyst")
+                .unwrap()
+        );
+
+        // Insert a completed + pushed task (the gap that RIG-209 fixes)
+        let mut task = make_test_task("20260313-001");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-209".to_string();
+        task.pipeline_stage = "analyst".to_string();
+        task.linear_pushed = true; // callback ran, but status didn't actually move
+        db.insert_task(&task).unwrap();
+
+        // Should find it — this is the case that was previously invisible
+        assert!(
+            db.has_any_nonfailed_task_for_issue_stage("RIG-209", "analyst")
+                .unwrap()
+        );
+
+        // Different issue: not found
+        assert!(
+            !db.has_any_nonfailed_task_for_issue_stage("RIG-999", "analyst")
+                .unwrap()
+        );
+
+        // Different stage: not found
+        assert!(
+            !db.has_any_nonfailed_task_for_issue_stage("RIG-209", "engineer")
+                .unwrap()
+        );
+
+        // Failed tasks don't block (allow retry via poll)
+        let mut failed_task = make_test_task("20260313-002");
+        failed_task.status = Status::Failed;
+        failed_task.linear_issue_id = "RIG-210".to_string();
+        failed_task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&failed_task).unwrap();
+
+        assert!(
+            !db.has_any_nonfailed_task_for_issue_stage("RIG-210", "analyst")
+                .unwrap()
+        );
+
+        // Pending tasks block (already queued)
+        let mut pending_task = make_test_task("20260313-003");
+        pending_task.status = Status::Pending;
+        pending_task.linear_issue_id = "RIG-211".to_string();
+        pending_task.pipeline_stage = "engineer".to_string();
+        db.insert_task(&pending_task).unwrap();
+
+        assert!(
+            db.has_any_nonfailed_task_for_issue_stage("RIG-211", "engineer")
                 .unwrap()
         );
     }

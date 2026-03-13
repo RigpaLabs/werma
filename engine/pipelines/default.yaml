@@ -56,6 +56,7 @@ stages:
     transitions:
       done:
         status: review
+        spawn: reviewer
 
   reviewer:
     linear_status: review
