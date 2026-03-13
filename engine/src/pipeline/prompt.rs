@@ -30,8 +30,26 @@ pub fn build_vars(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     vars.extend(runtime.iter().map(|(k, v)| (k.clone(), v.clone())));
+    sanitize_text_vars(&mut vars);
     compute_derived_vars(&mut vars);
     vars
+}
+
+/// Unescape literal `\n` and `\t` sequences in text-heavy template variables.
+///
+/// Issue descriptions from Linear often contain literal `\n` escape sequences
+/// (backslash followed by 'n') instead of actual newlines, producing unreadable
+/// walls of text. This sanitizes them at the source before prompt rendering.
+fn sanitize_text_vars(vars: &mut HashMap<String, String>) {
+    const TEXT_KEYS: &[&str] = &["issue_description", "previous_output", "rejection_feedback"];
+    for key in TEXT_KEYS {
+        if let Some(val) = vars.get_mut(*key) {
+            let sanitized = val.replace("\\n", "\n").replace("\\t", "\t");
+            if sanitized != *val {
+                *val = sanitized;
+            }
+        }
+    }
 }
 
 /// Derive computed template variables from existing ones.
@@ -233,6 +251,59 @@ mod tests {
             policy.contains("any nits"),
             "absent nit_threshold should produce default policy, got: {policy}"
         );
+    }
+
+    #[test]
+    fn sanitize_unescapes_literal_newlines_in_description() {
+        let templates = IndexMap::new();
+        let runtime = vars(&[
+            ("issue_id", "RIG-184"),
+            (
+                "issue_description",
+                "Problem\\n\\nReviewer prompt only instructs to run `git diff`\\nSecond line",
+            ),
+        ]);
+        let result = build_vars(&templates, &runtime);
+        assert_eq!(
+            result["issue_description"],
+            "Problem\n\nReviewer prompt only instructs to run `git diff`\nSecond line"
+        );
+    }
+
+    #[test]
+    fn sanitize_unescapes_tabs() {
+        let templates = IndexMap::new();
+        let runtime = vars(&[("issue_description", "col1\\tcol2\\tcol3")]);
+        let result = build_vars(&templates, &runtime);
+        assert_eq!(result["issue_description"], "col1\tcol2\tcol3");
+    }
+
+    #[test]
+    fn sanitize_applies_to_previous_output_and_rejection_feedback() {
+        let templates = IndexMap::new();
+        let runtime = vars(&[
+            ("previous_output", "line1\\nline2"),
+            ("rejection_feedback", "fix1\\nfix2"),
+        ]);
+        let result = build_vars(&templates, &runtime);
+        assert_eq!(result["previous_output"], "line1\nline2");
+        assert_eq!(result["rejection_feedback"], "fix1\nfix2");
+    }
+
+    #[test]
+    fn sanitize_leaves_real_newlines_intact() {
+        let templates = IndexMap::new();
+        let runtime = vars(&[("issue_description", "already\nhas\nnewlines")]);
+        let result = build_vars(&templates, &runtime);
+        assert_eq!(result["issue_description"], "already\nhas\nnewlines");
+    }
+
+    #[test]
+    fn sanitize_does_not_affect_non_text_vars() {
+        let templates = IndexMap::new();
+        let runtime = vars(&[("issue_id", "RIG\\n184")]);
+        let result = build_vars(&templates, &runtime);
+        assert_eq!(result["issue_id"], "RIG\\n184"); // should NOT be unescaped
     }
 
     #[test]
