@@ -7,7 +7,7 @@ pub struct Cli {
     pub command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Add a new task
     Add {
@@ -198,7 +198,7 @@ pub enum Commands {
     Version,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 pub enum DaemonAction {
     /// Install daemon
     Install,
@@ -206,7 +206,7 @@ pub enum DaemonAction {
     Uninstall,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum SchedAction {
     /// Add a schedule
     Add {
@@ -271,7 +271,7 @@ pub enum SchedAction {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum LinearAction {
     /// Setup Linear integration
     Setup,
@@ -286,7 +286,7 @@ pub enum LinearAction {
     PushAll,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum PipelineAction {
     /// Poll for new pipeline tasks
     Poll,

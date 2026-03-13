@@ -1,5 +1,6 @@
 mod backup;
 mod cli;
+mod commands;
 mod config;
 mod daemon;
 mod dashboard;
@@ -18,30 +19,25 @@ mod ui;
 mod update;
 mod worktree;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
-use chrono::Local;
+use anyhow::{Context, Result};
 use clap::Parser;
-use colored::Colorize;
 
-use crate::dashboard::truncate_line;
 use crate::db::Db;
-use crate::models::{Schedule, Status, Task};
+
+// Re-export display helpers so other modules can use `crate::function_name`
+pub use commands::display::{default_turns, format_duration_between, format_elapsed_since};
 
 /// Build a version string for display.
 /// Returns &'static str because clap requires it.
 pub fn version_string() -> &'static str {
-    // Computed once at startup, leaked to get 'static lifetime.
-    // This is fine — it's a small string that lives for the process lifetime.
     let version = match option_env!("WERMA_GIT_VERSION") {
         Some(tag) => {
-            // Release build: WERMA_GIT_VERSION is set to "vX.Y.Z" by CI
             let v = tag.strip_prefix('v').unwrap_or(tag);
             v.to_string()
         }
         None => {
-            // Dev build: show cargo version + dev suffix
             format!("{}-dev", env!("CARGO_PKG_VERSION"))
         }
     };
@@ -49,8 +45,6 @@ pub fn version_string() -> &'static str {
 }
 
 /// Get the current git HEAD hash of the werma repo at runtime.
-/// This reflects the *repo state* (agents, prompts, memory), which may differ
-/// from the compile-time binary hash.
 pub fn runtime_repo_hash() -> String {
     let repo = std::env::var("WERMA_REPO").unwrap_or_else(|_| {
         dirs::home_dir()
@@ -87,1331 +81,11 @@ fn open_db() -> Result<Db> {
     Db::open(&dir.join("werma.db"))
 }
 
-/// Map short model name to full Claude model ID.
-/// Canonical version in runner::model_flag — this delegates to it.
-fn model_to_id(model: &str) -> &str {
-    runner::model_flag(model)
-}
-
-/// Default max_turns based on task type.
-fn default_turns(task_type: &str) -> i32 {
-    match task_type {
-        "code" | "refactor" | "full" | "pipeline-engineer" => 30,
-        "research" | "pipeline-analyst" => 20,
-        "review" | "analyze" => 10,
-        "pipeline-reviewer" | "pipeline-qa" | "pipeline-devops" => 15,
-        _ => 15,
-    }
-}
-
-/// Status icon for display.
-fn status_icon(status: Status) -> &'static str {
-    match status {
-        Status::Pending => "○",
-        Status::Running => "◉",
-        Status::Completed => "✓",
-        Status::Failed => "✗",
-    }
-}
-
-/// Truncate string to max chars, append "..." if truncated.
-fn truncate(s: &str, max: usize) -> String {
-    let first_line = s.lines().next().unwrap_or(s);
-    if first_line.len() <= max {
-        first_line.to_string()
-    } else {
-        let mut result: String = first_line.chars().take(max).collect();
-        result.push_str("...");
-        result
-    }
-}
-
-/// Current working directory as a String (fallback for `--dir`).
-fn default_working_dir() -> String {
-    std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| ".".to_string())
-}
-
-/// Expand ~ to home directory.
-fn expand_tilde(path: &str) -> String {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = dirs::home_dir()
-    {
-        return home.join(rest).to_string_lossy().to_string();
-    }
-    path.to_string()
-}
-
-/// Parameters for the add command — avoids too-many-arguments.
-struct AddParams {
-    prompt: String,
-    output: Option<String>,
-    priority: i32,
-    task_type: String,
-    model: String,
-    tools: Option<String>,
-    dir: Option<String>,
-    turns: Option<i32>,
-    depends: Option<String>,
-    context: Option<String>,
-    linear: Option<String>,
-    stage: Option<String>,
-}
-
-fn cmd_add(db: &Db, p: AddParams) -> Result<()> {
-    let id = db.next_task_id()?;
-    let max_turns = p.turns.unwrap_or_else(|| default_turns(&p.task_type));
-    let has_output = p.output.is_some();
-    let allowed_tools = p
-        .tools
-        .unwrap_or_else(|| runner::tools_for_type(&p.task_type, has_output));
-    let working_dir = expand_tilde(&p.dir.unwrap_or_else(default_working_dir));
-    let output_path = p.output.map(|o| expand_tilde(&o)).unwrap_or_default();
-    let depends_on: Vec<String> = p
-        .depends
-        .map(|d| d.split(',').map(|s| s.trim().to_string()).collect())
-        .unwrap_or_default();
-    let context_files: Vec<String> = p
-        .context
-        .map(|c| c.split(',').map(|s| s.trim().to_string()).collect())
-        .unwrap_or_default();
-    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-
-    let task = Task {
-        id: id.clone(),
-        status: Status::Pending,
-        priority: p.priority,
-        created_at: now,
-        started_at: None,
-        finished_at: None,
-        task_type: p.task_type.clone(),
-        prompt: p.prompt.clone(),
-        output_path: output_path.clone(),
-        working_dir,
-        model: p.model.clone(),
-        max_turns,
-        allowed_tools,
-        session_id: String::new(),
-        linear_issue_id: p.linear.unwrap_or_else(|| {
-            crate::worktree::extract_rig_id_prefix(&p.prompt).unwrap_or_default()
-        }),
-        linear_pushed: false,
-        pipeline_stage: p.stage.unwrap_or_default(),
-        depends_on: depends_on.clone(),
-        context_files: context_files.clone(),
-        repo_hash: runtime_repo_hash(),
-        estimate: 0,
-    };
-
-    db.insert_task(&task)?;
-
-    println!(
-        "added: {id} ({}, p{}, {}, {max_turns}t)",
-        p.task_type, p.priority, p.model
-    );
-    if !output_path.is_empty() {
-        println!("  output: {output_path}");
-    }
-    if !depends_on.is_empty() {
-        println!("  depends: {}", depends_on.join(","));
-    }
-    if !context_files.is_empty() {
-        println!("  context: {}", context_files.join(","));
-    }
-    println!("  prompt: {}...", truncate(&p.prompt, 80));
-
-    Ok(())
-}
-
-fn cmd_list(db: &Db, status_filter: Option<&str>) -> Result<()> {
-    let status = status_filter.map(str::parse::<Status>).transpose()?;
-
-    let tasks = db.list_tasks(status)?;
-
-    if tasks.is_empty() {
-        println!("\n  (no tasks)\n");
-        return Ok(());
-    }
-
-    let term_width = terminal_size::terminal_size()
-        .map(|(w, _)| w.0)
-        .unwrap_or(100);
-
-    println!();
-    let table = ui::task_list_table(&tasks, term_width);
-    println!("{table}");
-    println!();
-
-    Ok(())
-}
-
-fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<()> {
-    let term_width = terminal_size::terminal_size()
-        .map(|(w, _)| w.0 as usize)
-        .unwrap_or(80);
-    let use_compact = compact || term_width < 60;
-    let auto_compacted = !compact && term_width < 60;
-
-    if watch {
-        if auto_compacted {
-            eprintln!("tip: terminal width < 60, using compact mode (or pass -c)");
-        }
-
-        // Flicker-free watch: hide cursor, use cursor repositioning
-        ui::hide_cursor();
-        // Initial clear
-        print!("\x1b[2J\x1b[H");
-        std::io::Write::flush(&mut std::io::stdout()).ok();
-
-        let mut prev_lines = 0;
-
-        // Ensure cursor is restored on exit (Ctrl+C, normal return, or panic)
-        struct CursorGuard;
-        impl Drop for CursorGuard {
-            fn drop(&mut self) {
-                ui::show_cursor();
-            }
-        }
-        let _guard = CursorGuard;
-
-        // SIGINT handler: restore cursor before exiting
-        ctrlc::set_handler(move || {
-            ui::show_cursor();
-            std::process::exit(0);
-        })
-        .ok();
-
-        loop {
-            let running = db.list_tasks(Some(Status::Running))?;
-            let pending = db.list_tasks(Some(Status::Pending))?;
-            let completed = db.list_tasks(Some(Status::Completed))?;
-            let failed = db.list_tasks(Some(Status::Failed))?;
-
-            let content = if use_compact {
-                ui::render_compact_buf(&running, &pending, &completed, &failed, Some(interval))
-            } else {
-                ui::render_status_buf(&running, &pending, &completed, &failed, Some(interval))
-            };
-
-            ui::refresh_screen(&content, prev_lines);
-            prev_lines = content.lines().count();
-
-            std::thread::sleep(std::time::Duration::from_secs(interval));
-        }
-    } else if use_compact {
-        if auto_compacted {
-            eprintln!("tip: terminal width < 60, using compact mode (or pass -c)");
-        }
-        render_compact(db, None)?;
-    } else {
-        render_status(db)?;
-    }
-    Ok(())
-}
-
-fn parse_timestamp(s: &str) -> Option<chrono::NaiveDateTime> {
-    // DB stores as "YYYY-MM-DDTHH:MM:SS" or "YYYY-MM-DD HH:MM:SS"
-    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
-        .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
-        .ok()
-}
-
-fn format_duration_between(start: &str, end: &str) -> String {
-    let (Some(s), Some(e)) = (parse_timestamp(start), parse_timestamp(end)) else {
-        return String::new();
-    };
-    format_duration_secs((e - s).num_seconds().max(0))
-}
-
-fn format_elapsed_since(start: &str) -> String {
-    let Some(s) = parse_timestamp(start) else {
-        return String::new();
-    };
-    format_duration_secs((Local::now().naive_local() - s).num_seconds().max(0))
-}
-
-fn format_duration_secs(secs: i64) -> String {
-    let hours = secs / 3600;
-    let mins = (secs % 3600) / 60;
-    if hours > 0 {
-        format!("{hours}h {mins}m")
-    } else if mins > 0 {
-        format!("{mins}m")
-    } else {
-        "<1m".to_string()
-    }
-}
-
-fn format_task_line(task: &Task, time_str: &str) -> String {
-    let linear = if task.linear_issue_id.is_empty() {
-        String::new()
-    } else {
-        format!("  [{}]", task.linear_issue_id.cyan())
-    };
-    let preview = truncate_line(&task.prompt, 45);
-    format!(
-        "   {}  {}{}  {}  {}",
-        task.id,
-        task.task_type.blue(),
-        linear,
-        time_str.dimmed(),
-        preview,
-    )
-}
-
-fn render_status(db: &Db) -> Result<()> {
-    let running = db.list_tasks(Some(Status::Running))?;
-    let pending = db.list_tasks(Some(Status::Pending))?;
-    let completed = db.list_tasks(Some(Status::Completed))?;
-    let failed = db.list_tasks(Some(Status::Failed))?;
-
-    println!();
-
-    // Running
-    println!(
-        " {} {}",
-        "◉".green().bold(),
-        format!("running ({})", running.len()).green().bold()
-    );
-    for task in &running {
-        let elapsed = task
-            .started_at
-            .as_deref()
-            .map(format_elapsed_since)
-            .unwrap_or_default();
-        println!("{}", format_task_line(task, &elapsed));
-    }
-
-    // Pending
-    println!(
-        " {} {}",
-        "○".yellow(),
-        format!("pending ({})", pending.len()).yellow()
-    );
-    for task in pending.iter().take(5) {
-        let prio = format!("p{}", task.priority);
-        println!("{}", format_task_line(task, &prio));
-    }
-    if pending.len() > 5 {
-        println!("   {}", format!("... +{} more", pending.len() - 5).dimmed());
-    }
-
-    // Completed + Failed
-    println!(
-        " {} {}     {} {}",
-        "✓".dimmed(),
-        format!("completed ({})", completed.len()).dimmed(),
-        "✗".red(),
-        format!("failed ({})", failed.len()).red(),
-    );
-
-    // Show newest first: reverse order (DB returns oldest first typically)
-    let recent: Vec<&Task> = completed.iter().rev().take(10).collect();
-    let failed_recent: Vec<&Task> = failed.iter().rev().take(5).collect();
-
-    for task in &recent {
-        let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
-            (Some(s), Some(e)) => format_duration_between(s, e),
-            _ => String::new(),
-        };
-        println!("{}", format_task_line(task, &dur));
-    }
-
-    for task in &failed_recent {
-        let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
-            (Some(s), Some(e)) => format_duration_between(s, e),
-            _ => String::new(),
-        };
-        println!("{}", format_task_line(task, &dur));
-    }
-
-    println!();
-    Ok(())
-}
-
-fn compact_task_type(task_type: &str) -> &str {
-    match task_type {
-        "pipeline-engineer" => "engineer",
-        "pipeline-analyst" => "analyst",
-        "pipeline-reviewer" => "reviewer",
-        "pipeline-devops" => "devops",
-        other => other,
-    }
-}
-
-fn compact_task_id(id: &str) -> &str {
-    // "20260312-035" → "035" (suffix after the last dash)
-    id.rsplit('-').next().unwrap_or(id)
-}
-
-fn compact_linear_label(linear_issue_id: &str) -> String {
-    if linear_issue_id.is_empty() {
-        String::new()
-    } else {
-        format!(" [{linear_issue_id}]")
-    }
-}
-
-fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
-    let running = db.list_tasks(Some(Status::Running))?;
-    let pending = db.list_tasks(Some(Status::Pending))?;
-    let completed = db.list_tasks(Some(Status::Completed))?;
-    let failed = db.list_tasks(Some(Status::Failed))?;
-
-    let sep = "───────────────────────────────────";
-
-    println!(
-        " werma {} {} running  {} {} pending",
-        "●".green().bold(),
-        running.len().to_string().green().bold(),
-        "○".yellow(),
-        pending.len().to_string().yellow(),
-    );
-    println!(" {sep}");
-
-    for task in &running {
-        let elapsed = task
-            .started_at
-            .as_deref()
-            .map(format_elapsed_since)
-            .unwrap_or_default();
-        let linear = compact_linear_label(&task.linear_issue_id);
-        println!(
-            " {} {} {}{} {}",
-            "●".green().bold(),
-            compact_task_id(&task.id),
-            compact_task_type(&task.task_type).blue(),
-            linear.cyan(),
-            elapsed.dimmed(),
-        );
-    }
-
-    for task in pending.iter().take(3) {
-        let linear = compact_linear_label(&task.linear_issue_id);
-        println!(
-            " {} {} {}{}",
-            "○".yellow(),
-            compact_task_id(&task.id),
-            compact_task_type(&task.task_type).blue(),
-            linear.cyan(),
-        );
-    }
-    if pending.len() > 3 {
-        println!(" {}", format!("  +{} more", pending.len() - 3).dimmed());
-    }
-
-    // Only show separator if there were running or pending tasks above
-    if !running.is_empty() || !pending.is_empty() {
-        println!(" {sep}");
-    }
-
-    // Recent completed (last 5, newest first)
-    let recent: Vec<&Task> = completed.iter().rev().take(5).collect();
-    for task in &recent {
-        let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
-            (Some(s), Some(e)) => format_duration_between(s, e),
-            _ => String::new(),
-        };
-        let linear = compact_linear_label(&task.linear_issue_id);
-        println!(
-            " {} {} {}{} {}",
-            "✓".dimmed(),
-            compact_task_id(&task.id),
-            compact_task_type(&task.task_type),
-            linear.dimmed(),
-            dur.dimmed(),
-        );
-    }
-
-    // Recent failed (last 5, newest first)
-    let failed_recent: Vec<&Task> = failed.iter().rev().take(5).collect();
-    for task in &failed_recent {
-        let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
-            (Some(s), Some(e)) => format_duration_between(s, e),
-            _ => String::new(),
-        };
-        let linear = compact_linear_label(&task.linear_issue_id);
-        println!(
-            " {} {} {}{} {}",
-            "✗".red(),
-            compact_task_id(&task.id),
-            compact_task_type(&task.task_type),
-            linear.dimmed(),
-            dur.dimmed(),
-        );
-    }
-
-    println!(" {sep}");
-
-    let refresh_str = if let Some(secs) = interval {
-        format!("  ↻ {secs}s")
-    } else {
-        String::new()
-    };
-    println!(
-        " {} done  {} fail{}",
-        completed.len().to_string().dimmed(),
-        failed.len().to_string().red(),
-        refresh_str.dimmed(),
-    );
-
-    Ok(())
-}
-
-fn cmd_view(db: &Db, id: &str) -> Result<()> {
-    let task = db.task(id)?.context(format!("task not found: {id}"))?;
-
-    println!();
-    println!("  id:          {}", task.id);
-    println!(
-        "  status:      {} {}",
-        status_icon(task.status),
-        task.status
-    );
-    println!("  type:        {}", task.task_type);
-    println!("  priority:    {}", task.priority);
-    println!(
-        "  model:       {} ({})",
-        task.model,
-        model_to_id(&task.model)
-    );
-    println!("  max_turns:   {}", task.max_turns);
-    println!("  working_dir: {}", task.working_dir);
-    println!("  created_at:  {}", task.created_at);
-    if let Some(ref s) = task.started_at {
-        println!("  started_at:  {s}");
-    }
-    if let Some(ref s) = task.finished_at {
-        println!("  finished_at: {s}");
-    }
-    if !task.output_path.is_empty() {
-        println!("  output_path: {}", task.output_path);
-    }
-    if !task.session_id.is_empty() {
-        println!("  session_id:  {}", task.session_id);
-    }
-    if !task.linear_issue_id.is_empty() {
-        println!("  linear:      {}", task.linear_issue_id);
-    }
-    if !task.pipeline_stage.is_empty() {
-        println!("  stage:       {}", task.pipeline_stage);
-    }
-    if !task.depends_on.is_empty() {
-        println!("  depends_on:  {}", task.depends_on.join(", "));
-    }
-    if !task.context_files.is_empty() {
-        println!("  context:     {}", task.context_files.join(", "));
-    }
-    if !task.repo_hash.is_empty() {
-        println!("  repo_hash:   {}", task.repo_hash);
-    }
-    if !task.allowed_tools.is_empty() {
-        println!("  tools:       {}", task.allowed_tools);
-    }
-    println!();
-    println!("  prompt:");
-    println!("  {}", task.prompt);
-    println!();
-
-    // Check custom output path first, then fall back to default log output
-    let output_shown = if !task.output_path.is_empty() {
-        let path = Path::new(&task.output_path);
-        if path.exists() {
-            println!("  --- output ---");
-            let content = std::fs::read_to_string(path)?;
-            println!("{content}");
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    if !output_shown {
-        let home = dirs::home_dir().context("cannot determine home directory")?;
-        let log_output = home
-            .join(".werma/logs")
-            .join(format!("{}-output.md", task.id));
-        if log_output.exists() {
-            println!("  --- output ---");
-            let content = std::fs::read_to_string(&log_output)?;
-            println!("{content}");
-        }
-    }
-
-    Ok(())
-}
-
-fn cmd_retry(db: &Db, id: &str) -> Result<()> {
-    let _task = db.task(id)?.context(format!("task not found: {id}"))?;
-
-    db.set_task_status(id, Status::Pending)?;
-    db.update_task_field(id, "started_at", "")?;
-    db.update_task_field(id, "finished_at", "")?;
-
-    println!("retry: {id} -> pending");
-    Ok(())
-}
-
-fn cmd_kill(db: &Db, id: &str) -> Result<()> {
-    let _task = db.task(id)?.context(format!("task not found: {id}"))?;
-
-    let session_name = format!("werma-{id}");
-    let result = std::process::Command::new("tmux")
-        .args(["kill-session", "-t", &session_name])
-        .output();
-
-    match result {
-        Ok(out) if out.status.success() => println!("killed tmux: {session_name}"),
-        _ => println!("tmux session not found: {session_name}"),
-    }
-
-    db.set_task_status(id, Status::Failed)?;
-    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    db.update_task_field(id, "finished_at", &now)?;
-
-    println!("status -> failed: {id}");
-    Ok(())
-}
-
-fn cmd_complete(db: &Db, id: &str, session: Option<&str>, result_file: Option<&str>) -> Result<()> {
-    let task = db.task(id)?.context(format!("task not found: {id}"))?;
-
-    // Idempotency: skip if already in terminal state
-    if task.status == Status::Completed || task.status == Status::Failed {
-        println!("{id} already in terminal state, skipping");
-        return Ok(());
-    }
-
-    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    db.set_task_status(id, Status::Completed)?;
-    db.update_task_field(id, "finished_at", &now)?;
-    if let Some(sid) = session {
-        db.update_task_field(id, "session_id", sid)?;
-    }
-
-    db.increment_usage(&task.model)?;
-
-    // Read result text for pipeline callback
-    let result_text = match result_file {
-        Some(path) => std::fs::read_to_string(path)
-            .inspect_err(|e| eprintln!("warn: failed to read result_file {path}: {e}"))
-            .unwrap_or_default(),
-        None => String::new(),
-    };
-
-    // Validate non-empty output: if empty, mark as failed instead of completed
-    if result_text.trim().is_empty() {
-        eprintln!("warning: empty output for task {id} — marking as failed");
-        db.set_task_status(id, Status::Failed)?;
-        // Log to daemon.log for visibility
-        let werma_dir = dirs::home_dir()
-            .map(|h| h.join(".werma"))
-            .unwrap_or_default();
-        let log_path = werma_dir.join("logs/daemon.log");
-        let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
-        let line = format!(
-            "{ts}: EMPTY OUTPUT — task {id} stage={} marked failed (result_file: {})\n",
-            task.pipeline_stage,
-            result_file.unwrap_or("none"),
-        );
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
-
-        let label = notify::format_notify_label(id, &task.task_type, &task.linear_issue_id);
-        notify::notify_macos(
-            "werma",
-            &format!("{label} EMPTY OUTPUT — marked failed"),
-            "Basso",
-        );
-        notify::notify_slack(
-            "#werma",
-            &format!(":warning: {label} EMPTY OUTPUT — marked failed"),
-        );
-
-        println!("failed (empty output): {id}");
-        return Ok(());
-    }
-
-    // Pipeline callback: trigger stage transitions.
-    // On success, mark linear_pushed=true so daemon doesn't re-process.
-    if !task.pipeline_stage.is_empty() && !task.linear_issue_id.is_empty() {
-        match pipeline::callback(
-            db,
-            id,
-            &task.pipeline_stage,
-            &result_text,
-            &task.linear_issue_id,
-            &task.working_dir,
-        ) {
-            Ok(()) => {
-                db.set_linear_pushed(id, true)?;
-            }
-            Err(e) => {
-                // Log to both stderr and daemon.log for visibility.
-                // Daemon will retry via process_completed_pipeline_tasks.
-                eprintln!("pipeline callback error for {id}: {e}");
-                let werma_dir = dirs::home_dir()
-                    .map(|h| h.join(".werma"))
-                    .unwrap_or_default();
-                let log_path = werma_dir.join("logs/daemon.log");
-                let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
-                let line = format!(
-                    "{ts}: cmd_complete callback failed: {id} stage={} error={e}\n",
-                    task.pipeline_stage
-                );
-                let _ = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&log_path)
-                    .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
-            }
-        }
-    }
-
-    // Research completion: curator follow-up + Linear update
-    if task.task_type == "research"
-        && !task.linear_issue_id.is_empty()
-        && let Err(e) = pipeline::handle_research_completion(db, &task, &result_text)
-    {
-        eprintln!("research completion error for {id}: {e}");
-    }
-
-    // Notifications
-    let label = notify::format_notify_label(id, &task.task_type, &task.linear_issue_id);
-    notify::notify_macos("werma", &format!("{label} done"), "Glass");
-    notify::notify_slack("#werma", &format!(":white_check_mark: {label} done"));
-
-    println!("completed: {id}");
-    Ok(())
-}
-
-fn cmd_fail(db: &Db, id: &str) -> Result<()> {
-    let task = db.task(id)?.context(format!("task not found: {id}"))?;
-
-    // Idempotency: skip if already in terminal state
-    if task.status == Status::Completed || task.status == Status::Failed {
-        println!("{id} already in terminal state, skipping");
-        return Ok(());
-    }
-
-    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    db.set_task_status(id, Status::Failed)?;
-    db.update_task_field(id, "finished_at", &now)?;
-
-    // Post failure comment to Linear for pipeline tasks
-    if !task.pipeline_stage.is_empty()
-        && !task.linear_issue_id.is_empty()
-        && let Ok(linear) = linear::LinearClient::new()
-    {
-        let _ = linear.comment(
-            &task.linear_issue_id,
-            &format!(
-                "**Task `{id}` FAILED** (stage: {}). Manual intervention needed.",
-                task.pipeline_stage,
-            ),
-        );
-    }
-
-    // Notifications
-    let label = notify::format_notify_label(id, &task.task_type, &task.linear_issue_id);
-    notify::notify_macos("werma", &format!("{label} FAILED"), "Basso");
-    notify::notify_slack("#werma", &format!(":x: {label} FAILED"));
-
-    println!("failed: {id}");
-    Ok(())
-}
-
-fn cmd_clean(db: &Db) -> Result<()> {
-    let tasks = db.clean_completed()?;
-
-    if tasks.is_empty() {
-        println!("nothing to clean");
-        return Ok(());
-    }
-
-    let dir = werma_dir()?.join("completed");
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let archive_path = dir.join(format!("{today}.json"));
-
-    let mut existing: Vec<serde_json::Value> = if archive_path.exists() {
-        let content = std::fs::read_to_string(&archive_path)?;
-        serde_json::from_str(&content).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    for task in &tasks {
-        let val = serde_json::to_value(task)?;
-        existing.push(val);
-    }
-
-    let json = serde_json::to_string_pretty(&existing)?;
-    std::fs::write(&archive_path, json)?;
-
-    println!(
-        "archived: {} tasks -> {}",
-        tasks.len(),
-        archive_path.display()
-    );
-    Ok(())
-}
-
-fn cmd_log(id: Option<String>) -> Result<()> {
-    let logs_dir = werma_dir()?.join("logs");
-
-    if let Some(task_id) = id {
-        let log_path = logs_dir.join(format!("{task_id}.log"));
-        if log_path.exists() {
-            let content = std::fs::read_to_string(&log_path)?;
-            print!("{content}");
-        } else {
-            println!("log not found: {task_id}");
-        }
-    } else {
-        let mut entries: Vec<_> = std::fs::read_dir(&logs_dir)?
-            .filter_map(std::result::Result::ok)
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
-            .collect();
-
-        entries.sort_by_key(|e| {
-            std::cmp::Reverse(
-                e.metadata()
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
-            )
-        });
-
-        if let Some(entry) = entries.first() {
-            let content = std::fs::read_to_string(entry.path())?;
-            print!("{content}");
-        } else {
-            println!("no logs found");
-        }
-    }
-
-    Ok(())
-}
-
-fn cmd_continue(db: &Db, id: &str, prompt: Option<String>) -> Result<()> {
-    let task = db.task(id)?.context(format!("task not found: {id}"))?;
-
-    if task.session_id.is_empty() {
-        bail!("no session_id for task {id}");
-    }
-
-    let follow_up = prompt.unwrap_or_else(|| "Continue the task.".to_string());
-    let model_id = model_to_id(&task.model);
-    let session_name = format!("werma-{id}-cont");
-    let wdir = werma_dir()?;
-    let logs_dir = wdir.join("logs");
-    let log_file = logs_dir.join(format!("{id}.log"));
-    let prompt_file = logs_dir.join(format!("{id}-cont-prompt.txt"));
-    let exec_script = logs_dir.join(format!("{id}-cont-exec.sh"));
-
-    // Write prompt to file — never interpolate into shell
-    std::fs::write(&prompt_file, &follow_up)?;
-
-    let tools = if task.allowed_tools.is_empty() {
-        runner::tools_for_type(&task.task_type, !task.output_path.is_empty())
-    } else {
-        task.allowed_tools.clone()
-    };
-
-    let working_dir = expand_tilde(&task.working_dir);
-
-    // Resolve worktree path for write tasks (same logic as runner::run_task)
-    let effective_dir = if worktree::needs_worktree(&task.task_type) {
-        let branch = worktree::generate_branch_name(&task);
-        let dir_name = branch.replace('/', "--");
-        let wt_path = std::path::PathBuf::from(&working_dir)
-            .join(".trees")
-            .join(&dir_name);
-        if wt_path.exists() {
-            wt_path.to_string_lossy().to_string()
-        } else {
-            working_dir.clone()
-        }
-    } else {
-        working_dir.clone()
-    };
-
-    // Build human-readable label for notification
-    let notify_label = notify::format_notify_label(id, &task.task_type, &task.linear_issue_id);
-
-    // Generate safe exec script
-    let script = format!(
-        r##"#!/bin/bash
-set -euo pipefail
-unset CLAUDECODE
-cd '{effective_dir}'
-PROMPT=$(cat '{prompt_file}')
-claude -p "$PROMPT" \
-    --resume '{session_id}' \
-    --allowedTools '{tools}' \
-    --model {model_id} \
-    2>> '{log_file}'
-osascript -e 'display notification "{notify_label} ↻" with title "werma" sound name "Glass"' 2>/dev/null || true
-"##,
-        effective_dir = effective_dir,
-        prompt_file = prompt_file.display(),
-        session_id = task.session_id.replace('\'', "'\\''"),
-        tools = tools.replace('\'', "'\\''"),
-        model_id = model_id,
-        log_file = log_file.display(),
-        notify_label = notify_label.replace('"', "\\\""),
-    );
-
-    std::fs::write(&exec_script, &script)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&exec_script, std::fs::Permissions::from_mode(0o755))?;
-    }
-
-    let result = std::process::Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &session_name,
-            &format!("bash {}", exec_script.display()),
-        ])
-        .output();
-
-    match result {
-        Ok(out) if out.status.success() => {
-            println!("continue: {id} -> tmux: {session_name}");
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            bail!("tmux failed: {stderr}");
-        }
-        Err(e) => bail!("failed to spawn tmux: {e}"),
-    }
-
-    Ok(())
-}
-
-/// Parameters for sched add — avoids too-many-arguments.
-struct SchedAddParams {
-    id: String,
-    cron: String,
-    prompt: String,
-    task_type: String,
-    model: String,
-    output: Option<String>,
-    context: Option<String>,
-    dir: Option<String>,
-    turns: Option<i32>,
-}
-
-fn cmd_sched_add(db: &Db, p: SchedAddParams) -> Result<()> {
-    let working_dir = expand_tilde(&p.dir.unwrap_or_else(default_working_dir));
-    let output_path = p.output.map(|o| expand_tilde(&o)).unwrap_or_default();
-    let max_turns = p.turns.unwrap_or(0);
-    let context_files: Vec<String> = p
-        .context
-        .map(|c| c.split(',').map(|s| s.trim().to_string()).collect())
-        .unwrap_or_default();
-
-    let sched = Schedule {
-        id: p.id.clone(),
-        cron_expr: p.cron.clone(),
-        prompt: p.prompt.clone(),
-        schedule_type: p.task_type.clone(),
-        model: p.model.clone(),
-        output_path: output_path.clone(),
-        working_dir: working_dir.clone(),
-        max_turns,
-        enabled: true,
-        context_files: context_files.clone(),
-        last_enqueued: String::new(),
-    };
-
-    db.insert_schedule(&sched)?;
-
-    println!("scheduled: {}", p.id);
-    println!("  cron: {}", p.cron);
-    println!("  type: {}, model: {}", p.task_type, p.model);
-    println!("  dir: {working_dir}");
-    if !output_path.is_empty() {
-        println!("  output: {output_path}");
-    }
-    if !context_files.is_empty() {
-        println!("  context: {}", context_files.join(","));
-    }
-    if max_turns > 0 {
-        println!("  turns: {max_turns}");
-    }
-    println!("  prompt: {}...", truncate(&p.prompt, 70));
-
-    Ok(())
-}
-
-fn cmd_sched_list(db: &Db) -> Result<()> {
-    let schedules = db.list_schedules()?;
-
-    println!();
-    println!(" Schedules:");
-    println!();
-
-    if schedules.is_empty() {
-        println!("  (empty)");
-    } else {
-        let term_width = terminal_size::terminal_size()
-            .map(|(w, _)| w.0)
-            .unwrap_or(100);
-        let table = ui::schedule_list_table(&schedules, term_width);
-        println!("{table}");
-
-        // Show last_enqueued for schedules that have it
-        for s in &schedules {
-            if !s.last_enqueued.is_empty() {
-                println!("    last: {}", s.last_enqueued);
-            }
-        }
-    }
-    println!();
-
-    Ok(())
-}
-
-fn cmd_sched_trigger(db: &Db, id: &str) -> Result<()> {
-    let sched = db
-        .schedule(id)?
-        .context(format!("schedule not found: {id}"))?;
-
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let dow = chrono::Local::now().format("%A").to_string().to_lowercase();
-
-    let prompt = sched
-        .prompt
-        .replace("{date}", &today)
-        .replace("{dow}", &dow);
-
-    let output = if sched.output_path.is_empty() {
-        None
-    } else {
-        Some(sched.output_path.replace("{date}", &today))
-    };
-
-    let turns = if sched.max_turns > 0 {
-        Some(sched.max_turns)
-    } else {
-        None
-    };
-
-    let context = if sched.context_files.is_empty() {
-        None
-    } else {
-        Some(sched.context_files.join(","))
-    };
-
-    cmd_add(
-        db,
-        AddParams {
-            prompt,
-            output,
-            priority: 2,
-            task_type: sched.schedule_type,
-            model: sched.model,
-            tools: None,
-            dir: Some(sched.working_dir),
-            turns,
-            depends: None,
-            context,
-            linear: None,
-            stage: None,
-        },
-    )?;
-
-    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M").to_string();
-    db.set_schedule_last_enqueued(id, &now)?;
-
-    // Run the newly enqueued task immediately.
-    let dir = werma_dir()?;
-    match runner::run_next(db, &dir)? {
-        Some(task_id) => println!("trigger: launched {task_id}"),
-        None => println!("trigger: enqueued (no launchable tasks)"),
-    }
-
-    Ok(())
-}
-
-/// Parse review target into a PR number (if applicable) and a descriptive label.
-fn parse_review_target(target: &str) -> (Option<u32>, String) {
-    // #123 format
-    if let Some(num_str) = target.strip_prefix('#')
-        && let Ok(n) = num_str.parse::<u32>()
-    {
-        return (Some(n), format!("PR #{n}"));
-    }
-    // Plain number
-    if let Ok(n) = target.parse::<u32>() {
-        return (Some(n), format!("PR #{n}"));
-    }
-    // URL containing /pull/123
-    if target.contains("/pull/")
-        && let Some(num_str) = target.rsplit('/').next()
-        && let Ok(n) = num_str.parse::<u32>()
-    {
-        return (Some(n), format!("PR #{n}"));
-    }
-    // Branch name
-    (None, format!("branch {target}"))
-}
-
-fn cmd_review(
-    db: &Db,
-    werma_dir: &std::path::Path,
-    target: Option<&str>,
-    dir: Option<&str>,
-    force: bool,
-) -> Result<()> {
-    let working_dir = match dir {
-        Some(d) => expand_tilde(d),
-        None => default_working_dir(),
-    };
-
-    let (pr_number, label) = match target {
-        Some(t) => parse_review_target(t),
-        None => (None, "current changes".to_string()),
-    };
-
-    // Dedup: block if a review for this target is already running/pending
-    if !force && db.has_active_review_task(&working_dir, &label)? {
-        println!("review already active for {label} — skipping");
-        println!("  (use --force to create another)");
-        return Ok(());
-    }
-
-    // Info: mention if this PR was previously reviewed (completed)
-    if let Some(n) = pr_number {
-        let pr_key = format!("{working_dir}:{n}");
-        if db.is_pr_reviewed(&pr_key)? {
-            println!("note: {label} was previously reviewed — creating new review");
-        }
-    }
-
-    // Capture diff as context file
-    let logs_dir = werma_dir.join("logs");
-    std::fs::create_dir_all(&logs_dir)?;
-
-    let task_id = db.next_task_id()?;
-    let diff_path = logs_dir.join(format!("{task_id}-review-diff.patch"));
-
-    let diff_cmd = if let Some(n) = pr_number {
-        format!("cd '{working_dir}' && gh pr diff {n}")
-    } else if let Some(t) = target {
-        format!("cd '{working_dir}' && git diff main...{t}")
-    } else {
-        format!("cd '{working_dir}' && git diff main...HEAD")
-    };
-
-    let diff_output = std::process::Command::new("bash")
-        .args(["-c", &diff_cmd])
-        .output();
-
-    match diff_output {
-        Ok(out) if out.status.success() => {
-            let diff = String::from_utf8_lossy(&out.stdout);
-            if diff.trim().is_empty() {
-                bail!("no diff found for {label}");
-            }
-            std::fs::write(&diff_path, diff.as_bytes())?;
-            println!("captured diff: {} lines", diff.lines().count());
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            bail!("failed to get diff for {label}: {stderr}");
-        }
-        Err(e) => bail!("failed to run diff command: {e}"),
-    }
-
-    // Build review prompt (gh_post is injected into the LLM prompt, not executed directly)
-    let gh_post = if let Some(n) = pr_number {
-        format!(
-            "6. **Post review as PR comment:**\n\
-             ```\n\
-             gh pr comment {n} --body \"<your review markdown>\"\n\
-             ```\n\
-             Include all findings, verdict, and summary in the comment.\n"
-        )
-    } else {
-        String::new()
-    };
-    let prompt = format!(
-        "# Code Review: {label}\n\n\
-         Review the code diff provided in the context file.\n\n\
-         ## Review Protocol\n\
-         1. Read the diff carefully\n\
-         2. Check for bugs, security issues, missing tests, style violations\n\
-         3. Classify each finding as **blocker** or **nit**\n\
-         4. APPROVE if no blockers, REJECT only on blockers\n\
-         5. Read the full source files for important findings — the diff alone may lack context\n\
-         {gh_post}\
-         ## Output Format\n\
-         - Each finding: `file:line — [blocker|nit] description`\n\
-         - End with: REVIEW_VERDICT=APPROVED or REVIEW_VERDICT=REJECTED\n\
-         - If rejected, clearly explain what must change"
-    );
-
-    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    let allowed_tools = runner::tools_for_type("pipeline-reviewer", false);
-
-    let task = crate::models::Task {
-        id: task_id.clone(),
-        status: crate::models::Status::Pending,
-        priority: 1,
-        created_at: now,
-        started_at: None,
-        finished_at: None,
-        task_type: "pipeline-reviewer".to_string(),
-        prompt,
-        output_path: String::new(),
-        working_dir,
-        model: "sonnet".to_string(),
-        max_turns: crate::default_turns("pipeline-reviewer"),
-        allowed_tools,
-        session_id: String::new(),
-        linear_issue_id: String::new(),
-        linear_pushed: false,
-        pipeline_stage: String::new(),
-        depends_on: vec![],
-        context_files: vec![diff_path.to_string_lossy().to_string()],
-        repo_hash: crate::runtime_repo_hash(),
-        estimate: 0,
-    };
-
-    db.insert_task(&task)?;
-
-    // Mark PR as reviewed for dedup
-    if let Some(n) = pr_number {
-        let pr_key = format!("{}:{}", task.working_dir, n);
-        db.mark_pr_reviewed(&pr_key)?;
-    }
-
-    // Launch immediately
-    match runner::run_task(db, &task, werma_dir) {
-        Ok(Some(id)) => println!("review launched: {id} ({label})"),
-        Ok(None) => println!("review queued: {task_id} ({label})"),
-        Err(e) => eprintln!("review launch failed: {e} (task {task_id} is queued)"),
-    }
-
-    Ok(())
-}
-
-fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<()> {
-    let db = open_db()?;
-    let linear = linear::LinearClient::new()?;
-    let config = pipeline::loader::load_default()?;
-
-    // Detect if a stage name was passed as a positional arg (e.g. `werma pipeline run RIG-178 analyst`).
-    // The CLI defines `issues` as a greedy Vec<String>, so "analyst" gets consumed as an identifier.
-    // Filter it out and use it as the effective stage — but only when --stage wasn't explicitly set.
-    let explicit_stage = stage.is_some();
-    let mut effective_stage = stage.unwrap_or("analyst").to_string();
-    let mut filtered: Vec<&str> = Vec::new();
-    for id in identifiers {
-        if config.stage(id).is_some() {
-            if explicit_stage {
-                eprintln!(
-                    "warning: ignoring positional stage '{id}' because --stage '{effective_stage}' was explicitly set"
-                );
-            } else {
-                effective_stage = id.clone();
-            }
-        } else {
-            filtered.push(id);
-        }
-    }
-
-    // Validate stage exists
-    if config.stage(&effective_stage).is_none() {
-        let available: Vec<_> = config.stages.keys().collect();
-        bail!(
-            "unknown stage '{}'. Available: {}",
-            effective_stage,
-            available
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-
-    if filtered.is_empty() {
-        bail!("no issue identifiers provided. Usage: werma pipeline run RIG-XX [--stage <stage>]");
-    }
-
-    let mut created = 0;
-    let mut skipped = 0;
-
-    for identifier in &filtered {
-        // Fetch issue from Linear
-        let (_issue_id, ident, title, description, labels) =
-            match linear.get_issue_by_identifier(identifier) {
-                Ok(data) => data,
-                Err(e) => {
-                    eprintln!("  ! {identifier}: {e}");
-                    skipped += 1;
-                    continue;
-                }
-            };
-
-        // Skip if active task already exists for this issue + stage
-        let existing = db.tasks_by_linear_issue(&ident, Some(&effective_stage), true)?;
-        if !existing.is_empty() {
-            let active_id = &existing[0].id;
-            eprintln!("  ~ {ident} already has active {effective_stage} task ({active_id})");
-            skipped += 1;
-            continue;
-        }
-
-        // Note: task is always created in pending state regardless of max_concurrent.
-        // The daemon's drain_queue respects concurrency limits when launching tasks.
-
-        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        let working_dir = linear::infer_working_dir(&title, &label_refs);
-        if linear::validate_working_dir(&working_dir).is_none() {
-            eprintln!("  ! skipping {ident} [{title}]: working dir '{working_dir}' does not exist");
-            skipped += 1;
-            continue;
-        }
-        let estimate = 0; // Will be set by analyst if applicable
-
-        let task_id = pipeline::create_initial_stage_task(
-            &db,
-            &config,
-            &effective_stage,
-            &ident,
-            &title,
-            &description,
-            &working_dir,
-            estimate,
-        )?;
-
-        println!("  + {task_id} [{ident}] stage={effective_stage}");
-        created += 1;
-    }
-
-    println!("\nPipeline run: {created} created, {skipped} skipped");
-    Ok(())
-}
-
 fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
 
     match cli.command {
-        cli::Commands::Version => {
-            println!("werma {}", version_string());
-        }
+        cli::Commands::Version => commands::misc::cmd_version(),
 
         cli::Commands::Add {
             prompt,
@@ -1428,9 +102,9 @@ fn main() -> anyhow::Result<()> {
             stage,
         } => {
             let db = open_db()?;
-            cmd_add(
+            commands::task::cmd_add(
                 &db,
-                AddParams {
+                commands::task::AddParams {
                     prompt,
                     output,
                     priority,
@@ -1449,7 +123,7 @@ fn main() -> anyhow::Result<()> {
 
         cli::Commands::List { status } => {
             let db = open_db()?;
-            cmd_list(&db, status.as_deref())?;
+            commands::task::cmd_list(&db, status.as_deref())?;
         }
 
         cli::Commands::Status {
@@ -1458,22 +132,22 @@ fn main() -> anyhow::Result<()> {
             interval,
         } => {
             let db = open_db()?;
-            cmd_status(&db, watch, compact, interval)?;
+            commands::task::cmd_status(&db, watch, compact, interval)?;
         }
 
         cli::Commands::View { id } => {
             let db = open_db()?;
-            cmd_view(&db, &id)?;
+            commands::task::cmd_view(&db, &id)?;
         }
 
         cli::Commands::Retry { id } => {
             let db = open_db()?;
-            cmd_retry(&db, &id)?;
+            commands::task::cmd_retry(&db, &id)?;
         }
 
         cli::Commands::Kill { id } => {
             let db = open_db()?;
-            cmd_kill(&db, &id)?;
+            commands::task::cmd_kill(&db, &id)?;
         }
 
         cli::Commands::Complete {
@@ -1482,41 +156,36 @@ fn main() -> anyhow::Result<()> {
             result_file,
         } => {
             let db = open_db()?;
-            cmd_complete(&db, &id, session.as_deref(), result_file.as_deref())?;
+            commands::task::cmd_complete(&db, &id, session.as_deref(), result_file.as_deref())?;
         }
 
         cli::Commands::Fail { id } => {
             let db = open_db()?;
-            cmd_fail(&db, &id)?;
+            commands::task::cmd_fail(&db, &id)?;
         }
 
         cli::Commands::Clean => {
             let db = open_db()?;
-            cmd_clean(&db)?;
+            commands::task::cmd_clean(&db)?;
         }
 
         cli::Commands::Log { id } => {
-            cmd_log(id)?;
+            commands::task::cmd_log(id)?;
         }
 
         cli::Commands::Continue { id, prompt } => {
             let db = open_db()?;
-            cmd_continue(&db, &id, prompt)?;
+            commands::task::cmd_continue(&db, &id, prompt)?;
         }
 
         cli::Commands::Run => {
             let db = open_db()?;
-            let dir = werma_dir()?;
-            match runner::run_next(&db, &dir)? {
-                Some(id) => println!("launched: {id}"),
-                None => println!("no launchable tasks (pending with resolved deps)"),
-            }
+            commands::task::cmd_run(&db)?;
         }
 
         cli::Commands::RunAll => {
             let db = open_db()?;
-            let dir = werma_dir()?;
-            runner::run_all(&db, &dir)?;
+            commands::task::cmd_run_all(&db)?;
         }
 
         cli::Commands::Sched { action } => {
@@ -1533,9 +202,9 @@ fn main() -> anyhow::Result<()> {
                     dir,
                     turns,
                 } => {
-                    cmd_sched_add(
+                    commands::schedule::cmd_sched_add(
                         &db,
-                        SchedAddParams {
+                        commands::schedule::SchedAddParams {
                             id,
                             cron,
                             prompt,
@@ -1549,7 +218,7 @@ fn main() -> anyhow::Result<()> {
                     )?;
                 }
                 cli::SchedAction::List => {
-                    cmd_sched_list(&db)?;
+                    commands::schedule::cmd_sched_list(&db)?;
                 }
                 cli::SchedAction::Rm { id } => {
                     db.delete_schedule(&id)?;
@@ -1564,89 +233,61 @@ fn main() -> anyhow::Result<()> {
                     println!("disabled: {id}");
                 }
                 cli::SchedAction::Trigger { id } => {
-                    cmd_sched_trigger(&db, &id)?;
+                    commands::schedule::cmd_sched_trigger(&db, &id)?;
                 }
             }
         }
 
         cli::Commands::Daemon { action } => match action {
-            Some(cli::DaemonAction::Install) => {
-                daemon::install()?;
-            }
-            Some(cli::DaemonAction::Uninstall) => {
-                daemon::uninstall()?;
-            }
-            None => {
-                let dir = werma_dir()?;
-                daemon::run(&dir)?;
-            }
+            Some(cli::DaemonAction::Install) => commands::daemon_cmd::cmd_daemon_install()?,
+            Some(cli::DaemonAction::Uninstall) => commands::daemon_cmd::cmd_daemon_uninstall()?,
+            None => commands::daemon_cmd::cmd_daemon_run()?,
         },
 
-        cli::Commands::Linear { action } => match action {
-            cli::LinearAction::Setup => {
-                let client = linear::LinearClient::new()?;
-                ui::with_spinner("Discovering Linear workspace...", || client.setup())?;
+        cli::Commands::Linear { action } => {
+            let db = open_db()?;
+            match action {
+                cli::LinearAction::Setup => commands::linear_cmd::cmd_linear_setup()?,
+                cli::LinearAction::Sync => commands::linear_cmd::cmd_linear_sync(&db)?,
+                cli::LinearAction::Push { id } => commands::linear_cmd::cmd_linear_push(&db, &id)?,
+                cli::LinearAction::PushAll => commands::linear_cmd::cmd_linear_push_all(&db)?,
             }
-            cli::LinearAction::Sync => {
-                let db = open_db()?;
-                let client = linear::LinearClient::new()?;
-                ui::with_spinner("Syncing issues from Linear...", || client.sync(&db))?;
-            }
-            cli::LinearAction::Push { id } => {
-                let db = open_db()?;
-                let client = linear::LinearClient::new()?;
-                client.push(&db, &id)?;
-            }
-            cli::LinearAction::PushAll => {
-                let db = open_db()?;
-                let client = linear::LinearClient::new()?;
-                client.push_all(&db)?;
-            }
-        },
-
-        cli::Commands::Pipeline { action } => match action {
-            cli::PipelineAction::Poll => {
-                let db = open_db()?;
-                ui::with_spinner("Polling Linear statuses...", || pipeline::poll(&db))?;
-            }
-            cli::PipelineAction::Status => {
-                let db = open_db()?;
-                ui::with_spinner("Fetching pipeline status...", || pipeline::status(&db))?;
-            }
-            cli::PipelineAction::Show { stage } => {
-                pipeline::cmd_show(stage.as_deref())?;
-            }
-            cli::PipelineAction::Validate => {
-                pipeline::cmd_validate()?;
-            }
-            cli::PipelineAction::Eject => {
-                pipeline::cmd_eject()?;
-            }
-            cli::PipelineAction::Run { issues, stage } => {
-                cmd_pipeline_run(&issues, stage.as_deref())?;
-            }
-        },
-
-        cli::Commands::Update => {
-            update::update()?;
         }
+
+        cli::Commands::Pipeline { action } => {
+            let db = open_db()?;
+            match action {
+                cli::PipelineAction::Poll => commands::pipeline_cmd::cmd_pipeline_poll(&db)?,
+                cli::PipelineAction::Status => commands::pipeline_cmd::cmd_pipeline_status(&db)?,
+                cli::PipelineAction::Show { stage } => {
+                    commands::pipeline_cmd::cmd_pipeline_show(stage.as_deref())?;
+                }
+                cli::PipelineAction::Validate => commands::pipeline_cmd::cmd_pipeline_validate()?,
+                cli::PipelineAction::Eject => commands::pipeline_cmd::cmd_pipeline_eject()?,
+                cli::PipelineAction::Run { issues, stage } => {
+                    commands::pipeline_cmd::cmd_pipeline_run(&issues, stage.as_deref())?;
+                }
+            }
+        }
+
+        cli::Commands::Update => commands::misc::cmd_update()?,
 
         cli::Commands::Review { target, dir, force } => {
             let db = open_db()?;
             let wdir = werma_dir()?;
-            cmd_review(&db, &wdir, target.as_deref(), dir.as_deref(), force)?;
+            commands::review::cmd_review(&db, &wdir, target.as_deref(), dir.as_deref(), force)?;
         }
+
         cli::Commands::Dash => {
             let db = open_db()?;
-            dashboard::show_dashboard(&db)?;
+            commands::misc::cmd_dash(&db)?;
         }
-        cli::Commands::Backup => {
-            let dir = werma_dir()?;
-            backup::backup_db(&dir)?;
-        }
+
+        cli::Commands::Backup => commands::misc::cmd_backup()?,
+
         cli::Commands::Migrate => {
             let db = open_db()?;
-            migrate::migrate(&db)?;
+            commands::misc::cmd_migrate(&db)?;
         }
     }
 
@@ -1658,30 +299,578 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_review_target_pr_hash() {
-        let (n, label) = parse_review_target("#42");
-        assert_eq!(n, Some(42));
-        assert_eq!(label, "PR #42");
+    fn version_string_returns_non_empty() {
+        let v = version_string();
+        assert!(!v.is_empty());
+        // Dev builds have "-dev" suffix
+        assert!(v.contains("-dev") || v.chars().next().unwrap().is_ascii_digit());
     }
 
     #[test]
-    fn parse_review_target_plain_number() {
-        let (n, label) = parse_review_target("7");
-        assert_eq!(n, Some(7));
-        assert_eq!(label, "PR #7");
+    fn runtime_repo_hash_returns_something() {
+        let hash = runtime_repo_hash();
+        assert!(!hash.is_empty());
     }
 
-    #[test]
-    fn parse_review_target_url() {
-        let (n, label) = parse_review_target("https://github.com/org/repo/pull/99");
-        assert_eq!(n, Some(99));
-        assert_eq!(label, "PR #99");
-    }
+    // CLI parsing tests
+    mod cli_parsing {
+        use crate::cli::{Cli, Commands};
+        use clap::Parser;
 
-    #[test]
-    fn parse_review_target_branch() {
-        let (n, label) = parse_review_target("feat/new-thing");
-        assert_eq!(n, None);
-        assert_eq!(label, "branch feat/new-thing");
+        fn parse(args: &[&str]) -> Commands {
+            let mut full_args = vec!["werma"];
+            full_args.extend_from_slice(args);
+            Cli::parse_from(full_args).command
+        }
+
+        #[test]
+        fn parse_add_minimal() {
+            match parse(&["add", "test prompt"]) {
+                Commands::Add {
+                    prompt,
+                    priority,
+                    task_type,
+                    model,
+                    ..
+                } => {
+                    assert_eq!(prompt, "test prompt");
+                    assert_eq!(priority, 2); // default
+                    assert_eq!(task_type, "custom"); // default
+                    assert_eq!(model, "opus"); // default
+                }
+                other => panic!("expected Add, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_add_full() {
+            match parse(&[
+                "add",
+                "do stuff",
+                "-p",
+                "1",
+                "-t",
+                "code",
+                "-m",
+                "sonnet",
+                "--turns",
+                "25",
+                "--depends",
+                "dep1,dep2",
+                "--context",
+                "ctx.md",
+                "--linear",
+                "RIG-42",
+                "--stage",
+                "engineer",
+                "-o",
+                "/tmp/out.md",
+                "-d",
+                "/tmp/work",
+            ]) {
+                Commands::Add {
+                    prompt,
+                    priority,
+                    task_type,
+                    model,
+                    turns,
+                    depends,
+                    context,
+                    linear,
+                    stage,
+                    output,
+                    dir,
+                    ..
+                } => {
+                    assert_eq!(prompt, "do stuff");
+                    assert_eq!(priority, 1);
+                    assert_eq!(task_type, "code");
+                    assert_eq!(model, "sonnet");
+                    assert_eq!(turns, Some(25));
+                    assert_eq!(depends, Some("dep1,dep2".into()));
+                    assert_eq!(context, Some("ctx.md".into()));
+                    assert_eq!(linear, Some("RIG-42".into()));
+                    assert_eq!(stage, Some("engineer".into()));
+                    assert_eq!(output, Some("/tmp/out.md".into()));
+                    assert_eq!(dir, Some("/tmp/work".into()));
+                }
+                other => panic!("expected Add, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_list_no_filter() {
+            match parse(&["list"]) {
+                Commands::List { status } => assert!(status.is_none()),
+                other => panic!("expected List, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_list_with_filter() {
+            match parse(&["list", "running"]) {
+                Commands::List { status } => assert_eq!(status, Some("running".into())),
+                other => panic!("expected List, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_list_alias_ls() {
+            match parse(&["ls"]) {
+                Commands::List { status } => assert!(status.is_none()),
+                other => panic!("expected List, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_status_defaults() {
+            match parse(&["status"]) {
+                Commands::Status {
+                    watch,
+                    compact,
+                    interval,
+                } => {
+                    assert!(!watch);
+                    assert!(!compact);
+                    assert_eq!(interval, 3);
+                }
+                other => panic!("expected Status, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_status_alias_st() {
+            match parse(&["st"]) {
+                Commands::Status { .. } => {}
+                other => panic!("expected Status, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_status_with_flags() {
+            match parse(&["status", "-w", "-c", "-i", "5"]) {
+                Commands::Status {
+                    watch,
+                    compact,
+                    interval,
+                } => {
+                    assert!(watch);
+                    assert!(compact);
+                    assert_eq!(interval, 5);
+                }
+                other => panic!("expected Status, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_view() {
+            match parse(&["view", "20260313-001"]) {
+                Commands::View { id } => assert_eq!(id, "20260313-001"),
+                other => panic!("expected View, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_continue_with_prompt() {
+            match parse(&["continue", "task-1", "keep going"]) {
+                Commands::Continue { id, prompt } => {
+                    assert_eq!(id, "task-1");
+                    assert_eq!(prompt, Some("keep going".into()));
+                }
+                other => panic!("expected Continue, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_continue_alias_cont() {
+            match parse(&["cont", "task-1"]) {
+                Commands::Continue { id, prompt } => {
+                    assert_eq!(id, "task-1");
+                    assert!(prompt.is_none());
+                }
+                other => panic!("expected Continue, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_retry() {
+            match parse(&["retry", "task-1"]) {
+                Commands::Retry { id } => assert_eq!(id, "task-1"),
+                other => panic!("expected Retry, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_kill() {
+            match parse(&["kill", "task-1"]) {
+                Commands::Kill { id } => assert_eq!(id, "task-1"),
+                other => panic!("expected Kill, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_complete_with_options() {
+            match parse(&[
+                "complete",
+                "task-1",
+                "--session",
+                "sess-abc",
+                "--result-file",
+                "/tmp/r.md",
+            ]) {
+                Commands::Complete {
+                    id,
+                    session,
+                    result_file,
+                } => {
+                    assert_eq!(id, "task-1");
+                    assert_eq!(session, Some("sess-abc".into()));
+                    assert_eq!(result_file, Some("/tmp/r.md".into()));
+                }
+                other => panic!("expected Complete, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_fail() {
+            match parse(&["fail", "task-1"]) {
+                Commands::Fail { id } => assert_eq!(id, "task-1"),
+                other => panic!("expected Fail, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_run() {
+            match parse(&["run"]) {
+                Commands::Run => {}
+                other => panic!("expected Run, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_run_all() {
+            match parse(&["run-all"]) {
+                Commands::RunAll => {}
+                other => panic!("expected RunAll, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_clean() {
+            match parse(&["clean"]) {
+                Commands::Clean => {}
+                other => panic!("expected Clean, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_log_no_id() {
+            match parse(&["log"]) {
+                Commands::Log { id } => assert!(id.is_none()),
+                other => panic!("expected Log, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_log_with_id() {
+            match parse(&["log", "task-1"]) {
+                Commands::Log { id } => assert_eq!(id, Some("task-1".into())),
+                other => panic!("expected Log, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_daemon_install() {
+            match parse(&["daemon", "install"]) {
+                Commands::Daemon {
+                    action: Some(crate::cli::DaemonAction::Install),
+                } => {}
+                other => panic!("expected Daemon Install, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_daemon_no_action() {
+            match parse(&["daemon"]) {
+                Commands::Daemon { action: None } => {}
+                other => panic!("expected Daemon (no action), got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_sched_add() {
+            match parse(&[
+                "sched",
+                "add",
+                "daily",
+                "30 7 * * *",
+                "do stuff",
+                "-t",
+                "research",
+            ]) {
+                Commands::Sched {
+                    action:
+                        crate::cli::SchedAction::Add {
+                            id,
+                            cron,
+                            prompt,
+                            task_type,
+                            ..
+                        },
+                } => {
+                    assert_eq!(id, "daily");
+                    assert_eq!(cron, "30 7 * * *");
+                    assert_eq!(prompt, "do stuff");
+                    assert_eq!(task_type, "research");
+                }
+                other => panic!("expected Sched Add, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_sched_list() {
+            match parse(&["sched", "list"]) {
+                Commands::Sched {
+                    action: crate::cli::SchedAction::List,
+                } => {}
+                other => panic!("expected Sched List, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_sched_ls_alias() {
+            match parse(&["sched", "ls"]) {
+                Commands::Sched {
+                    action: crate::cli::SchedAction::List,
+                } => {}
+                other => panic!("expected Sched List, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_sched_on_off_rm() {
+            match parse(&["sched", "on", "daily"]) {
+                Commands::Sched {
+                    action: crate::cli::SchedAction::On { id },
+                } => assert_eq!(id, "daily"),
+                other => panic!("expected Sched On, got {other:?}"),
+            }
+            match parse(&["sched", "off", "daily"]) {
+                Commands::Sched {
+                    action: crate::cli::SchedAction::Off { id },
+                } => assert_eq!(id, "daily"),
+                other => panic!("expected Sched Off, got {other:?}"),
+            }
+            match parse(&["sched", "rm", "daily"]) {
+                Commands::Sched {
+                    action: crate::cli::SchedAction::Rm { id },
+                } => assert_eq!(id, "daily"),
+                other => panic!("expected Sched Rm, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_sched_trigger() {
+            match parse(&["sched", "trigger", "daily"]) {
+                Commands::Sched {
+                    action: crate::cli::SchedAction::Trigger { id },
+                } => assert_eq!(id, "daily"),
+                other => panic!("expected Sched Trigger, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_linear_setup() {
+            match parse(&["linear", "setup"]) {
+                Commands::Linear {
+                    action: crate::cli::LinearAction::Setup,
+                } => {}
+                other => panic!("expected Linear Setup, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_linear_sync() {
+            match parse(&["linear", "sync"]) {
+                Commands::Linear {
+                    action: crate::cli::LinearAction::Sync,
+                } => {}
+                other => panic!("expected Linear Sync, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_linear_push() {
+            match parse(&["linear", "push", "task-1"]) {
+                Commands::Linear {
+                    action: crate::cli::LinearAction::Push { id },
+                } => assert_eq!(id, "task-1"),
+                other => panic!("expected Linear Push, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_linear_push_all() {
+            match parse(&["linear", "push-all"]) {
+                Commands::Linear {
+                    action: crate::cli::LinearAction::PushAll,
+                } => {}
+                other => panic!("expected Linear PushAll, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_pipeline_poll() {
+            match parse(&["pipeline", "poll"]) {
+                Commands::Pipeline {
+                    action: crate::cli::PipelineAction::Poll,
+                } => {}
+                other => panic!("expected Pipeline Poll, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_pipeline_status() {
+            match parse(&["pipeline", "status"]) {
+                Commands::Pipeline {
+                    action: crate::cli::PipelineAction::Status,
+                } => {}
+                other => panic!("expected Pipeline Status, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_pipeline_show() {
+            match parse(&["pipeline", "show"]) {
+                Commands::Pipeline {
+                    action: crate::cli::PipelineAction::Show { stage },
+                } => {
+                    assert!(stage.is_none());
+                }
+                other => panic!("expected Pipeline Show, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_pipeline_show_with_stage() {
+            match parse(&["pipeline", "show", "--stage", "engineer"]) {
+                Commands::Pipeline {
+                    action: crate::cli::PipelineAction::Show { stage },
+                } => {
+                    assert_eq!(stage, Some("engineer".into()));
+                }
+                other => panic!("expected Pipeline Show, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_pipeline_validate() {
+            match parse(&["pipeline", "validate"]) {
+                Commands::Pipeline {
+                    action: crate::cli::PipelineAction::Validate,
+                } => {}
+                other => panic!("expected Pipeline Validate, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_pipeline_eject() {
+            match parse(&["pipeline", "eject"]) {
+                Commands::Pipeline {
+                    action: crate::cli::PipelineAction::Eject,
+                } => {}
+                other => panic!("expected Pipeline Eject, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_pipeline_run() {
+            match parse(&["pipeline", "run", "RIG-42", "RIG-43"]) {
+                Commands::Pipeline {
+                    action: crate::cli::PipelineAction::Run { issues, stage },
+                } => {
+                    assert_eq!(issues, vec!["RIG-42", "RIG-43"]);
+                    assert!(stage.is_none());
+                }
+                other => panic!("expected Pipeline Run, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_pipeline_run_with_stage() {
+            match parse(&["pipeline", "run", "RIG-42", "--stage", "engineer"]) {
+                Commands::Pipeline {
+                    action: crate::cli::PipelineAction::Run { issues, stage },
+                } => {
+                    assert_eq!(issues, vec!["RIG-42"]);
+                    assert_eq!(stage, Some("engineer".into()));
+                }
+                other => panic!("expected Pipeline Run, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_review_no_target() {
+            match parse(&["review"]) {
+                Commands::Review { target, dir, force } => {
+                    assert!(target.is_none());
+                    assert!(dir.is_none());
+                    assert!(!force);
+                }
+                other => panic!("expected Review, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_review_with_target() {
+            match parse(&["review", "#42", "-d", "/tmp/repo", "-f"]) {
+                Commands::Review { target, dir, force } => {
+                    assert_eq!(target, Some("#42".into()));
+                    assert_eq!(dir, Some("/tmp/repo".into()));
+                    assert!(force);
+                }
+                other => panic!("expected Review, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_dash() {
+            match parse(&["dash"]) {
+                Commands::Dash => {}
+                other => panic!("expected Dash, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_backup() {
+            match parse(&["backup"]) {
+                Commands::Backup => {}
+                other => panic!("expected Backup, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_migrate() {
+            match parse(&["migrate"]) {
+                Commands::Migrate => {}
+                other => panic!("expected Migrate, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_update() {
+            match parse(&["update"]) {
+                Commands::Update => {}
+                other => panic!("expected Update, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_version() {
+            match parse(&["version"]) {
+                Commands::Version => {}
+                other => panic!("expected Version, got {other:?}"),
+            }
+        }
     }
 }
