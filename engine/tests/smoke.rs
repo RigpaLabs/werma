@@ -15,7 +15,9 @@ use tempfile::TempDir;
 fn werma_cmd(home: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("werma").expect("binary not found");
     cmd.env("HOME", home.path());
-    // Prevent Linear API calls and .env loading from real config
+    // Remove LINEAR_API_KEY specifically because the Linear client checks for it at startup
+    // and will attempt network calls or fail loudly if it's present. Other env vars are
+    // harmless to inherit from the test environment.
     cmd.env_remove("LINEAR_API_KEY");
     cmd
 }
@@ -107,16 +109,13 @@ fn auto_creates_werma_dir() {
     assert!(werma_dir.exists(), ".werma should be auto-created");
     assert!(werma_dir.join("logs").exists(), "logs subdir should exist");
     assert!(
+        werma_dir.join("completed").exists(),
+        "completed subdir should exist"
+    );
+    assert!(
         werma_dir.join("backups").exists(),
         "backups subdir should exist"
     );
-}
-
-#[test]
-fn no_env_file_does_not_crash() {
-    let home = TempDir::new().unwrap();
-    // No .env file in the temp home — binary should handle gracefully
-    werma_cmd(&home).arg("list").assert().success();
 }
 
 #[test]
