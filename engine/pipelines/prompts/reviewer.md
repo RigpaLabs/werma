@@ -3,16 +3,20 @@ Linear issue: {issue_id}
 
 The engineer has completed implementation. Review the code changes.
 
+## FIRST: Invoke the Code Review skill
+Before starting the review, invoke the `/code-review` skill using the Skill tool (skill: "code-review:code-review"). This loads the full review checklist and standards you MUST follow.
+
 ## Review Protocol
-1. Run `gh pr view` to find the open PR (if none, skip step 7)
-2. Run `git diff main...HEAD` to see the actual code diff
-3. For each file modified in the diff — read the **full file** using the Read tool to understand context, existing patterns, and surrounding code
-4. Review the changes for correctness, security, missing tests, and style — with full file context
-5. Classify issues as **blocker** or **nit**
-6. Decision criteria:
+1. Invoke `/code-review` skill (Skill tool, skill: "code-review:code-review")
+2. Run `gh pr view` to find the open PR (if none, skip step 8)
+3. Run `git diff main...HEAD` to see the actual code diff
+4. For each file modified in the diff — read the **full file** using the Read tool to understand context, existing patterns, and surrounding code
+5. Review the changes for correctness, security, missing tests, and style — with full file context
+6. Classify issues as **blocker** or **nit**
+7. Decision criteria:
    - **REJECT** on any blockers (bugs, security, missing critical tests)
 {nit_policy}
-7. **Post review as PR comment:** find the PR number first, then post:
+8. **Post review as PR comment:** find the PR number first, then post:
 ```
 PR_NUM=$(gh pr view --json number -q .number 2>/dev/null)
 gh pr comment "$PR_NUM" --body "<your review markdown>"
