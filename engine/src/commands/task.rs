@@ -148,11 +148,26 @@ pub fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<
         })
         .ok();
 
+        // Tick-based render loop: render at 100ms for smooth spinner,
+        // but only re-query the DB every `interval` seconds.
+        const RENDER_TICK_MS: u64 = 100;
+        let ticks_per_refresh = (interval * 1000) / RENDER_TICK_MS;
+        // Force immediate first load by starting at the refresh threshold
+        let mut tick_count: u64 = ticks_per_refresh;
+
+        let mut running: Vec<Task> = vec![];
+        let mut pending: Vec<Task> = vec![];
+        let mut completed: Vec<Task> = vec![];
+        let mut failed: Vec<Task> = vec![];
+
         loop {
-            let running = db.list_tasks(Some(Status::Running))?;
-            let pending = db.list_tasks(Some(Status::Pending))?;
-            let completed = db.list_tasks(Some(Status::Completed))?;
-            let failed = db.list_tasks(Some(Status::Failed))?;
+            if tick_count >= ticks_per_refresh {
+                running = db.list_tasks(Some(Status::Running))?;
+                pending = db.list_tasks(Some(Status::Pending))?;
+                completed = db.list_tasks(Some(Status::Completed))?;
+                failed = db.list_tasks(Some(Status::Failed))?;
+                tick_count = 0;
+            }
 
             let content = if use_compact {
                 ui::render_compact_buf(&running, &pending, &completed, &failed, Some(interval))
@@ -163,7 +178,8 @@ pub fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<
             ui::refresh_screen(&content, prev_lines);
             prev_lines = content.lines().count();
 
-            std::thread::sleep(std::time::Duration::from_secs(interval));
+            std::thread::sleep(std::time::Duration::from_millis(RENDER_TICK_MS));
+            tick_count += 1;
         }
     } else if use_compact {
         if auto_compacted {
