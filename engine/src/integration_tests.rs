@@ -4,6 +4,15 @@ use crate::pipeline::executor::{callback, poll};
 use crate::traits::fakes::{FakeCommandRunner, FakeLinearApi};
 use serde_json::json;
 
+/// Ensure `~/projects/rigpa/werma` exists so `validate_working_dir` passes on CI.
+/// Locally this is a no-op (dir already exists). On CI it creates empty dirs.
+fn ensure_working_dir() {
+    if let Some(home) = dirs::home_dir() {
+        let dir = home.join("projects/rigpa/werma");
+        let _ = std::fs::create_dir_all(dir);
+    }
+}
+
 /// Helper: build a minimal Linear issue JSON value for poll tests.
 /// State type defaults to "backlog" (needed for label-based polling).
 fn fake_issue(id: &str, identifier: &str, title: &str, labels: &[&str]) -> serde_json::Value {
@@ -187,6 +196,7 @@ fn poll_skips_review_when_review_task_exists() {
 
 #[test]
 fn poll_sets_linear_issue_id() {
+    ensure_working_dir();
     let db = Db::open_in_memory().unwrap();
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
@@ -217,6 +227,7 @@ fn poll_sets_linear_issue_id() {
 
 #[test]
 fn poll_research_move_failure_nonfatal() {
+    ensure_working_dir();
     let db = Db::open_in_memory().unwrap();
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
@@ -304,6 +315,7 @@ fn callback_retry_after_move_failure() {
 
 #[test]
 fn poll_creates_research_task() {
+    ensure_working_dir();
     let db = Db::open_in_memory().unwrap();
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
@@ -359,6 +371,7 @@ fn poll_skips_manual_research() {
 
 #[test]
 fn poll_creates_engineer_task() {
+    ensure_working_dir();
     let db = Db::open_in_memory().unwrap();
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
@@ -412,6 +425,7 @@ fn poll_skips_manual_engineer() {
 
 #[test]
 fn poll_reviewer_skips_merged_pr() {
+    ensure_working_dir();
     let db = Db::open_in_memory().unwrap();
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
@@ -454,6 +468,7 @@ fn poll_reviewer_skips_merged_pr() {
 
 #[test]
 fn poll_label_removes_trigger_label() {
+    ensure_working_dir();
     let db = Db::open_in_memory().unwrap();
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
@@ -488,6 +503,7 @@ fn poll_label_removes_trigger_label() {
 
 #[test]
 fn poll_label_creates_analyst_task() {
+    ensure_working_dir();
     let db = Db::open_in_memory().unwrap();
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
