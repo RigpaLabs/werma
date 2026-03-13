@@ -151,6 +151,7 @@ fn builtin_prompt(rel_path: &str) -> Option<&'static str> {
         "prompts/reviewer.md" => Some(include_str!("../../pipelines/prompts/reviewer.md")),
         "prompts/qa.md" => Some(include_str!("../../pipelines/prompts/qa.md")),
         "prompts/devops.md" => Some(include_str!("../../pipelines/prompts/devops.md")),
+        "prompts/deployer.md" => Some(include_str!("../../pipelines/prompts/deployer.md")),
         _ => None,
     }
 }
