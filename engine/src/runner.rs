@@ -38,10 +38,10 @@ pub fn tools_for_type(task_type: &str, has_output: bool) -> String {
             )
         }
         "pipeline-engineer" => {
-            format!("Read,Edit,Write,Bash,Glob,Grep,{LINEAR_READ},{LINEAR_COMMENT}")
+            format!("Read,Edit,Write,Bash,Glob,Grep,Skill,{LINEAR_READ},{LINEAR_COMMENT}")
         }
         "pipeline-reviewer" | "pipeline-qa" | "pipeline-devops" | "pipeline-deployer" => {
-            format!("Read,Glob,Grep,Bash,{LINEAR_READ},{LINEAR_COMMENT}")
+            format!("Read,Glob,Grep,Bash,Skill,{LINEAR_READ},{LINEAR_COMMENT}")
         }
         _ => "Read,Grep,Glob,WebSearch,WebFetch".to_string(),
     };
