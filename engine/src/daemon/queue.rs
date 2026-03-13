@@ -8,6 +8,29 @@ use crate::runner;
 use super::TmuxSession;
 use super::log_daemon;
 
+/// Real tmux implementation via `std::process::Command`.
+pub struct RealTmux;
+
+impl TmuxSession for RealTmux {
+    fn has_session(&self, name: &str) -> bool {
+        let result = std::process::Command::new("tmux")
+            .args(["has-session", "-t", name])
+            .output();
+        matches!(result, Ok(out) if out.status.success())
+    }
+
+    fn count_werma_sessions(&self) -> usize {
+        let output = std::process::Command::new("tmux").args(["ls"]).output();
+        match output {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                stdout.lines().filter(|l| l.starts_with("werma-")).count()
+            }
+            Err(_) => 0,
+        }
+    }
+}
+
 /// Drain pending tasks into tmux sessions, respecting pipeline max_concurrent.
 pub fn drain_queue(
     db: &Db,
@@ -20,16 +43,15 @@ pub fn drain_queue(
         return Ok(());
     }
 
+    let log_path = werma_dir.join("logs/daemon.log");
     let slots = max_concurrent - active;
     for _ in 0..slots {
         match runner::run_next(db, werma_dir) {
             Ok(Some(id)) => {
-                let log_path = werma_dir.join("logs/daemon.log");
                 log_daemon(&log_path, &format!("launched: {id}"));
             }
             Ok(None) => break,
             Err(e) => {
-                let log_path = werma_dir.join("logs/daemon.log");
                 log_daemon(&log_path, &format!("launch error: {e}"));
                 break;
             }

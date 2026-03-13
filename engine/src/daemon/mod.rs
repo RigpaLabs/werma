@@ -32,64 +32,9 @@ pub trait TmuxSession {
     fn count_werma_sessions(&self) -> usize;
 }
 
-/// Real tmux implementation via `std::process::Command`.
-pub struct RealTmux;
-
-impl TmuxSession for RealTmux {
-    fn has_session(&self, name: &str) -> bool {
-        let result = std::process::Command::new("tmux")
-            .args(["has-session", "-t", name])
-            .output();
-        matches!(result, Ok(out) if out.status.success())
-    }
-
-    fn count_werma_sessions(&self) -> usize {
-        let output = std::process::Command::new("tmux").args(["ls"]).output();
-        match output {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                stdout.lines().filter(|l| l.starts_with("werma-")).count()
-            }
-            Err(_) => 0,
-        }
-    }
-}
-
 /// Trait abstracting GitHub CLI operations for testability.
 pub trait GitHubClient {
     fn find_merged_pr(&self, identifier: &str) -> bool;
-}
-
-/// Real GitHub CLI implementation via `gh pr list`.
-pub struct RealGitHub;
-
-impl GitHubClient for RealGitHub {
-    fn find_merged_pr(&self, identifier: &str) -> bool {
-        let check_cmd = std::process::Command::new("gh")
-            .args([
-                "pr",
-                "list",
-                "--search",
-                identifier,
-                "--state",
-                "merged",
-                "--json",
-                "number,title,mergedAt",
-                "--limit",
-                "1",
-            ])
-            .output();
-
-        match check_cmd {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let json: serde_json::Value =
-                    serde_json::from_str(&stdout).unwrap_or(serde_json::Value::Null);
-                json.as_array().is_some_and(|arr| !arr.is_empty())
-            }
-            _ => false,
-        }
-    }
 }
 
 /// Trait abstracting Linear API operations used by the merge handler.
@@ -97,26 +42,6 @@ pub trait LinearMergeApi {
     fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<serde_json::Value>>;
     fn move_issue_by_name(&self, issue_id: &str, status_name: &str) -> Result<()>;
     fn comment(&self, issue_id: &str, body: &str) -> Result<()>;
-}
-
-/// Real Linear API implementation delegating to `LinearClient`.
-pub struct RealLinearMerge;
-
-impl LinearMergeApi for RealLinearMerge {
-    fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<serde_json::Value>> {
-        let client = crate::linear::LinearClient::new()?;
-        client.get_issues_by_status(status_name)
-    }
-
-    fn move_issue_by_name(&self, issue_id: &str, status_name: &str) -> Result<()> {
-        let client = crate::linear::LinearClient::new()?;
-        client.move_issue_by_name(issue_id, status_name)
-    }
-
-    fn comment(&self, issue_id: &str, body: &str) -> Result<()> {
-        let client = crate::linear::LinearClient::new()?;
-        client.comment(issue_id, body)
-    }
 }
 
 // ─── Logging ─────────────────────────────────────────────────────────────
@@ -178,9 +103,10 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     let mut last_cleanliness_check =
         Instant::now() - Duration::from_secs(CLEANLINESS_CHECK_INTERVAL_SECS);
 
-    let tmux = RealTmux;
-    let github = RealGitHub;
-    let linear_merge = RealLinearMerge;
+    let tmux = queue::RealTmux;
+    let github = merge::RealGitHub;
+    // Optional: absent if LINEAR_API_KEY is not configured.
+    let linear_merge = merge::RealLinearMerge::new().ok();
 
     loop {
         let tick_start = Instant::now();
@@ -232,7 +158,10 @@ pub fn run(werma_dir: &Path) -> Result<()> {
             }
 
             if last_merge_check.elapsed() >= Duration::from_secs(MERGE_CHECK_INTERVAL_SECS) {
-                match merge::check_merged_prs(&db, werma_dir, &linear_merge, &github) {
+                let merge_result = linear_merge.as_ref().map_or(Ok(false), |lm| {
+                    merge::check_merged_prs(werma_dir, lm, &github)
+                });
+                match merge_result {
                     Ok(true) => {
                         // PR was merged — trigger auto-update.
                         log_daemon(&log_path, "triggering auto-update after merge");
