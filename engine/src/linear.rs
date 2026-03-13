@@ -893,11 +893,13 @@ pub fn infer_working_dir(title: &str, labels: &[&str]) -> String {
 pub mod fakes {
     use super::*;
     use std::cell::RefCell;
+    use std::collections::HashMap;
 
     /// Fake LinearApi that records calls and returns pre-configured responses.
+    /// Use `set_issues_for_status`/`set_issues_for_label` to configure per-key responses.
     pub struct FakeLinearApi {
-        pub issues_by_status: RefCell<Vec<Value>>,
-        pub issues_by_label: RefCell<Vec<Value>>,
+        pub issues_by_status: RefCell<HashMap<String, Vec<Value>>>,
+        pub issues_by_label: RefCell<HashMap<String, Vec<Value>>>,
         pub issue_details: RefCell<Option<(String, String, String, String, Vec<String>)>>,
         pub move_calls: RefCell<Vec<(String, String)>>,
         pub comment_calls: RefCell<Vec<(String, String)>>,
@@ -909,8 +911,8 @@ pub mod fakes {
     impl FakeLinearApi {
         pub fn new() -> Self {
             Self {
-                issues_by_status: RefCell::new(vec![]),
-                issues_by_label: RefCell::new(vec![]),
+                issues_by_status: RefCell::new(HashMap::new()),
+                issues_by_label: RefCell::new(HashMap::new()),
                 issue_details: RefCell::new(None),
                 move_calls: RefCell::new(vec![]),
                 comment_calls: RefCell::new(vec![]),
@@ -919,15 +921,39 @@ pub mod fakes {
                 remove_label_calls: RefCell::new(vec![]),
             }
         }
+
+        /// Set issues returned for a specific status name.
+        pub fn set_issues_for_status(&self, status: &str, issues: Vec<Value>) {
+            self.issues_by_status
+                .borrow_mut()
+                .insert(status.to_string(), issues);
+        }
+
+        /// Set issues returned for a specific label name.
+        pub fn set_issues_for_label(&self, label: &str, issues: Vec<Value>) {
+            self.issues_by_label
+                .borrow_mut()
+                .insert(label.to_string(), issues);
+        }
     }
 
     impl LinearApi for FakeLinearApi {
-        fn get_issues_by_status(&self, _status_name: &str) -> Result<Vec<Value>> {
-            Ok(self.issues_by_status.borrow().clone())
+        fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<Value>> {
+            Ok(self
+                .issues_by_status
+                .borrow()
+                .get(status_name)
+                .cloned()
+                .unwrap_or_default())
         }
 
-        fn get_issues_by_label(&self, _label_name: &str) -> Result<Vec<Value>> {
-            Ok(self.issues_by_label.borrow().clone())
+        fn get_issues_by_label(&self, label_name: &str) -> Result<Vec<Value>> {
+            Ok(self
+                .issues_by_label
+                .borrow()
+                .get(label_name)
+                .cloned()
+                .unwrap_or_default())
         }
 
         fn get_issue(&self, _issue_id: &str) -> Result<(String, String)> {
