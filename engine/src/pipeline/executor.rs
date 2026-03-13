@@ -166,16 +166,11 @@ pub fn poll(db: &Db) -> Result<()> {
                     None => continue,
                 };
 
-                // Skip if active task already exists for this issue + stage
-                let existing = db.tasks_by_linear_issue(identifier, Some(stage_name), true)?;
-                if !existing.is_empty() {
-                    total_skipped += 1;
-                    continue;
-                }
-
-                // Skip if there's a completed-but-unpushed task for this issue + stage.
-                // The callback hasn't run yet — spawning another task would cause duplicates.
-                if db.has_unpushed_completed_task(identifier, stage_name)? {
+                // Skip if any non-failed task exists for this issue + stage.
+                // This covers active (pending/running), completed-but-unpushed (callback
+                // pending), AND completed-and-pushed tasks where the Linear status didn't
+                // actually move (RIG-209). Failed tasks don't block — poll can retry those.
+                if db.has_any_nonfailed_task_for_issue_stage(identifier, stage_name)? {
                     total_skipped += 1;
                     continue;
                 }
@@ -314,15 +309,8 @@ pub fn poll(db: &Db) -> Result<()> {
                 continue;
             }
 
-            // Skip if active task already exists for this issue + stage
-            let existing = db.tasks_by_linear_issue(identifier, Some(stage_name), true)?;
-            if !existing.is_empty() {
-                total_skipped += 1;
-                continue;
-            }
-
-            // Skip if there's a completed-but-unpushed task for this issue + stage
-            if db.has_unpushed_completed_task(identifier, stage_name)? {
+            // Skip if any non-failed task exists for this issue + stage (RIG-209).
+            if db.has_any_nonfailed_task_for_issue_stage(identifier, stage_name)? {
                 total_skipped += 1;
                 continue;
             }
