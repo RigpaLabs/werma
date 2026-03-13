@@ -113,7 +113,9 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
 
         db.insert_task(&task)?;
         // Move to In Progress so it doesn't get picked up again
-        let _ = linear.move_issue_by_name(issue_id, "in_progress");
+        if let Err(e) = linear.move_issue_by_name(issue_id, "in_progress") {
+            eprintln!("  ! research move to in_progress failed for {identifier}: {e}");
+        }
         println!("  + {task_id} [{identifier}] type=research (research pipeline)");
         total_created += 1;
     }
@@ -189,11 +191,20 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     continue;
                 }
 
+                // RIG-135: Cross-stage dedup for reviewer — skip if any review task
+                // (regardless of stage name) is already active for this issue.
+                if stage_name == "reviewer" && db.has_any_review_task_for_issue(identifier)? {
+                    total_skipped += 1;
+                    continue;
+                }
+
                 // For reviewer stage: skip if PR is already merged (manual merge while in Review)
                 if stage_name == "reviewer" && is_pr_merged_for_issue(cmd, &working_dir, identifier)
                 {
                     println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
-                    let _ = linear.move_issue_by_name(issue_id, "done");
+                    if let Err(e) = linear.move_issue_by_name(issue_id, "done") {
+                        eprintln!("  ! failed to move {identifier} to done: {e}");
+                    }
                     total_skipped += 1;
                     continue;
                 }
@@ -339,10 +350,18 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
+            // RIG-135: Cross-stage dedup for reviewer (label-based path)
+            if *stage_name == "reviewer" && db.has_any_review_task_for_issue(identifier)? {
+                total_skipped += 1;
+                continue;
+            }
+
             // For reviewer stage: skip if PR is already merged
             if *stage_name == "reviewer" && is_pr_merged_for_issue(cmd, &working_dir, identifier) {
                 println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
-                let _ = linear.move_issue_by_name(issue_id, "done");
+                if let Err(e) = linear.move_issue_by_name(issue_id, "done") {
+                    eprintln!("  ! failed to move {identifier} to done: {e}");
+                }
                 total_skipped += 1;
                 continue;
             }
@@ -434,13 +453,14 @@ pub fn callback(
     linear: &dyn LinearApi,
     cmd: &dyn CommandRunner,
 ) -> Result<()> {
-    // Dedup guard: if callback was recently fired for this task, skip to prevent
+    // Dedup guard: if callback SUCCEEDED recently, skip to prevent
     // duplicate Linear comments from overlapping daemon ticks / cmd_complete races.
+    // Note: callback_fired_at is set AFTER successful transition (not before),
+    // so failed callbacks can be retried on the next tick (RIG-211 fix).
     if db.is_callback_recently_fired(task_id, 60)? {
         eprintln!("callback: skipping duplicate for task {task_id} (fired <60s ago)");
         return Ok(());
     }
-    db.set_callback_fired_at(task_id)?;
 
     let config = load_default()?;
 
@@ -449,13 +469,15 @@ pub fn callback(
     // for daemon retries that re-read the same empty output file.
     if result.trim().is_empty() {
         eprintln!("callback: empty output for task {task_id} (stage={stage}), skipping transition");
-        let _ = linear.comment(
+        if let Err(e) = linear.comment(
             linear_issue_id,
             &format!(
                 "**Werma task `{task_id}`** (stage: {stage}) produced empty output. \
                  Task marked as failed. Re-trigger needed."
             ),
-        );
+        ) {
+            eprintln!("callback: failed to post empty-output comment on {linear_issue_id}: {e}");
+        }
         return Ok(());
     }
 
@@ -468,28 +490,25 @@ pub fn callback(
 
     let verdict = parse_verdict(result);
 
-    // Stages with no verdicts in transitions (engineer/analyst) are auto-complete.
     // For stages that require a verdict (reviewer, qa, devops), warn if missing.
     let has_explicit_transitions = !stage_cfg.transitions.is_empty();
-    let is_auto_complete = stage_cfg.transitions.values().all(|t| t.spawn.is_none())
-        && stage_cfg
-            .transitions
-            .values()
-            .any(|t| t.status != "in_progress");
-
-    let _ = is_auto_complete; // used implicitly via logic below
 
     if verdict.is_none() && has_explicit_transitions && stage != "engineer" && stage != "analyst" {
         eprintln!(
             "warning: no verdict found for task {task_id} (stage={stage}), keeping current state"
         );
-        linear.comment(
+        if let Err(e) = linear.comment(
             linear_issue_id,
             &format!(
                 "**Werma task `{task_id}`** (stage: {stage}) completed but no verdict found. \
                  Manual review needed."
             ),
-        )?;
+        ) {
+            eprintln!("callback: failed to post no-verdict comment on {linear_issue_id}: {e}");
+        }
+        if let Err(e) = db.set_callback_fired_at(task_id) {
+            eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
+        }
         return Ok(());
     }
 
@@ -533,13 +552,15 @@ pub fn callback(
                     "callback: blocking ALREADY_DONE→done for {linear_issue_id} — open PR exists. \
                      Issue stays in current state."
                 );
-                let _ = linear.comment(
+                if let Err(e) = linear.comment(
                     linear_issue_id,
                     &format!(
                         "**Analyst ALREADY_DONE blocked** (task: `{task_id}`): open PR exists for this issue. \
                          An open PR means work is in progress, not done. Issue stays in current state."
                     ),
-                );
+                ) {
+                    eprintln!("callback: failed to post ALREADY_DONE comment on {linear_issue_id}: {e}");
+                }
                 return Ok(());
             }
 
@@ -575,14 +596,21 @@ pub fn callback(
                         "callback: engineer DONE but no PR_URL found for {linear_issue_id} (task {task_id}). \
                          Keeping issue in current state for retry."
                     );
-                    let _ = linear.comment(
+                    if let Err(e) = linear.comment(
                         linear_issue_id,
                         &format!(
                             "**Engineer task `{task_id}` DONE but no PR created.** \
                              The agent did not create a PR or include `PR_URL=` in its output. \
                              Issue stays in current state — re-trigger needed."
                         ),
-                    );
+                    ) {
+                        eprintln!(
+                            "callback: failed to post no-PR comment on {linear_issue_id}: {e}"
+                        );
+                    }
+                    if let Err(e) = db.set_callback_fired_at(task_id) {
+                        eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
+                    }
                     return Ok(());
                 }
 
@@ -627,13 +655,20 @@ pub fn callback(
                              escalating to blocked"
                         );
                         linear.move_issue_by_name(linear_issue_id, "blocked")?;
-                        linear.comment(
+                        if let Err(e) = linear.comment(
                             linear_issue_id,
                             &format!(
                                 "**Review cycle limit reached** ({max_rounds} rounds). \
                                  Moving to Blocked — manual review required."
                             ),
-                        )?;
+                        ) {
+                            eprintln!(
+                                "callback: failed to post escalation comment on {linear_issue_id}: {e}"
+                            );
+                        }
+                        if let Err(e) = db.set_callback_fired_at(task_id) {
+                            eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
+                        }
                         // Don't spawn another engineer cycle
                         return Ok(());
                     }
@@ -652,6 +687,12 @@ pub fn callback(
                     estimate,
                     pr_url: pr_url.as_deref(),
                 })?;
+            }
+
+            // RIG-211: set callback_fired_at AFTER successful transition,
+            // so failed callbacks can be retried on the next daemon tick.
+            if let Err(e) = db.set_callback_fired_at(task_id) {
+                eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
             }
         }
         None => {

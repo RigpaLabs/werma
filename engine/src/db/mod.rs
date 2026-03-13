@@ -118,7 +118,7 @@ pub(super) fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
 
 /// Create a test task with sensible defaults.
 #[cfg(test)]
-pub(super) fn make_test_task(id: &str) -> Task {
+pub(crate) fn make_test_task(id: &str) -> Task {
     Task {
         id: id.to_string(),
         status: Status::Pending,
