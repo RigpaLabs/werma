@@ -355,4 +355,80 @@ mod tests {
         let tldr = extract_tldr(text);
         assert!(tldr.contains("First line"));
     }
+
+    // ─── extract_tldr: TLDR variant (no semicolon) ──────────────────────────
+
+    #[test]
+    fn extract_tldr_without_semicolon() {
+        let text =
+            "# Research\n\n## TLDR\n\n- Key point A\n- Key point B\n\n## Details\n\nMore info...";
+        let tldr = extract_tldr(text);
+        assert!(tldr.contains("Key point A"));
+        assert!(tldr.contains("Key point B"));
+        assert!(!tldr.contains("More info"));
+    }
+
+    #[test]
+    fn extract_tldr_empty_input() {
+        let tldr = extract_tldr("");
+        assert!(tldr.is_empty());
+    }
+
+    #[test]
+    fn extract_tldr_only_headers() {
+        let text = "# Header 1\n## Header 2\n### Header 3";
+        let tldr = extract_tldr(text);
+        // All lines start with #, so filtered out in fallback
+        assert!(tldr.is_empty());
+    }
+
+    #[test]
+    fn extract_tldr_fallback_limits_to_5_lines() {
+        let text = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7";
+        let tldr = extract_tldr(text);
+        let lines: Vec<&str> = tldr.lines().collect();
+        assert_eq!(lines.len(), 5);
+        assert!(!tldr.contains("Line 6"));
+    }
+
+    #[test]
+    fn extract_tldr_skips_empty_lines_in_fallback() {
+        let text = "\n\nActual content\n\n\nMore content";
+        let tldr = extract_tldr(text);
+        assert!(tldr.contains("Actual content"));
+        assert!(tldr.contains("More content"));
+    }
+
+    // ─── parse_output_file: whitespace handling ─────────────────────────────
+
+    #[test]
+    fn parse_output_file_with_trailing_whitespace() {
+        let text = "OUTPUT_FILE=  /path/to/file.md  ";
+        assert_eq!(
+            parse_output_file(text),
+            Some("/path/to/file.md".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_output_file_empty_after_equals() {
+        let text = "OUTPUT_FILE=   ";
+        assert_eq!(parse_output_file(text), None);
+    }
+
+    #[test]
+    fn parse_output_file_prefers_last_occurrence() {
+        let text = "OUTPUT_FILE=/first.md\nstuff\nOUTPUT_FILE=/second.md";
+        assert_eq!(parse_output_file(text), Some("/second.md".to_string()));
+    }
+
+    // ─── load_max_concurrent ──────────────────────────────────────────────
+
+    #[test]
+    fn load_max_concurrent_returns_value() {
+        // Should successfully load from the builtin config
+        let max = load_max_concurrent();
+        assert!(max >= 1);
+        assert!(max <= 20); // reasonable upper bound
+    }
 }

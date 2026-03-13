@@ -1142,4 +1142,243 @@ mod tests {
         let output = std::fs::read_to_string(&output_file).unwrap_or_default();
         assert!(output.contains("REVIEW_VERDICT=APPROVED"));
     }
+
+    // ─── rotate_logs: large file truncation ─────────────────────────────────
+
+    #[test]
+    fn rotate_logs_truncates_large_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+
+        let log_file = logs_dir.join("daemon.log");
+
+        // Create a file > 5MB with 10000 lines
+        let mut content = String::new();
+        for i in 0..10000 {
+            // Each line ~600 bytes to exceed 5MB
+            content.push_str(&format!("{:04}: {}\n", i, "X".repeat(590)));
+        }
+        std::fs::write(&log_file, &content).unwrap();
+
+        // Verify it's > 5MB
+        let meta = std::fs::metadata(&log_file).unwrap();
+        assert!(meta.len() > MAX_LOG_SIZE_BYTES);
+
+        rotate_logs(dir.path()).unwrap();
+
+        // After rotation: should be truncated to last 1000 lines
+        let result = std::fs::read_to_string(&log_file).unwrap();
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 1000);
+        // Should keep the LAST 1000 lines (9000..9999)
+        assert!(lines[0].starts_with("9000:"));
+        assert!(lines[999].starts_with("9999:"));
+    }
+
+    #[test]
+    fn rotate_logs_skips_non_log_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+
+        // Create a large .md file (should be skipped)
+        let md_file = logs_dir.join("output.md");
+        let content = "X".repeat(6 * 1024 * 1024); // 6MB
+        std::fs::write(&md_file, &content).unwrap();
+
+        rotate_logs(dir.path()).unwrap();
+
+        // File should be untouched
+        let result = std::fs::read_to_string(&md_file).unwrap();
+        assert_eq!(result.len(), 6 * 1024 * 1024);
+    }
+
+    #[test]
+    fn rotate_logs_nonexistent_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // No logs/ dir created — should return Ok
+        let result = rotate_logs(dir.path());
+        assert!(result.is_ok());
+    }
+
+    // ─── log_daemon: creates file ───────────────────────────────────────────
+
+    #[test]
+    fn log_daemon_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("new.log");
+
+        // File doesn't exist yet
+        assert!(!log_path.exists());
+
+        log_daemon(&log_path, "hello");
+        assert!(log_path.exists());
+
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("hello"));
+        // Timestamp format: YYYY-MM-DDTHH:MM:SS
+        assert!(content.contains("T"));
+    }
+
+    // ─── cron5_to_cron7 edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn cron5_to_cron7_empty_string() {
+        // Edge case: empty cron string
+        let result = cron5_to_cron7("");
+        assert_eq!(result, "0  *");
+    }
+
+    // ─── check_schedules: enqueue on cron match ──────────────────────────
+
+    #[test]
+    fn check_schedules_enqueues_matching_schedule() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        // Create a schedule that matches "every minute" — should fire on any tick
+        let sched = crate::models::Schedule {
+            id: "every-minute".to_string(),
+            cron_expr: "* * * * *".to_string(),
+            prompt: "do the thing {date}".to_string(),
+            schedule_type: "research".to_string(),
+            model: "sonnet".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            max_turns: 10,
+            enabled: true,
+            context_files: vec![],
+            last_enqueued: String::new(),
+        };
+        db.insert_schedule(&sched).unwrap();
+
+        check_schedules(&db, dir.path()).unwrap();
+
+        // Should have enqueued a task
+        let tasks = db.list_tasks(Some(crate::models::Status::Pending)).unwrap();
+        assert_eq!(tasks.len(), 1);
+        // Prompt should have {date} expanded
+        assert!(!tasks[0].prompt.contains("{date}"));
+        assert_eq!(tasks[0].task_type, "research");
+        assert_eq!(tasks[0].model, "sonnet");
+    }
+
+    #[test]
+    fn check_schedules_skips_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        let sched = crate::models::Schedule {
+            id: "disabled-one".to_string(),
+            cron_expr: "* * * * *".to_string(),
+            prompt: "should not run".to_string(),
+            schedule_type: "research".to_string(),
+            model: "sonnet".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            max_turns: 10,
+            enabled: false,
+            context_files: vec![],
+            last_enqueued: String::new(),
+        };
+        db.insert_schedule(&sched).unwrap();
+
+        check_schedules(&db, dir.path()).unwrap();
+
+        let tasks = db.list_tasks(None).unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn check_schedules_dedup_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        // Schedule with recent last_enqueued (within 60s)
+        let now = Local::now().format("%Y-%m-%dT%H:%M").to_string();
+        let sched = crate::models::Schedule {
+            id: "dedup-test".to_string(),
+            cron_expr: "* * * * *".to_string(),
+            prompt: "should be deduped".to_string(),
+            schedule_type: "research".to_string(),
+            model: "sonnet".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            max_turns: 10,
+            enabled: true,
+            context_files: vec![],
+            last_enqueued: now,
+        };
+        db.insert_schedule(&sched).unwrap();
+
+        check_schedules(&db, dir.path()).unwrap();
+
+        // Should NOT enqueue because last_enqueued is within 60s
+        let tasks = db.list_tasks(None).unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn check_schedules_expands_placeholders() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        let sched = crate::models::Schedule {
+            id: "placeholder-test".to_string(),
+            cron_expr: "* * * * *".to_string(),
+            prompt: "Review for {date} ({dow})".to_string(),
+            schedule_type: "review".to_string(),
+            model: "opus".to_string(),
+            output_path: "/tmp/report-{date}.md".to_string(),
+            working_dir: "/tmp".to_string(),
+            max_turns: 15,
+            enabled: true,
+            context_files: vec![],
+            last_enqueued: String::new(),
+        };
+        db.insert_schedule(&sched).unwrap();
+
+        check_schedules(&db, dir.path()).unwrap();
+
+        let tasks = db.list_tasks(Some(crate::models::Status::Pending)).unwrap();
+        assert_eq!(tasks.len(), 1);
+
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        assert!(tasks[0].prompt.contains(&today));
+        assert!(!tasks[0].prompt.contains("{date}"));
+        assert!(!tasks[0].prompt.contains("{dow}"));
+    }
+
+    // ─── rotate_logs: edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn rotate_logs_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        // Empty dir should not fail
+        rotate_logs(dir.path()).unwrap();
+    }
+
+    // ─── drain_queue: respects max_concurrent ────────────────────────────
+
+    #[test]
+    fn drain_queue_no_tasks_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        // Should not error when no tasks exist
+        drain_queue(&db, dir.path(), 3).unwrap();
+    }
 }

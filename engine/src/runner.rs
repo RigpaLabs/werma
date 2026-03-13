@@ -985,4 +985,150 @@ mod tests {
 
         assert!(!script.contains("SAFETY ABORT"));
     }
+
+    // ─── resolve_fallback_model ───────────────────────────────────────────
+
+    #[test]
+    fn resolve_fallback_model_no_pipeline_stage() {
+        let task = Task {
+            pipeline_stage: String::new(),
+            ..Default::default()
+        };
+        assert!(resolve_fallback_model(&task).is_none());
+    }
+
+    #[test]
+    fn resolve_fallback_model_with_pipeline_stage() {
+        let task = Task {
+            pipeline_stage: "engineer".to_string(),
+            ..Default::default()
+        };
+        // engineer stage has fallback: sonnet in default config
+        let result = resolve_fallback_model(&task);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn resolve_fallback_model_stage_without_fallback() {
+        let task = Task {
+            pipeline_stage: "analyst".to_string(),
+            ..Default::default()
+        };
+        // analyst stage has no fallback in default config
+        assert!(resolve_fallback_model(&task).is_none());
+    }
+
+    // ─── build_prompt: write task appends autonomous instructions ─────────
+
+    #[test]
+    fn build_prompt_write_task_appends_autonomous_mode() {
+        let task = Task {
+            id: "test-write-001".to_string(),
+            task_type: "pipeline-engineer".to_string(),
+            prompt: "Implement feature X".to_string(),
+            working_dir: "/tmp".to_string(),
+            ..Default::default()
+        };
+
+        let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
+        assert!(result.contains("autonomous mode instructions"));
+        assert!(result.contains("git push"));
+        assert!(result.contains("gh pr create"));
+    }
+
+    #[test]
+    fn build_prompt_read_task_no_autonomous_mode() {
+        let task = Task {
+            id: "test-read-001".to_string(),
+            task_type: "research".to_string(),
+            prompt: "Research topic Y".to_string(),
+            working_dir: "/tmp".to_string(),
+            ..Default::default()
+        };
+
+        let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
+        assert!(!result.contains("autonomous mode instructions"));
+    }
+
+    // ─── resolve_home ────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_home_expands_tilde() {
+        let result = resolve_home("~/some/path");
+        assert!(!result.to_string_lossy().starts_with("~/"));
+        assert!(result.to_string_lossy().ends_with("/some/path"));
+    }
+
+    #[test]
+    fn resolve_home_absolute_unchanged() {
+        assert_eq!(resolve_home("/abs/path"), PathBuf::from("/abs/path"));
+    }
+
+    #[test]
+    fn resolve_home_relative_unchanged() {
+        assert_eq!(
+            resolve_home("relative/path"),
+            PathBuf::from("relative/path")
+        );
+    }
+
+    // ─── build_prompt: absolute context file path ─────────────────────────
+
+    #[test]
+    fn build_prompt_absolute_context_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx_file = dir.path().join("absolute-ctx.txt");
+        std::fs::write(&ctx_file, "absolute context").unwrap();
+
+        let task = Task {
+            id: "test-abs-ctx".to_string(),
+            task_type: "research".to_string(),
+            prompt: "task prompt".to_string(),
+            working_dir: "/tmp".to_string(),
+            context_files: vec![ctx_file.to_string_lossy().to_string()],
+            ..Default::default()
+        };
+
+        let result = build_prompt(&task, Path::new("/tmp"), dir.path()).unwrap();
+        assert!(result.contains("absolute context"));
+    }
+
+    // ─── build_prompt: max dependency outputs limit ───────────────────────
+
+    #[test]
+    fn build_prompt_max_dependency_outputs() {
+        let werma_dir = tempfile::tempdir().unwrap();
+        let logs_dir = werma_dir.path().join("logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+
+        // Create 7 dependency outputs (limit is 5)
+        let mut dep_ids = Vec::new();
+        for i in 0..7 {
+            let dep_id = format!("dep-{i:03}");
+            std::fs::write(
+                logs_dir.join(format!("{dep_id}-output.md")),
+                format!("output from {dep_id}"),
+            )
+            .unwrap();
+            dep_ids.push(dep_id);
+        }
+
+        let task = Task {
+            id: "test-max-deps".to_string(),
+            task_type: "code".to_string(),
+            prompt: "task".to_string(),
+            working_dir: "/tmp".to_string(),
+            depends_on: dep_ids,
+            ..Default::default()
+        };
+
+        let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
+        // Should include exactly MAX_DEPENDENCY_OUTPUTS (5) dependency sections
+        let dep_count = result.matches("--- Dependency output:").count();
+        assert_eq!(dep_count, MAX_DEPENDENCY_OUTPUTS);
+        assert!(result.contains("dep-000"));
+        assert!(result.contains("dep-004"));
+        assert!(!result.contains("dep-005")); // beyond limit
+    }
 }

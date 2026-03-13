@@ -1198,4 +1198,449 @@ mod tests {
         let counts = db.task_counts().unwrap();
         assert_eq!(counts, (0, 0, 0, 0));
     }
+
+    // ─── claim_next_pending ─────────────────────────────────────────────────
+
+    #[test]
+    fn claim_next_pending_empty_db() {
+        let db = Db::open_in_memory().unwrap();
+        let claimed = db.claim_next_pending().unwrap();
+        assert!(claimed.is_none());
+    }
+
+    #[test]
+    fn claim_next_pending_sets_running() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260312-001");
+        db.insert_task(&task).unwrap();
+
+        let claimed = db.claim_next_pending().unwrap();
+        assert!(claimed.is_some());
+        let claimed = claimed.unwrap();
+        assert_eq!(claimed.id, "20260312-001");
+        assert_eq!(claimed.status, Status::Running);
+        assert!(claimed.started_at.is_some());
+    }
+
+    #[test]
+    fn claim_next_pending_respects_priority() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut low_prio = make_test_task("20260312-002");
+        low_prio.priority = 3;
+        let mut high_prio = make_test_task("20260312-001");
+        high_prio.priority = 1;
+
+        db.insert_task(&low_prio).unwrap();
+        db.insert_task(&high_prio).unwrap();
+
+        let claimed = db.claim_next_pending().unwrap().unwrap();
+        assert_eq!(claimed.id, "20260312-001"); // high priority first
+    }
+
+    #[test]
+    fn claim_next_pending_skips_unresolved_deps() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut task = make_test_task("20260312-002");
+        task.depends_on = vec!["20260312-001".to_string()]; // dep doesn't exist
+        db.insert_task(&task).unwrap();
+
+        let claimed = db.claim_next_pending().unwrap();
+        assert!(claimed.is_none());
+    }
+
+    #[test]
+    fn claim_next_pending_with_resolved_deps() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut dep = make_test_task("20260312-001");
+        dep.status = Status::Completed;
+        db.insert_task(&dep).unwrap();
+
+        let mut task = make_test_task("20260312-002");
+        task.depends_on = vec!["20260312-001".to_string()];
+        db.insert_task(&task).unwrap();
+
+        let claimed = db.claim_next_pending().unwrap().unwrap();
+        assert_eq!(claimed.id, "20260312-002");
+    }
+
+    #[test]
+    fn claim_next_pending_no_double_claim() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260312-001");
+        db.insert_task(&task).unwrap();
+
+        let first = db.claim_next_pending().unwrap();
+        assert!(first.is_some());
+        // Second claim should find nothing (task is now Running)
+        let second = db.claim_next_pending().unwrap();
+        assert!(second.is_none());
+    }
+
+    // ─── find_all_launchable ────────────────────────────────────────────────
+
+    #[test]
+    fn find_all_launchable_empty() {
+        let db = Db::open_in_memory().unwrap();
+        let tasks = db.find_all_launchable().unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn find_all_launchable_returns_multiple() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_task(&make_test_task("20260312-001")).unwrap();
+        db.insert_task(&make_test_task("20260312-002")).unwrap();
+
+        let tasks = db.find_all_launchable().unwrap();
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[test]
+    fn find_all_launchable_excludes_unresolved_deps() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_task(&make_test_task("20260312-001")).unwrap();
+
+        let mut with_dep = make_test_task("20260312-002");
+        with_dep.depends_on = vec!["20260312-999".to_string()]; // nonexistent
+        db.insert_task(&with_dep).unwrap();
+
+        let tasks = db.find_all_launchable().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "20260312-001");
+    }
+
+    #[test]
+    fn find_all_launchable_skips_running() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260312-001");
+        db.insert_task(&task).unwrap();
+        db.set_task_status("20260312-001", Status::Running).unwrap();
+
+        let tasks = db.find_all_launchable().unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    // ─── count_active_pipeline_tasks ────────────────────────────────────────
+
+    #[test]
+    fn count_active_pipeline_tasks_empty() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.count_active_pipeline_tasks().unwrap(), 0);
+    }
+
+    #[test]
+    fn count_active_pipeline_tasks_counts_correctly() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Pipeline task (pending)
+        let mut t1 = make_test_task("20260312-001");
+        t1.pipeline_stage = "engineer".to_string();
+        db.insert_task(&t1).unwrap();
+
+        // Pipeline task (running)
+        let mut t2 = make_test_task("20260312-002");
+        t2.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&t2).unwrap();
+        db.set_task_status("20260312-002", Status::Running).unwrap();
+
+        // Non-pipeline task (should not count)
+        db.insert_task(&make_test_task("20260312-003")).unwrap();
+
+        // Completed pipeline task (should not count)
+        let mut t4 = make_test_task("20260312-004");
+        t4.pipeline_stage = "engineer".to_string();
+        db.insert_task(&t4).unwrap();
+        db.set_task_status("20260312-004", Status::Completed)
+            .unwrap();
+
+        assert_eq!(db.count_active_pipeline_tasks().unwrap(), 2);
+    }
+
+    // ─── tasks_by_linear_issue (all parameter combinations) ─────────────────
+
+    #[test]
+    fn tasks_by_linear_issue_all_combos() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Active engineer task
+        let mut t1 = make_test_task("20260312-001");
+        t1.linear_issue_id = "issue-1".to_string();
+        t1.pipeline_stage = "engineer".to_string();
+        db.insert_task(&t1).unwrap();
+
+        // Completed engineer task
+        let mut t2 = make_test_task("20260312-002");
+        t2.linear_issue_id = "issue-1".to_string();
+        t2.pipeline_stage = "engineer".to_string();
+        db.insert_task(&t2).unwrap();
+        db.set_task_status("20260312-002", Status::Completed)
+            .unwrap();
+
+        // Active reviewer task
+        let mut t3 = make_test_task("20260312-003");
+        t3.linear_issue_id = "issue-1".to_string();
+        t3.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&t3).unwrap();
+
+        // (stage=None, active_only=false) → all 3
+        let all = db.tasks_by_linear_issue("issue-1", None, false).unwrap();
+        assert_eq!(all.len(), 3);
+
+        // (stage=None, active_only=true) → 2 active
+        let active = db.tasks_by_linear_issue("issue-1", None, true).unwrap();
+        assert_eq!(active.len(), 2);
+
+        // (stage=Some("engineer"), active_only=false) → 2 engineer tasks
+        let eng = db
+            .tasks_by_linear_issue("issue-1", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(eng.len(), 2);
+
+        // (stage=Some("engineer"), active_only=true) → 1 active engineer
+        let eng_active = db
+            .tasks_by_linear_issue("issue-1", Some("engineer"), true)
+            .unwrap();
+        assert_eq!(eng_active.len(), 1);
+        assert_eq!(eng_active[0].id, "20260312-001");
+
+        // (stage=Some("reviewer"), active_only=false) → 1
+        let rev = db
+            .tasks_by_linear_issue("issue-1", Some("reviewer"), false)
+            .unwrap();
+        assert_eq!(rev.len(), 1);
+
+        // Nonexistent issue → 0
+        let none = db.tasks_by_linear_issue("issue-999", None, false).unwrap();
+        assert!(none.is_empty());
+    }
+
+    // ─── count_completed_tasks_for_issue_stage ──────────────────────────────
+
+    #[test]
+    fn count_completed_for_issue_stage() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Completed reviewer task
+        let mut t1 = make_test_task("20260312-001");
+        t1.linear_issue_id = "issue-1".to_string();
+        t1.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&t1).unwrap();
+        db.set_task_status("20260312-001", Status::Completed)
+            .unwrap();
+
+        // Pending reviewer task (should not count)
+        let mut t2 = make_test_task("20260312-002");
+        t2.linear_issue_id = "issue-1".to_string();
+        t2.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&t2).unwrap();
+
+        assert_eq!(
+            db.count_completed_tasks_for_issue_stage("issue-1", "reviewer")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.count_completed_tasks_for_issue_stage("issue-1", "engineer")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.count_completed_tasks_for_issue_stage("issue-999", "reviewer")
+                .unwrap(),
+            0
+        );
+    }
+
+    // ─── increment_usage edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn increment_usage_haiku() {
+        let db = Db::open_in_memory().unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        db.increment_usage("haiku").unwrap();
+        db.increment_usage("haiku").unwrap();
+        db.increment_usage("haiku").unwrap();
+
+        let usage = db.daily_usage(&today).unwrap();
+        assert_eq!(usage.haiku_calls, 3);
+        assert_eq!(usage.opus_calls, 0);
+        assert_eq!(usage.sonnet_calls, 0);
+    }
+
+    #[test]
+    fn increment_usage_unknown_model_errors() {
+        let db = Db::open_in_memory().unwrap();
+        let result = db.increment_usage("gpt-4");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown model"));
+    }
+
+    #[test]
+    fn increment_usage_all_models() {
+        let db = Db::open_in_memory().unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        db.increment_usage("opus").unwrap();
+        db.increment_usage("sonnet").unwrap();
+        db.increment_usage("haiku").unwrap();
+
+        let usage = db.daily_usage(&today).unwrap();
+        assert_eq!(usage.opus_calls, 1);
+        assert_eq!(usage.sonnet_calls, 1);
+        assert_eq!(usage.haiku_calls, 1);
+    }
+
+    // ─── migration idempotency ──────────────────────────────────────────────
+
+    #[test]
+    fn migration_idempotent() {
+        let db = Db::open_in_memory().unwrap();
+        // Running migrate again should not fail
+        db.migrate().unwrap();
+        // And data should still work
+        let counts = db.task_counts().unwrap();
+        assert_eq!(counts, (0, 0, 0, 0));
+    }
+
+    // ─── schedule: context_files roundtrip ────────────────────────────────
+
+    #[test]
+    fn schedule_context_files_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+
+        let sched = Schedule {
+            id: "ctx-test".to_string(),
+            cron_expr: "0 9 * * *".to_string(),
+            prompt: "review".to_string(),
+            schedule_type: "review".to_string(),
+            model: "sonnet".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            max_turns: 10,
+            enabled: true,
+            context_files: vec!["file1.md".to_string(), "file2.md".to_string()],
+            last_enqueued: String::new(),
+        };
+        db.insert_schedule(&sched).unwrap();
+
+        let fetched = db.schedule("ctx-test").unwrap().unwrap();
+        assert_eq!(fetched.context_files, vec!["file1.md", "file2.md"]);
+    }
+
+    #[test]
+    fn schedule_empty_context_files() {
+        let db = Db::open_in_memory().unwrap();
+
+        let sched = Schedule {
+            id: "no-ctx".to_string(),
+            cron_expr: "0 9 * * *".to_string(),
+            prompt: "review".to_string(),
+            schedule_type: "review".to_string(),
+            model: "sonnet".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            max_turns: 10,
+            enabled: true,
+            context_files: vec![],
+            last_enqueued: String::new(),
+        };
+        db.insert_schedule(&sched).unwrap();
+
+        let fetched = db.schedule("no-ctx").unwrap().unwrap();
+        assert!(fetched.context_files.is_empty());
+    }
+
+    // ─── schedule: not found ──────────────────────────────────────────────
+
+    #[test]
+    fn schedule_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let result = db.schedule("nonexistent").unwrap();
+        assert!(result.is_none());
+    }
+
+    // ─── clean_completed: no completed tasks ──────────────────────────────
+
+    #[test]
+    fn clean_completed_empty() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260313-001");
+        db.insert_task(&task).unwrap();
+
+        let cleaned = db.clean_completed().unwrap();
+        assert!(cleaned.is_empty());
+
+        // Original pending task should still exist
+        let all = db.list_tasks(None).unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
+    // ─── task_counts: all statuses ────────────────────────────────────────
+
+    #[test]
+    fn task_counts_all_statuses() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Pending
+        db.insert_task(&make_test_task("20260313-001")).unwrap();
+        db.insert_task(&make_test_task("20260313-002")).unwrap();
+
+        // Running
+        db.insert_task(&make_test_task("20260313-003")).unwrap();
+        db.set_task_status("20260313-003", Status::Running).unwrap();
+
+        // Completed
+        db.insert_task(&make_test_task("20260313-004")).unwrap();
+        db.set_task_status("20260313-004", Status::Completed)
+            .unwrap();
+
+        // Failed
+        db.insert_task(&make_test_task("20260313-005")).unwrap();
+        db.set_task_status("20260313-005", Status::Failed).unwrap();
+
+        let (p, r, c, f) = db.task_counts().unwrap();
+        assert_eq!(p, 2);
+        assert_eq!(r, 1);
+        assert_eq!(c, 1);
+        assert_eq!(f, 1);
+    }
+
+    // ─── pr_reviewed: idempotent ──────────────────────────────────────────
+
+    #[test]
+    fn pr_reviewed_idempotent() {
+        let db = Db::open_in_memory().unwrap();
+        db.mark_pr_reviewed("repo/1").unwrap();
+        db.mark_pr_reviewed("repo/1").unwrap(); // INSERT OR REPLACE
+        assert!(db.is_pr_reviewed("repo/1").unwrap());
+    }
+
+    // ─── next_task_id: sequential within day ──────────────────────────────
+
+    #[test]
+    fn next_task_id_sequential() {
+        let db = Db::open_in_memory().unwrap();
+
+        let id1 = db.next_task_id().unwrap();
+        db.insert_task(&make_test_task(&id1)).unwrap();
+
+        let id2 = db.next_task_id().unwrap();
+        db.insert_task(&make_test_task(&id2)).unwrap();
+
+        let id3 = db.next_task_id().unwrap();
+
+        // IDs should be sequential
+        assert!(id1.ends_with("-001"));
+        assert!(id2.ends_with("-002"));
+        assert!(id3.ends_with("-003"));
+
+        // All should share the same date prefix
+        let prefix1 = id1.split('-').next().unwrap();
+        let prefix2 = id2.split('-').next().unwrap();
+        assert_eq!(prefix1, prefix2);
+    }
 }
