@@ -2,6 +2,7 @@
 name = "werma"
 version = "0.22.2"
 edition = "2024"
+rust-version = "1.88"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

@@ -133,12 +133,5 @@ fn check_daemon_status() -> &'static str {
 }
 
 pub fn truncate_line(s: &str, max: usize) -> String {
-    let first_line = s.lines().next().unwrap_or(s);
-    if first_line.len() <= max {
-        first_line.to_string()
-    } else {
-        let mut result: String = first_line.chars().take(max).collect();
-        result.push_str("...");
-        result
-    }
+    crate::commands::display::truncate(s, max)
 }

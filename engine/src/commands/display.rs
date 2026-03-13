@@ -1,7 +1,6 @@
 use chrono::Local;
 use colored::Colorize;
 
-use crate::dashboard::truncate_line;
 use crate::models::{Status, Task};
 
 /// Status icon for display.
@@ -41,12 +40,6 @@ pub fn expand_tilde(path: &str) -> String {
         return home.join(rest).to_string_lossy().to_string();
     }
     path.to_string()
-}
-
-/// Map short model name to full Claude model ID.
-/// Canonical version in runner::model_flag — this delegates to it.
-pub fn model_to_id(model: &str) -> &str {
-    crate::runner::model_flag(model)
 }
 
 /// Default max_turns based on task type.
@@ -98,7 +91,7 @@ pub fn format_task_line(task: &Task, time_str: &str) -> String {
     } else {
         format!("  [{}]", task.linear_issue_id.cyan())
     };
-    let preview = truncate_line(&task.prompt, 45);
+    let preview = truncate(&task.prompt, 45);
     format!(
         "   {}  {}{}  {}  {}",
         task.id,

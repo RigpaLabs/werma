@@ -14,11 +14,3 @@ pub fn cmd_daemon_run() -> Result<()> {
     let dir = crate::werma_dir()?;
     daemon::run(&dir)
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn daemon_cmd_module_exists() {
-        assert!(true);
-    }
-}

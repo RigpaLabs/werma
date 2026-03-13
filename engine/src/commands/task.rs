@@ -367,7 +367,7 @@ pub fn cmd_view(db: &Db, id: &str) -> Result<()> {
     println!(
         "  model:       {} ({})",
         task.model,
-        model_to_id(&task.model)
+        runner::model_flag(&task.model)
     );
     println!("  max_turns:   {}", task.max_turns);
     println!("  working_dir: {}", task.working_dir);
@@ -704,7 +704,7 @@ pub fn cmd_continue(db: &Db, id: &str, prompt: Option<String>) -> Result<()> {
     }
 
     let follow_up = prompt.unwrap_or_else(|| "Continue the task.".to_string());
-    let model_id = model_to_id(&task.model);
+    let model_id = runner::model_flag(&task.model);
     let session_name = format!("werma-{id}-cont");
     let wdir = crate::werma_dir()?;
     let logs_dir = wdir.join("logs");
