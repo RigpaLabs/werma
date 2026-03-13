@@ -1,0 +1,548 @@
+use anyhow::Result;
+use rusqlite::params;
+
+use crate::models::Task;
+
+use super::task_from_row;
+
+impl super::Db {
+    /// Set linear_pushed flag.
+    pub fn set_linear_pushed(&self, id: &str, pushed: bool) -> Result<()> {
+        let val: i32 = if pushed { 1 } else { 0 };
+        self.conn.execute(
+            "UPDATE tasks SET linear_pushed = ?1 WHERE id = ?2",
+            params![val, id],
+        )?;
+        Ok(())
+    }
+
+    /// Find tasks by linear_issue_id (optionally filter by pipeline_stage and active status).
+    pub fn tasks_by_linear_issue(
+        &self,
+        issue_id: &str,
+        stage: Option<&str>,
+        active_only: bool,
+    ) -> Result<Vec<Task>> {
+        let base_sql = "SELECT id, status, priority, created_at, started_at, finished_at,
+                    type, prompt, output_path, working_dir, model, max_turns,
+                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+             FROM tasks WHERE linear_issue_id = ?1";
+        let stage_clause = if stage.is_some() {
+            " AND pipeline_stage = ?2"
+        } else {
+            ""
+        };
+        let active_clause = if active_only {
+            " AND status IN ('pending', 'running')"
+        } else {
+            ""
+        };
+        let sql = format!("{base_sql}{stage_clause}{active_clause} ORDER BY created_at DESC");
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut tasks = Vec::new();
+        if let Some(s) = stage {
+            let rows = stmt.query_map(params![issue_id, s], |row| Ok(task_from_row(row)))?;
+            for row in rows {
+                tasks.push(row??);
+            }
+        } else {
+            let rows = stmt.query_map(params![issue_id], |row| Ok(task_from_row(row)))?;
+            for row in rows {
+                tasks.push(row??);
+            }
+        }
+        Ok(tasks)
+    }
+
+    /// Count all active (pending + running) pipeline tasks across all stages.
+    pub fn count_active_pipeline_tasks(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE pipeline_stage != ''
+               AND status IN ('pending', 'running')",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Count completed tasks for a given Linear issue and pipeline stage.
+    pub fn count_completed_tasks_for_issue_stage(
+        &self,
+        issue_id: &str,
+        stage: &str,
+    ) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE linear_issue_id = ?1
+               AND pipeline_stage = ?2
+               AND status = 'completed'",
+            params![issue_id, stage],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Find all completed tasks with a linear_issue_id where linear_pushed=false.
+    pub fn unpushed_linear_tasks(&self) -> Result<Vec<Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, status, priority, created_at, started_at, finished_at,
+                    type, prompt, output_path, working_dir, model, max_turns,
+                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+             FROM tasks
+             WHERE linear_issue_id != '' AND linear_pushed = 0 AND status = 'completed'
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok(task_from_row(row)))?;
+
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row??);
+        }
+        Ok(tasks)
+    }
+
+    /// Check if there's a completed but unpushed task for a given issue + stage.
+    pub fn has_unpushed_completed_task(&self, issue_id: &str, stage: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE linear_issue_id = ?1
+               AND pipeline_stage = ?2
+               AND status = 'completed'
+               AND linear_pushed = 0",
+            params![issue_id, stage],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Check if any non-failed task exists for a given issue + stage.
+    pub fn has_any_nonfailed_task_for_issue_stage(
+        &self,
+        issue_id: &str,
+        stage: &str,
+    ) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE linear_issue_id = ?1
+               AND pipeline_stage = ?2
+               AND status IN ('pending', 'running', 'completed')",
+            params![issue_id, stage],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Check if callback was recently fired for a task (within `window_secs` seconds).
+    pub fn is_callback_recently_fired(&self, task_id: &str, window_secs: i64) -> Result<bool> {
+        let fired_at: String = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(callback_fired_at, '') FROM tasks WHERE id = ?1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+
+        if fired_at.is_empty() {
+            return Ok(false);
+        }
+
+        if let Ok(ts) = chrono::NaiveDateTime::parse_from_str(&fired_at, "%Y-%m-%dT%H:%M:%S") {
+            let now = chrono::Local::now().naive_local();
+            let elapsed = now.signed_duration_since(ts).num_seconds();
+            return Ok(elapsed < window_secs);
+        }
+
+        Ok(false)
+    }
+
+    /// Set callback_fired_at to current timestamp.
+    pub fn set_callback_fired_at(&self, task_id: &str) -> Result<()> {
+        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        self.conn.execute(
+            "UPDATE tasks SET callback_fired_at = ?1 WHERE id = ?2",
+            params![now, task_id],
+        )?;
+        Ok(())
+    }
+
+    /// Check if a review task for the same target is already running or pending.
+    pub fn has_active_review_task(&self, working_dir: &str, target_label: &str) -> Result<bool> {
+        let escaped = target_label.replace('%', "\\%").replace('_', "\\_");
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE type = 'pipeline-reviewer'
+               AND status IN ('pending', 'running')
+               AND working_dir = ?1
+               AND prompt LIKE ?2 ESCAPE '\\'",
+            params![working_dir, format!("%Code Review: {escaped}%")],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    // --- PR Reviewed ---
+
+    pub fn is_pr_reviewed(&self, pr_key: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pr_reviewed WHERE pr_key = ?1",
+            params![pr_key],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn mark_pr_reviewed(&self, pr_key: &str) -> Result<()> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO pr_reviewed (pr_key, updated_at) VALUES (?1, ?2)",
+            params![pr_key, now],
+        )?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Db, make_test_task};
+    use crate::models::Status;
+    use rusqlite::params;
+
+    #[test]
+    fn set_linear_pushed() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        db.set_linear_pushed("20260308-001", true).unwrap();
+        let fetched = db.task("20260308-001").unwrap().unwrap();
+        assert!(fetched.linear_pushed);
+    }
+
+    #[test]
+    fn has_unpushed_completed_task() {
+        let db = Db::open_in_memory().unwrap();
+
+        assert!(
+            !db.has_unpushed_completed_task("RIG-105", "engineer")
+                .unwrap()
+        );
+
+        let mut task = make_test_task("20260312-001");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-105".to_string();
+        task.pipeline_stage = "engineer".to_string();
+        task.linear_pushed = false;
+        db.insert_task(&task).unwrap();
+
+        assert!(
+            db.has_unpushed_completed_task("RIG-105", "engineer")
+                .unwrap()
+        );
+        assert!(
+            !db.has_unpushed_completed_task("RIG-999", "engineer")
+                .unwrap()
+        );
+        assert!(
+            !db.has_unpushed_completed_task("RIG-105", "reviewer")
+                .unwrap()
+        );
+
+        db.set_linear_pushed("20260312-001", true).unwrap();
+        assert!(
+            !db.has_unpushed_completed_task("RIG-105", "engineer")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn has_any_nonfailed_task_for_issue_stage() {
+        let db = Db::open_in_memory().unwrap();
+
+        assert!(
+            !db.has_any_nonfailed_task_for_issue_stage("RIG-209", "analyst")
+                .unwrap()
+        );
+
+        let mut task = make_test_task("20260313-001");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-209".to_string();
+        task.pipeline_stage = "analyst".to_string();
+        task.linear_pushed = true;
+        db.insert_task(&task).unwrap();
+
+        assert!(
+            db.has_any_nonfailed_task_for_issue_stage("RIG-209", "analyst")
+                .unwrap()
+        );
+        assert!(
+            !db.has_any_nonfailed_task_for_issue_stage("RIG-999", "analyst")
+                .unwrap()
+        );
+        assert!(
+            !db.has_any_nonfailed_task_for_issue_stage("RIG-209", "engineer")
+                .unwrap()
+        );
+
+        let mut failed_task = make_test_task("20260313-002");
+        failed_task.status = Status::Failed;
+        failed_task.linear_issue_id = "RIG-210".to_string();
+        failed_task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&failed_task).unwrap();
+
+        assert!(
+            !db.has_any_nonfailed_task_for_issue_stage("RIG-210", "analyst")
+                .unwrap()
+        );
+
+        let mut pending_task = make_test_task("20260313-003");
+        pending_task.status = Status::Pending;
+        pending_task.linear_issue_id = "RIG-211".to_string();
+        pending_task.pipeline_stage = "engineer".to_string();
+        db.insert_task(&pending_task).unwrap();
+
+        assert!(
+            db.has_any_nonfailed_task_for_issue_stage("RIG-211", "engineer")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn pr_reviewed() {
+        let db = Db::open_in_memory().unwrap();
+
+        assert!(!db.is_pr_reviewed("repo/123").unwrap());
+        db.mark_pr_reviewed("repo/123").unwrap();
+        assert!(db.is_pr_reviewed("repo/123").unwrap());
+    }
+
+    #[test]
+    fn pr_reviewed_idempotent() {
+        let db = Db::open_in_memory().unwrap();
+        db.mark_pr_reviewed("repo/1").unwrap();
+        db.mark_pr_reviewed("repo/1").unwrap();
+        assert!(db.is_pr_reviewed("repo/1").unwrap());
+    }
+
+    #[test]
+    fn has_active_review_task_dedup() {
+        let db = Db::open_in_memory().unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+
+        assert!(!db.has_active_review_task("/repo", "PR #8").unwrap());
+
+        let task = crate::models::Task {
+            id: "20260310-001".to_string(),
+            status: crate::models::Status::Pending,
+            priority: 1,
+            created_at: now.clone(),
+            started_at: None,
+            finished_at: None,
+            task_type: "pipeline-reviewer".to_string(),
+            prompt: "# Code Review: PR #8\n\nReview the diff.".to_string(),
+            output_path: String::new(),
+            working_dir: "/repo".to_string(),
+            model: "sonnet".to_string(),
+            max_turns: 10,
+            allowed_tools: "Read,Glob,Grep".to_string(),
+            session_id: String::new(),
+            linear_issue_id: String::new(),
+            linear_pushed: false,
+            pipeline_stage: String::new(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: String::new(),
+            estimate: 0,
+        };
+        db.insert_task(&task).unwrap();
+
+        assert!(db.has_active_review_task("/repo", "PR #8").unwrap());
+        assert!(!db.has_active_review_task("/repo", "PR #9").unwrap());
+        assert!(!db.has_active_review_task("/other-repo", "PR #8").unwrap());
+
+        db.set_task_status("20260310-001", crate::models::Status::Completed)
+            .unwrap();
+        assert!(!db.has_active_review_task("/repo", "PR #8").unwrap());
+    }
+
+    #[test]
+    fn callback_guard_not_fired() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        assert!(!db.is_callback_recently_fired("20260308-001", 60).unwrap());
+    }
+
+    #[test]
+    fn callback_guard_recently_fired() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        db.set_callback_fired_at("20260308-001").unwrap();
+
+        assert!(db.is_callback_recently_fired("20260308-001", 60).unwrap());
+        assert!(!db.is_callback_recently_fired("20260308-001", 0).unwrap());
+    }
+
+    #[test]
+    fn callback_guard_expired() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        db.conn
+            .execute(
+                "UPDATE tasks SET callback_fired_at = '2020-01-01T00:00:00' WHERE id = ?1",
+                params!["20260308-001"],
+            )
+            .unwrap();
+
+        assert!(!db.is_callback_recently_fired("20260308-001", 60).unwrap());
+    }
+
+    #[test]
+    fn tasks_by_linear_issue_all_combos() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut t1 = make_test_task("20260312-001");
+        t1.linear_issue_id = "issue-1".to_string();
+        t1.pipeline_stage = "engineer".to_string();
+        db.insert_task(&t1).unwrap();
+
+        let mut t2 = make_test_task("20260312-002");
+        t2.linear_issue_id = "issue-1".to_string();
+        t2.pipeline_stage = "engineer".to_string();
+        db.insert_task(&t2).unwrap();
+        db.set_task_status("20260312-002", Status::Completed)
+            .unwrap();
+
+        let mut t3 = make_test_task("20260312-003");
+        t3.linear_issue_id = "issue-1".to_string();
+        t3.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&t3).unwrap();
+
+        let all = db.tasks_by_linear_issue("issue-1", None, false).unwrap();
+        assert_eq!(all.len(), 3);
+
+        let active = db.tasks_by_linear_issue("issue-1", None, true).unwrap();
+        assert_eq!(active.len(), 2);
+
+        let eng = db
+            .tasks_by_linear_issue("issue-1", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(eng.len(), 2);
+
+        let eng_active = db
+            .tasks_by_linear_issue("issue-1", Some("engineer"), true)
+            .unwrap();
+        assert_eq!(eng_active.len(), 1);
+        assert_eq!(eng_active[0].id, "20260312-001");
+
+        let rev = db
+            .tasks_by_linear_issue("issue-1", Some("reviewer"), false)
+            .unwrap();
+        assert_eq!(rev.len(), 1);
+
+        let none = db.tasks_by_linear_issue("issue-999", None, false).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn count_active_pipeline_tasks_empty() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.count_active_pipeline_tasks().unwrap(), 0);
+    }
+
+    #[test]
+    fn count_active_pipeline_tasks_counts_correctly() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut t1 = make_test_task("20260312-001");
+        t1.pipeline_stage = "engineer".to_string();
+        db.insert_task(&t1).unwrap();
+
+        let mut t2 = make_test_task("20260312-002");
+        t2.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&t2).unwrap();
+        db.set_task_status("20260312-002", Status::Running).unwrap();
+
+        db.insert_task(&make_test_task("20260312-003")).unwrap();
+
+        let mut t4 = make_test_task("20260312-004");
+        t4.pipeline_stage = "engineer".to_string();
+        db.insert_task(&t4).unwrap();
+        db.set_task_status("20260312-004", Status::Completed)
+            .unwrap();
+
+        assert_eq!(db.count_active_pipeline_tasks().unwrap(), 2);
+    }
+
+    #[test]
+    fn count_completed_for_issue_stage() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut t1 = make_test_task("20260312-001");
+        t1.linear_issue_id = "issue-1".to_string();
+        t1.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&t1).unwrap();
+        db.set_task_status("20260312-001", Status::Completed)
+            .unwrap();
+
+        let mut t2 = make_test_task("20260312-002");
+        t2.linear_issue_id = "issue-1".to_string();
+        t2.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&t2).unwrap();
+
+        assert_eq!(
+            db.count_completed_tasks_for_issue_stage("issue-1", "reviewer")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.count_completed_tasks_for_issue_stage("issue-1", "engineer")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.count_completed_tasks_for_issue_stage("issue-999", "reviewer")
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn unpushed_linear_tasks_basic() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut task = make_test_task("20260312-001");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-100".to_string();
+        task.linear_pushed = false;
+        db.insert_task(&task).unwrap();
+
+        let unpushed = db.unpushed_linear_tasks().unwrap();
+        assert_eq!(unpushed.len(), 1);
+        assert_eq!(unpushed[0].id, "20260312-001");
+
+        db.set_linear_pushed("20260312-001", true).unwrap();
+        let unpushed = db.unpushed_linear_tasks().unwrap();
+        assert!(unpushed.is_empty());
+    }
+
+    #[test]
+    fn unpushed_excludes_no_linear_id() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut task = make_test_task("20260312-001");
+        task.status = Status::Completed;
+        // linear_issue_id is empty
+        db.insert_task(&task).unwrap();
+
+        let unpushed = db.unpushed_linear_tasks().unwrap();
+        assert!(unpushed.is_empty());
+    }
+}

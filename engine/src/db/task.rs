@@ -1,0 +1,766 @@
+use anyhow::Result;
+use rusqlite::params;
+
+use crate::models::{Status, Task};
+
+use super::task_from_row;
+
+/// Trait for task persistence operations, enabling testability via fakes/mocks.
+pub trait TaskRepository {
+    fn insert_task(&self, task: &Task) -> Result<()>;
+    fn task(&self, id: &str) -> Result<Option<Task>>;
+    fn list_tasks(&self, status: Option<Status>) -> Result<Vec<Task>>;
+    fn set_task_status(&self, id: &str, status: Status) -> Result<()>;
+    fn find_next_pending(&self) -> Result<Option<Task>>;
+    fn update_task_field(&self, id: &str, field: &str, value: &str) -> Result<()>;
+}
+
+impl TaskRepository for super::Db {
+    fn insert_task(&self, task: &Task) -> Result<()> {
+        self.insert_task(task)
+    }
+
+    fn task(&self, id: &str) -> Result<Option<Task>> {
+        self.task(id)
+    }
+
+    fn list_tasks(&self, status: Option<Status>) -> Result<Vec<Task>> {
+        self.list_tasks(status)
+    }
+
+    fn set_task_status(&self, id: &str, status: Status) -> Result<()> {
+        self.set_task_status(id, status)
+    }
+
+    fn find_next_pending(&self) -> Result<Option<Task>> {
+        self.find_next_pending()
+    }
+
+    fn update_task_field(&self, id: &str, field: &str, value: &str) -> Result<()> {
+        self.update_task_field(id, field, value)
+    }
+}
+
+impl super::Db {
+    /// Generate next task ID: YYYYMMDD-NNN (sequential within day).
+    pub fn next_task_id(&self) -> Result<String> {
+        let today = chrono::Local::now().format("%Y%m%d").to_string();
+        let prefix = format!("{today}-");
+
+        let last_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM tasks WHERE id LIKE ?1 || '%' ORDER BY id DESC LIMIT 1",
+                params![prefix],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let next_num = match last_id {
+            Some(id) => {
+                let num_str = id.strip_prefix(&prefix).unwrap_or("000");
+                let num: u32 = num_str.parse().unwrap_or(0);
+                num + 1
+            }
+            None => 1,
+        };
+
+        Ok(format!("{prefix}{next_num:03}"))
+    }
+
+    /// Insert a new task.
+    pub fn insert_task(&self, task: &Task) -> Result<()> {
+        let depends_on = serde_json::to_string(&task.depends_on)?;
+        let context_files = serde_json::to_string(&task.context_files)?;
+        let linear_pushed: i32 = if task.linear_pushed { 1 } else { 0 };
+
+        self.conn.execute(
+            "INSERT INTO tasks (
+                id, status, priority, created_at, started_at, finished_at,
+                type, prompt, output_path, working_dir, model, max_turns,
+                allowed_tools, session_id, linear_issue_id, linear_pushed,
+                pipeline_stage, depends_on, context_files, repo_hash, estimate
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6,
+                ?7, ?8, ?9, ?10, ?11, ?12,
+                ?13, ?14, ?15, ?16,
+                ?17, ?18, ?19, ?20, ?21
+            )",
+            params![
+                task.id,
+                task.status.to_string(),
+                task.priority,
+                task.created_at,
+                task.started_at,
+                task.finished_at,
+                task.task_type,
+                task.prompt,
+                task.output_path,
+                task.working_dir,
+                task.model,
+                task.max_turns,
+                task.allowed_tools,
+                task.session_id,
+                task.linear_issue_id,
+                linear_pushed,
+                task.pipeline_stage,
+                depends_on,
+                context_files,
+                task.repo_hash,
+                task.estimate,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get task by ID.
+    pub fn task(&self, id: &str) -> Result<Option<Task>> {
+        let result = self.conn.query_row(
+            "SELECT id, status, priority, created_at, started_at, finished_at,
+                    type, prompt, output_path, working_dir, model, max_turns,
+                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+             FROM tasks WHERE id = ?1",
+            params![id],
+            |row| Ok(task_from_row(row)),
+        );
+
+        match result {
+            Ok(task) => Ok(Some(task?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// List tasks, optionally filtered by status.
+    pub fn list_tasks(&self, status: Option<Status>) -> Result<Vec<Task>> {
+        let mut tasks = Vec::new();
+
+        if let Some(s) = status {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, status, priority, created_at, started_at, finished_at,
+                        type, prompt, output_path, working_dir, model, max_turns,
+                        allowed_tools, session_id, linear_issue_id, linear_pushed,
+                        pipeline_stage, depends_on, context_files, repo_hash, estimate
+                 FROM tasks WHERE status = ?1
+                 ORDER BY priority ASC, created_at ASC",
+            )?;
+            let rows = stmt.query_map(params![s.to_string()], |row| Ok(task_from_row(row)))?;
+            for row in rows {
+                tasks.push(row??);
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT id, status, priority, created_at, started_at, finished_at,
+                        type, prompt, output_path, working_dir, model, max_turns,
+                        allowed_tools, session_id, linear_issue_id, linear_pushed,
+                        pipeline_stage, depends_on, context_files, repo_hash, estimate
+                 FROM tasks ORDER BY priority ASC, created_at ASC",
+            )?;
+            let rows = stmt.query_map([], |row| Ok(task_from_row(row)))?;
+            for row in rows {
+                tasks.push(row??);
+            }
+        }
+
+        Ok(tasks)
+    }
+
+    /// Count tasks by status: (pending, running, completed, failed).
+    pub fn task_counts(&self) -> Result<(i64, i64, i64, i64)> {
+        let count = |status: &str| -> Result<i64> {
+            Ok(self.conn.query_row(
+                "SELECT COUNT(*) FROM tasks WHERE status = ?1",
+                params![status],
+                |row| row.get(0),
+            )?)
+        };
+        Ok((
+            count("pending")?,
+            count("running")?,
+            count("completed")?,
+            count("failed")?,
+        ))
+    }
+
+    /// Update task status.
+    pub fn set_task_status(&self, id: &str, status: Status) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET status = ?1 WHERE id = ?2",
+            params![status.to_string(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Update a single task field.
+    ///
+    /// Only allows known safe fields to prevent SQL injection.
+    pub fn update_task_field(&self, id: &str, field: &str, value: &str) -> Result<()> {
+        let allowed = [
+            "session_id",
+            "started_at",
+            "finished_at",
+            "output_path",
+            "pipeline_stage",
+            "allowed_tools",
+            "model",
+            "repo_hash",
+            "estimate",
+        ];
+        anyhow::ensure!(
+            allowed.contains(&field),
+            "field '{field}' is not allowed for update"
+        );
+
+        let sql = format!("UPDATE tasks SET {field} = ?1 WHERE id = ?2");
+        self.conn.execute(&sql, params![value, id])?;
+        Ok(())
+    }
+
+    /// Find next pending task with resolved dependencies.
+    pub fn find_next_pending(&self) -> Result<Option<Task>> {
+        let result = self.conn.query_row(
+            "SELECT id, status, priority, created_at, started_at, finished_at,
+                    type, prompt, output_path, working_dir, model, max_turns,
+                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+             FROM tasks
+             WHERE status = 'pending'
+               AND NOT EXISTS (
+                 SELECT 1 FROM json_each(depends_on) AS dep
+                 WHERE NOT EXISTS (
+                   SELECT 1 FROM tasks t2 WHERE t2.id = dep.value AND t2.status = 'completed'
+                 )
+               )
+             ORDER BY priority ASC, created_at ASC
+             LIMIT 1",
+            [],
+            |row| Ok(task_from_row(row)),
+        );
+
+        match result {
+            Ok(task) => Ok(Some(task?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Atomically find the next pending task and mark it as running.
+    /// Uses BEGIN IMMEDIATE to prevent two callers from claiming the same task.
+    pub fn claim_next_pending(&self) -> Result<Option<Task>> {
+        self.conn.execute("BEGIN IMMEDIATE", [])?;
+
+        let result = self.conn.query_row(
+            "SELECT id FROM tasks
+             WHERE status = 'pending'
+               AND NOT EXISTS (
+                 SELECT 1 FROM json_each(depends_on) AS dep
+                 WHERE NOT EXISTS (
+                   SELECT 1 FROM tasks t2 WHERE t2.id = dep.value AND t2.status = 'completed'
+                 )
+               )
+             ORDER BY priority ASC, created_at ASC
+             LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+
+        let task_id = match result {
+            Ok(id) => id,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                self.conn.execute("ROLLBACK", [])?;
+                return Ok(None);
+            }
+            Err(e) => {
+                self.conn.execute("ROLLBACK", [])?;
+                return Err(e.into());
+            }
+        };
+
+        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        self.conn.execute(
+            "UPDATE tasks SET status = 'running', started_at = ?1 WHERE id = ?2",
+            params![now, task_id],
+        )?;
+        self.conn.execute("COMMIT", [])?;
+
+        // Now fetch the full task
+        self.task(&task_id)
+    }
+
+    /// Find all pending tasks with resolved dependencies (for run-all wave execution).
+    pub fn find_all_launchable(&self) -> Result<Vec<Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, status, priority, created_at, started_at, finished_at,
+                    type, prompt, output_path, working_dir, model, max_turns,
+                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+             FROM tasks
+             WHERE status = 'pending'
+               AND NOT EXISTS (
+                 SELECT 1 FROM json_each(depends_on) AS dep
+                 WHERE NOT EXISTS (
+                   SELECT 1 FROM tasks t2 WHERE t2.id = dep.value AND t2.status = 'completed'
+                 )
+               )
+             ORDER BY priority ASC, created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok(task_from_row(row)))?;
+
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row??);
+        }
+        Ok(tasks)
+    }
+
+    /// Delete completed tasks, return them.
+    pub fn clean_completed(&self) -> Result<Vec<Task>> {
+        let tasks = self.list_tasks(Some(Status::Completed))?;
+        self.conn
+            .execute("DELETE FROM tasks WHERE status = 'completed'", [])?;
+        Ok(tasks)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Db, make_test_task};
+    use crate::models::Status;
+
+    #[test]
+    fn insert_and_get_task() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        let fetched = db.task("20260308-001").unwrap().unwrap();
+        assert_eq!(fetched.id, "20260308-001");
+        assert_eq!(fetched.status, Status::Pending);
+        assert_eq!(fetched.prompt, "test prompt");
+        assert_eq!(fetched.estimate, 0);
+    }
+
+    #[test]
+    fn task_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let fetched = db.task("nonexistent").unwrap();
+        assert!(fetched.is_none());
+    }
+
+    #[test]
+    fn list_tasks_filter_by_status() {
+        let db = Db::open_in_memory().unwrap();
+
+        let t1 = make_test_task("20260308-001");
+        let mut t2 = make_test_task("20260308-002");
+        t2.status = Status::Completed;
+        db.insert_task(&t1).unwrap();
+        db.insert_task(&t2).unwrap();
+
+        let pending = db.list_tasks(Some(Status::Pending)).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "20260308-001");
+
+        let all = db.list_tasks(None).unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn set_task_status() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        db.set_task_status("20260308-001", Status::Running).unwrap();
+        let fetched = db.task("20260308-001").unwrap().unwrap();
+        assert_eq!(fetched.status, Status::Running);
+    }
+
+    #[test]
+    fn task_counts() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut t1 = make_test_task("20260308-001");
+        let mut t2 = make_test_task("20260308-002");
+        t2.status = Status::Running;
+        let mut t3 = make_test_task("20260308-003");
+        t3.status = Status::Completed;
+        t1.priority = 1;
+
+        db.insert_task(&t1).unwrap();
+        db.insert_task(&t2).unwrap();
+        db.insert_task(&t3).unwrap();
+
+        let counts = db.task_counts().unwrap();
+        assert_eq!(counts, (1, 1, 1, 0));
+    }
+
+    #[test]
+    fn find_next_pending_no_deps() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut t1 = make_test_task("20260308-001");
+        t1.priority = 3;
+        let mut t2 = make_test_task("20260308-002");
+        t2.priority = 1;
+
+        db.insert_task(&t1).unwrap();
+        db.insert_task(&t2).unwrap();
+
+        let next = db.find_next_pending().unwrap().unwrap();
+        assert_eq!(next.id, "20260308-002"); // lower priority number = higher priority
+    }
+
+    #[test]
+    fn find_next_pending_with_deps() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut t1 = make_test_task("20260308-001");
+        t1.depends_on = vec!["20260308-002".to_string()];
+        t1.priority = 1;
+        let t2 = make_test_task("20260308-002");
+
+        db.insert_task(&t1).unwrap();
+        db.insert_task(&t2).unwrap();
+
+        let next = db.find_next_pending().unwrap().unwrap();
+        assert_eq!(next.id, "20260308-002");
+
+        db.set_task_status("20260308-002", Status::Completed)
+            .unwrap();
+
+        let next = db.find_next_pending().unwrap().unwrap();
+        assert_eq!(next.id, "20260308-001");
+    }
+
+    #[test]
+    fn find_next_pending_all_deps_unresolved() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut t1 = make_test_task("20260308-001");
+        t1.depends_on = vec!["20260308-002".to_string()];
+        let mut t2 = make_test_task("20260308-002");
+        t2.depends_on = vec!["20260308-003".to_string()];
+
+        db.insert_task(&t1).unwrap();
+        db.insert_task(&t2).unwrap();
+
+        let next = db.find_next_pending().unwrap();
+        assert!(next.is_none());
+    }
+
+    #[test]
+    fn next_task_id() {
+        let db = Db::open_in_memory().unwrap();
+        let id1 = db.next_task_id().unwrap();
+        assert!(id1.ends_with("-001"));
+
+        let mut task = make_test_task(&id1);
+        task.id = id1.clone();
+        db.insert_task(&task).unwrap();
+
+        let id2 = db.next_task_id().unwrap();
+        assert!(id2.ends_with("-002"));
+    }
+
+    #[test]
+    fn next_task_id_sequential() {
+        let db = Db::open_in_memory().unwrap();
+
+        let id1 = db.next_task_id().unwrap();
+        db.insert_task(&make_test_task(&id1)).unwrap();
+
+        let id2 = db.next_task_id().unwrap();
+        db.insert_task(&make_test_task(&id2)).unwrap();
+
+        let id3 = db.next_task_id().unwrap();
+
+        assert!(id1.ends_with("-001"));
+        assert!(id2.ends_with("-002"));
+        assert!(id3.ends_with("-003"));
+
+        let prefix1 = id1.split('-').next().unwrap();
+        let prefix2 = id2.split('-').next().unwrap();
+        assert_eq!(prefix1, prefix2);
+    }
+
+    #[test]
+    fn clean_completed() {
+        let db = Db::open_in_memory().unwrap();
+
+        let t1 = make_test_task("20260308-001");
+        let mut t2 = make_test_task("20260308-002");
+        t2.status = Status::Completed;
+
+        db.insert_task(&t1).unwrap();
+        db.insert_task(&t2).unwrap();
+
+        let cleaned = db.clean_completed().unwrap();
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(cleaned[0].id, "20260308-002");
+
+        let all = db.list_tasks(None).unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn clean_completed_empty() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260313-001");
+        db.insert_task(&task).unwrap();
+
+        let cleaned = db.clean_completed().unwrap();
+        assert!(cleaned.is_empty());
+
+        let all = db.list_tasks(None).unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn update_task_field() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        db.update_task_field("20260308-001", "session_id", "abc-123")
+            .unwrap();
+        let fetched = db.task("20260308-001").unwrap().unwrap();
+        assert_eq!(fetched.session_id, "abc-123");
+    }
+
+    #[test]
+    fn update_task_field_estimate() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        db.update_task_field("20260308-001", "estimate", "8")
+            .unwrap();
+        let fetched = db.task("20260308-001").unwrap().unwrap();
+        assert_eq!(fetched.estimate, 8);
+    }
+
+    #[test]
+    fn update_task_field_disallowed() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        let result = db.update_task_field("20260308-001", "prompt", "hacked");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn task_counts_all_statuses() {
+        let db = Db::open_in_memory().unwrap();
+
+        db.insert_task(&make_test_task("20260313-001")).unwrap();
+        db.insert_task(&make_test_task("20260313-002")).unwrap();
+
+        db.insert_task(&make_test_task("20260313-003")).unwrap();
+        db.set_task_status("20260313-003", Status::Running).unwrap();
+
+        db.insert_task(&make_test_task("20260313-004")).unwrap();
+        db.set_task_status("20260313-004", Status::Completed)
+            .unwrap();
+
+        db.insert_task(&make_test_task("20260313-005")).unwrap();
+        db.set_task_status("20260313-005", Status::Failed).unwrap();
+
+        let (p, r, c, f) = db.task_counts().unwrap();
+        assert_eq!(p, 2);
+        assert_eq!(r, 1);
+        assert_eq!(c, 1);
+        assert_eq!(f, 1);
+    }
+
+    // ─── claim_next_pending ─────────────────────────────────────────────────
+
+    #[test]
+    fn claim_next_pending_empty_db() {
+        let db = Db::open_in_memory().unwrap();
+        let claimed = db.claim_next_pending().unwrap();
+        assert!(claimed.is_none());
+    }
+
+    #[test]
+    fn claim_next_pending_sets_running() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260312-001");
+        db.insert_task(&task).unwrap();
+
+        let claimed = db.claim_next_pending().unwrap();
+        assert!(claimed.is_some());
+        let claimed = claimed.unwrap();
+        assert_eq!(claimed.id, "20260312-001");
+        assert_eq!(claimed.status, Status::Running);
+        assert!(claimed.started_at.is_some());
+    }
+
+    #[test]
+    fn claim_next_pending_respects_priority() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut low_prio = make_test_task("20260312-002");
+        low_prio.priority = 3;
+        let mut high_prio = make_test_task("20260312-001");
+        high_prio.priority = 1;
+
+        db.insert_task(&low_prio).unwrap();
+        db.insert_task(&high_prio).unwrap();
+
+        let claimed = db.claim_next_pending().unwrap().unwrap();
+        assert_eq!(claimed.id, "20260312-001");
+    }
+
+    #[test]
+    fn claim_next_pending_skips_unresolved_deps() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut task = make_test_task("20260312-002");
+        task.depends_on = vec!["20260312-001".to_string()];
+        db.insert_task(&task).unwrap();
+
+        let claimed = db.claim_next_pending().unwrap();
+        assert!(claimed.is_none());
+    }
+
+    #[test]
+    fn claim_next_pending_with_resolved_deps() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut dep = make_test_task("20260312-001");
+        dep.status = Status::Completed;
+        db.insert_task(&dep).unwrap();
+
+        let mut task = make_test_task("20260312-002");
+        task.depends_on = vec!["20260312-001".to_string()];
+        db.insert_task(&task).unwrap();
+
+        let claimed = db.claim_next_pending().unwrap().unwrap();
+        assert_eq!(claimed.id, "20260312-002");
+    }
+
+    #[test]
+    fn claim_next_pending_no_double_claim() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260312-001");
+        db.insert_task(&task).unwrap();
+
+        let first = db.claim_next_pending().unwrap();
+        assert!(first.is_some());
+        let second = db.claim_next_pending().unwrap();
+        assert!(second.is_none());
+    }
+
+    // ─── find_all_launchable ────────────────────────────────────────────────
+
+    #[test]
+    fn find_all_launchable_empty() {
+        let db = Db::open_in_memory().unwrap();
+        let tasks = db.find_all_launchable().unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn find_all_launchable_returns_multiple() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_task(&make_test_task("20260312-001")).unwrap();
+        db.insert_task(&make_test_task("20260312-002")).unwrap();
+
+        let tasks = db.find_all_launchable().unwrap();
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[test]
+    fn find_all_launchable_excludes_unresolved_deps() {
+        let db = Db::open_in_memory().unwrap();
+        db.insert_task(&make_test_task("20260312-001")).unwrap();
+
+        let mut with_dep = make_test_task("20260312-002");
+        with_dep.depends_on = vec!["20260312-999".to_string()];
+        db.insert_task(&with_dep).unwrap();
+
+        let tasks = db.find_all_launchable().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "20260312-001");
+    }
+
+    #[test]
+    fn find_all_launchable_skips_running() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260312-001");
+        db.insert_task(&task).unwrap();
+        db.set_task_status("20260312-001", Status::Running).unwrap();
+
+        let tasks = db.find_all_launchable().unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    // ─── boundary tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn task_with_unicode_fields() {
+        let db = Db::open_in_memory().unwrap();
+        let mut task = make_test_task("20260308-001");
+        task.prompt = "проверить 日本語 ✨ emoji".to_string();
+        task.working_dir = "/tmp/тест".to_string();
+        db.insert_task(&task).unwrap();
+
+        let fetched = db.task("20260308-001").unwrap().unwrap();
+        assert_eq!(fetched.prompt, "проверить 日本語 ✨ emoji");
+        assert_eq!(fetched.working_dir, "/tmp/тест");
+    }
+
+    #[test]
+    fn task_with_empty_depends_on() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        let fetched = db.task("20260308-001").unwrap().unwrap();
+        assert!(fetched.depends_on.is_empty());
+    }
+
+    #[test]
+    fn list_tasks_empty_table() {
+        let db = Db::open_in_memory().unwrap();
+        let tasks = db.list_tasks(None).unwrap();
+        assert!(tasks.is_empty());
+        let tasks = db.list_tasks(Some(Status::Pending)).unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn duplicate_task_id_errors() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+        let result = db.insert_task(&task);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn update_task_field_all_allowed_fields() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260308-001");
+        db.insert_task(&task).unwrap();
+
+        let allowed = [
+            "session_id",
+            "started_at",
+            "finished_at",
+            "output_path",
+            "pipeline_stage",
+            "allowed_tools",
+            "model",
+            "repo_hash",
+            "estimate",
+        ];
+        for field in allowed {
+            db.update_task_field("20260308-001", field, "test_value")
+                .unwrap();
+        }
+    }
+}

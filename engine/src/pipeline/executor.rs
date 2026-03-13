@@ -1551,10 +1551,11 @@ mod tests {
         let config = test_config();
 
         // Pre-insert dummy tasks to offset the ID counter, avoiding handoff file
-        // collisions with other tests that also generate 20260312-001 IDs.
+        // collisions with other tests that also generate today's date prefix.
+        let today = chrono::Local::now().format("%Y%m%d").to_string();
         for i in 0..20 {
             let dummy = crate::models::Task {
-                id: format!("20260312-{:03}", i + 1),
+                id: format!("{today}-{:03}", i + 1),
                 ..Default::default()
             };
             db.insert_task(&dummy).unwrap();
