@@ -766,6 +766,89 @@ fn callback_analyst_estimate_updates_linear() {
     );
 }
 
+// ─── Test 20b: callback_analyst_adds_done_label ──────────────────────────────
+
+#[test]
+fn callback_analyst_adds_done_label() {
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+
+    let mut task = make_test_task("20260313-219");
+    task.status = Status::Completed;
+    task.linear_issue_id = "RIG-219".to_string();
+    task.pipeline_stage = "analyst".to_string();
+    db.insert_task(&task).unwrap();
+
+    let result = "## Analysis\nSpec here.\n\nESTIMATE=3\nVERDICT=DONE";
+
+    callback(
+        &db,
+        "20260313-219",
+        "analyst",
+        result,
+        "RIG-219",
+        "~/projects/rigpa/werma",
+        &linear,
+        &cmd,
+    )
+    .unwrap();
+
+    // analyze:done label should be added
+    let adds = linear.add_label_calls.borrow();
+    assert!(
+        adds.iter()
+            .any(|(id, label)| id == "RIG-219" && label == "analyze:done"),
+        "analyst callback should add 'analyze:done' label, got: {adds:?}"
+    );
+
+    // Issue should still move to todo (existing behavior)
+    let moves = linear.move_calls.borrow();
+    assert!(
+        moves
+            .iter()
+            .any(|(id, status)| id == "RIG-219" && status == "todo"),
+        "analyst DONE should move to todo, got: {moves:?}"
+    );
+}
+
+// ─── Test 20c: callback_analyst_blocked_also_adds_done_label ─────────────────
+
+#[test]
+fn callback_analyst_blocked_also_adds_done_label() {
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+
+    let mut task = make_test_task("20260313-219b");
+    task.status = Status::Completed;
+    task.linear_issue_id = "RIG-219B".to_string();
+    task.pipeline_stage = "analyst".to_string();
+    db.insert_task(&task).unwrap();
+
+    let result = "## Analysis\nBlocked on external dependency.\n\nVERDICT=BLOCKED";
+
+    callback(
+        &db,
+        "20260313-219b",
+        "analyst",
+        result,
+        "RIG-219B",
+        "~/projects/rigpa/werma",
+        &linear,
+        &cmd,
+    )
+    .unwrap();
+
+    // analyze:done label should be added even for BLOCKED verdict
+    let adds = linear.add_label_calls.borrow();
+    assert!(
+        adds.iter()
+            .any(|(id, label)| id == "RIG-219B" && label == "analyze:done"),
+        "analyst BLOCKED callback should also add 'analyze:done' label, got: {adds:?}"
+    );
+}
+
 // ─── Test 21: callback_missing_verdict_warns ─────────────────────────────────
 
 #[test]
