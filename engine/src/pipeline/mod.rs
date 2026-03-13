@@ -6,6 +6,8 @@ pub mod verdict;
 
 // Re-export the public API that daemon.rs and main.rs call.
 pub use executor::{callback, create_initial_stage_task, poll};
+// Re-export LinearApi for convenience at call sites.
+pub use crate::linear::LinearApi;
 
 /// Load the global max_concurrent limit from pipeline config.
 /// Falls back to the compiled-in default if config loading fails.
@@ -20,7 +22,6 @@ pub fn load_max_concurrent() -> usize {
 use anyhow::Result;
 
 use crate::db::Db;
-use crate::linear::LinearClient;
 use crate::models::{Status, Task};
 
 /// Parse OUTPUT_FILE=<path> from research task output.
@@ -38,9 +39,12 @@ pub fn parse_output_file(result: &str) -> Option<String> {
 }
 
 /// Handle research task completion: create curator follow-up and move issue to Done.
-pub fn handle_research_completion(db: &Db, task: &Task, output: &str) -> Result<()> {
-    let linear = LinearClient::new()?;
-
+pub fn handle_research_completion(
+    db: &Db,
+    task: &Task,
+    output: &str,
+    linear: &dyn LinearApi,
+) -> Result<()> {
     let output_file = parse_output_file(output).unwrap_or_default();
 
     let summary = extract_tldr(output);
@@ -142,20 +146,11 @@ fn extract_tldr(text: &str) -> String {
 }
 
 /// Show pipeline status: count issues at each stage.
-pub fn status(db: &Db) -> Result<()> {
+pub fn status(db: &Db, linear: Option<&dyn LinearApi>) -> Result<()> {
     println!("\nPipeline Status:");
     println!("================\n");
 
-    let linear = match LinearClient::new() {
-        Ok(c) => Some(c),
-        Err(e) => {
-            eprintln!("  WARNING: Linear not available — {e}");
-            eprintln!("  Pipeline poll/sync disabled until LINEAR_API_KEY is set.\n");
-            None
-        }
-    };
-
-    if let Some(ref linear) = linear {
+    if let Some(linear) = linear {
         let stages = [
             ("backlog", "Backlog"),
             ("blocked", "Blocked"),

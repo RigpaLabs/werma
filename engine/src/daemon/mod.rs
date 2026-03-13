@@ -105,8 +105,10 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
     let tmux = queue::RealTmux;
     let github = merge::RealGitHub;
+    let cmd_runner = crate::traits::RealCommandRunner;
     // Optional: absent if LINEAR_API_KEY is not configured.
     let linear_merge = merge::RealLinearMerge::new().ok();
+    let linear_poll = crate::linear::LinearClient::new().ok();
 
     loop {
         let tick_start = Instant::now();
@@ -151,8 +153,10 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
             if last_pipeline_poll.elapsed() >= Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS) {
                 max_concurrent = crate::pipeline::load_max_concurrent();
-                if let Err(e) = crate::pipeline::poll(&db) {
-                    log_daemon(&log_path, &format!("pipeline poll error: {e}"));
+                if let Some(ref lp) = linear_poll {
+                    if let Err(e) = crate::pipeline::poll(&db, lp, &cmd_runner) {
+                        log_daemon(&log_path, &format!("pipeline poll error: {e}"));
+                    }
                 }
                 last_pipeline_poll = Instant::now();
             }

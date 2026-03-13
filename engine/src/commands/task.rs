@@ -539,6 +539,8 @@ pub fn cmd_complete(
     // Pipeline callback: trigger stage transitions.
     // On success, mark linear_pushed=true so daemon doesn't re-process.
     if !task.pipeline_stage.is_empty() && !task.linear_issue_id.is_empty() {
+        let linear_client = crate::linear::LinearClient::new()?;
+        let cmd_runner = crate::traits::RealCommandRunner;
         match pipeline::callback(
             db,
             id,
@@ -546,6 +548,8 @@ pub fn cmd_complete(
             &result_text,
             &task.linear_issue_id,
             &task.working_dir,
+            &linear_client,
+            &cmd_runner,
         ) {
             Ok(()) => {
                 db.set_linear_pushed(id, true)?;
@@ -575,7 +579,12 @@ pub fn cmd_complete(
     // Research completion: curator follow-up + Linear update
     if task.task_type == "research"
         && !task.linear_issue_id.is_empty()
-        && let Err(e) = pipeline::handle_research_completion(db, &task, &result_text)
+        && let Err(e) = pipeline::handle_research_completion(
+            db,
+            &task,
+            &result_text,
+            &crate::linear::LinearClient::new()?,
+        )
     {
         eprintln!("research completion error for {id}: {e}");
     }

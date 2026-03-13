@@ -1,14 +1,34 @@
 use anyhow::{Result, bail};
 
 use crate::db::Db;
+use crate::traits::RealCommandRunner;
 use crate::{linear, pipeline, ui};
 
 pub fn cmd_pipeline_poll(db: &Db) -> Result<()> {
-    ui::with_spinner("Polling Linear statuses...", || pipeline::poll(db))
+    let linear_client = linear::LinearClient::new()?;
+    let cmd = RealCommandRunner;
+    ui::with_spinner("Polling Linear statuses...", || {
+        pipeline::poll(db, &linear_client, &cmd)
+    })
 }
 
 pub fn cmd_pipeline_status(db: &Db) -> Result<()> {
-    ui::with_spinner("Fetching pipeline status...", || pipeline::status(db))
+    let linear_client = match linear::LinearClient::new() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            eprintln!("  WARNING: Linear not available — {e}");
+            eprintln!("  Pipeline status will not show Linear issue counts.\n");
+            None
+        }
+    };
+    ui::with_spinner("Fetching pipeline status...", || {
+        pipeline::status(
+            db,
+            linear_client
+                .as_ref()
+                .map(|c| c as &dyn pipeline::LinearApi),
+        )
+    })
 }
 
 pub fn cmd_pipeline_show(stage: Option<&str>) -> Result<()> {

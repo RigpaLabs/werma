@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Command;
 
 use anyhow::{Context, Result};
 
@@ -11,8 +10,9 @@ use super::verdict::{
     extract_rejection_feedback, is_heavy_track, parse_estimate, parse_pr_url, parse_verdict,
 };
 use crate::db::Db;
-use crate::linear::LinearClient;
+use crate::linear::LinearApi;
 use crate::models::{Status, Task};
+use crate::traits::CommandRunner;
 
 /// Default maximum review cycles when not configured in YAML.
 const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 3;
@@ -25,9 +25,8 @@ pub fn is_research_issue(labels: &[&str]) -> bool {
 }
 
 /// Poll Linear for issues at pipeline-relevant statuses and create tasks.
-pub fn poll(db: &Db) -> Result<()> {
+pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<()> {
     let config = load_default()?;
-    let linear = LinearClient::new()?;
 
     let mut total_created = 0;
     let mut total_skipped = 0;
@@ -191,7 +190,8 @@ pub fn poll(db: &Db) -> Result<()> {
                 }
 
                 // For reviewer stage: skip if PR is already merged (manual merge while in Review)
-                if stage_name == "reviewer" && is_pr_merged_for_issue(&working_dir, identifier) {
+                if stage_name == "reviewer" && is_pr_merged_for_issue(cmd, &working_dir, identifier)
+                {
                     println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
                     let _ = linear.move_issue_by_name(issue_id, "done");
                     total_skipped += 1;
@@ -340,7 +340,7 @@ pub fn poll(db: &Db) -> Result<()> {
             }
 
             // For reviewer stage: skip if PR is already merged
-            if *stage_name == "reviewer" && is_pr_merged_for_issue(&working_dir, identifier) {
+            if *stage_name == "reviewer" && is_pr_merged_for_issue(cmd, &working_dir, identifier) {
                 println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
                 let _ = linear.move_issue_by_name(issue_id, "done");
                 total_skipped += 1;
@@ -423,6 +423,7 @@ pub fn poll(db: &Db) -> Result<()> {
 }
 
 /// Handle pipeline callback when a task completes.
+#[allow(clippy::too_many_arguments)]
 pub fn callback(
     db: &Db,
     task_id: &str,
@@ -430,6 +431,8 @@ pub fn callback(
     result: &str,
     linear_issue_id: &str,
     working_dir: &str,
+    linear: &dyn LinearApi,
+    cmd: &dyn CommandRunner,
 ) -> Result<()> {
     // Dedup guard: if callback was recently fired for this task, skip to prevent
     // duplicate Linear comments from overlapping daemon ticks / cmd_complete races.
@@ -440,7 +443,6 @@ pub fn callback(
     db.set_callback_fired_at(task_id)?;
 
     let config = load_default()?;
-    let linear = LinearClient::new()?;
 
     // Guard: if output is empty, post a comment and return early.
     // cmd_complete should have already marked this as failed, but this is a safety net
@@ -525,7 +527,7 @@ pub fn callback(
             // An open PR means work is in progress — the analyst misjudged.
             if verdict_str == "already_done"
                 && t.status == "done"
-                && has_open_pr_for_issue(working_dir, linear_issue_id)
+                && has_open_pr_for_issue(cmd, working_dir, linear_issue_id)
             {
                 eprintln!(
                     "callback: blocking ALREADY_DONE→done for {linear_issue_id} — open PR exists. \
@@ -558,7 +560,7 @@ pub fn callback(
 
                 // Fallback: auto-create PR from worktree branch
                 let url = url_from_output.or_else(|| {
-                    match auto_create_pr(working_dir, linear_issue_id, task_id) {
+                    match auto_create_pr(cmd, working_dir, linear_issue_id, task_id) {
                         Ok(url) => url,
                         Err(e) => {
                             eprintln!("auto-PR error: {e}");
@@ -640,7 +642,7 @@ pub fn callback(
                 create_next_stage_task(&NextStageParams {
                     db,
                     config: &config,
-                    linear: Some(&linear),
+                    linear: Some(linear),
                     linear_issue_id,
                     next_stage,
                     previous_output: result,
@@ -740,31 +742,35 @@ fn resolve_home(path: &str) -> PathBuf {
 
 /// Check if a merged PR exists for the given Linear issue identifier in the repo.
 /// Uses `gh pr list --search` to find merged PRs mentioning the issue.
-fn is_pr_merged_for_issue(working_dir: &str, identifier: &str) -> bool {
-    pr_exists_for_issue(working_dir, identifier, "merged")
+fn is_pr_merged_for_issue(cmd: &dyn CommandRunner, working_dir: &str, identifier: &str) -> bool {
+    pr_exists_for_issue(cmd, working_dir, identifier, "merged")
 }
 
 /// Check if an open (unmerged) PR exists for the given Linear issue identifier.
-fn has_open_pr_for_issue(working_dir: &str, identifier: &str) -> bool {
-    pr_exists_for_issue(working_dir, identifier, "open")
+fn has_open_pr_for_issue(cmd: &dyn CommandRunner, working_dir: &str, identifier: &str) -> bool {
+    pr_exists_for_issue(cmd, working_dir, identifier, "open")
 }
 
 /// Check if a PR exists for the given Linear issue identifier in a specific state.
-fn pr_exists_for_issue(working_dir: &str, identifier: &str, state: &str) -> bool {
+fn pr_exists_for_issue(
+    cmd: &dyn CommandRunner,
+    working_dir: &str,
+    identifier: &str,
+    state: &str,
+) -> bool {
     let working_dir = resolve_home(working_dir);
-    let output = Command::new("gh")
-        .args([
+    let output = cmd.run(
+        "gh",
+        &[
             "pr", "list", "--search", identifier, "--state", state, "--json", "number", "--limit",
             "1",
-        ])
-        .current_dir(&working_dir)
-        .output();
+        ],
+        Some(&working_dir),
+    );
 
     match output {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            let text = text.trim();
-            // gh pr list returns "[]" if no results
+        Ok(o) if o.success => {
+            let text = o.stdout_str();
             text != "[]" && !text.is_empty()
         }
         _ => false,
@@ -778,6 +784,7 @@ fn pr_exists_for_issue(working_dir: &str, identifier: &str, state: &str) -> bool
 /// - No commits ahead of main (nothing to PR)
 /// - PR creation fails (logged but non-fatal)
 fn auto_create_pr(
+    cmd: &dyn CommandRunner,
     working_dir: &str,
     linear_issue_id: &str,
     task_id: &str,
@@ -785,14 +792,10 @@ fn auto_create_pr(
     let working_dir = resolve_home(working_dir);
 
     // 1. Get current branch
-    let branch_output = Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(&working_dir)
-        .output()
+    let branch_output = cmd
+        .run("git", &["branch", "--show-current"], Some(&working_dir))
         .context("git branch --show-current")?;
-    let branch_name = String::from_utf8_lossy(&branch_output.stdout)
-        .trim()
-        .to_string();
+    let branch_name = branch_output.stdout_str();
 
     // 2. Safety: never PR from main/master or empty branch
     if branch_name.is_empty() || branch_name == "main" || branch_name == "master" {
@@ -800,39 +803,43 @@ fn auto_create_pr(
     }
 
     // 3. Check if there are commits ahead of main
-    let log_output = Command::new("git")
-        .args(["log", "origin/main..HEAD", "--oneline"])
-        .current_dir(&working_dir)
-        .output()
+    let log_output = cmd
+        .run(
+            "git",
+            &["log", "origin/main..HEAD", "--oneline"],
+            Some(&working_dir),
+        )
         .context("git log origin/main..HEAD")?;
-    let log_text = String::from_utf8_lossy(&log_output.stdout);
-    if log_text.trim().is_empty() {
+    let log_text = log_output.stdout_str();
+    if log_text.is_empty() {
         eprintln!("auto-PR: no commits ahead of main on branch {branch_name}, skipping");
         return Ok(None);
     }
 
     // 4. Push branch (ignore errors if already up-to-date)
-    let push_output = Command::new("git")
-        .args(["push", "-u", "origin", &branch_name])
-        .current_dir(&working_dir)
-        .output()
+    let push_output = cmd
+        .run(
+            "git",
+            &["push", "-u", "origin", &branch_name],
+            Some(&working_dir),
+        )
         .context("git push")?;
-    if !push_output.status.success() {
-        let stderr = String::from_utf8_lossy(&push_output.stderr);
+    if !push_output.success {
+        let stderr = push_output.stderr_str();
         eprintln!("auto-PR: push failed: {stderr}");
         return Ok(None);
     }
 
     // 5. Check if PR already exists for this branch
-    let existing_pr = Command::new("gh")
-        .args(["pr", "view", "--json", "url", "-q", ".url"])
-        .current_dir(&working_dir)
-        .output()
+    let existing_pr = cmd
+        .run(
+            "gh",
+            &["pr", "view", "--json", "url", "-q", ".url"],
+            Some(&working_dir),
+        )
         .context("gh pr view")?;
-    if existing_pr.status.success() {
-        let url = String::from_utf8_lossy(&existing_pr.stdout)
-            .trim()
-            .to_string();
+    if existing_pr.success {
+        let url = existing_pr.stdout_str();
         if !url.is_empty() {
             return Ok(Some(url));
         }
@@ -845,26 +852,28 @@ fn auto_create_pr(
          Linear: https://linear.app/rigpa/issue/{linear_issue_id}",
     );
 
-    let output = Command::new("gh")
-        .args([
-            "pr",
-            "create",
-            "--title",
-            &pr_title,
-            "--body",
-            &pr_body,
-            "--label",
-            "ai-generated",
-        ])
-        .current_dir(&working_dir)
-        .output()
+    let output = cmd
+        .run(
+            "gh",
+            &[
+                "pr",
+                "create",
+                "--title",
+                &pr_title,
+                "--body",
+                &pr_body,
+                "--label",
+                "ai-generated",
+            ],
+            Some(&working_dir),
+        )
         .context("gh pr create")?;
 
-    if output.status.success() {
-        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if output.success {
+        let url = output.stdout_str();
         Ok(Some(url))
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = output.stderr_str();
         eprintln!("auto-PR failed: {stderr}");
         Ok(None)
     }
@@ -1061,7 +1070,7 @@ fn build_handoff_prompt(
 pub(crate) struct NextStageParams<'a> {
     pub db: &'a Db,
     pub config: &'a PipelineConfig,
-    pub linear: Option<&'a LinearClient>,
+    pub linear: Option<&'a dyn LinearApi>,
     pub linear_issue_id: &'a str,
     pub next_stage: &'a str,
     pub previous_output: &'a str,

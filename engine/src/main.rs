@@ -15,6 +15,7 @@ mod models;
 mod notify;
 mod pipeline;
 mod runner;
+mod traits;
 mod ui;
 mod update;
 mod worktree;
