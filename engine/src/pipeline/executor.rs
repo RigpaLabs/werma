@@ -327,6 +327,21 @@ pub fn poll(db: &Db) -> Result<()> {
                 continue;
             }
 
+            // Guard: don't re-run analyst if engineer has already started for this issue.
+            // Prevents analyst from seeing an open PR and declaring ALREADY_DONE.
+            if *stage_name == "analyst" {
+                let engineer_tasks =
+                    db.tasks_by_linear_issue(identifier, Some("engineer"), false)?;
+                if !engineer_tasks.is_empty() {
+                    eprintln!(
+                        "  ~ skipping analyst for {identifier}: engineer already ran ({} tasks)",
+                        engineer_tasks.len()
+                    );
+                    total_skipped += 1;
+                    continue;
+                }
+            }
+
             let working_dir = crate::linear::infer_working_dir(title, &labels);
             if crate::linear::validate_working_dir(&working_dir).is_none() {
                 eprintln!(
@@ -518,6 +533,26 @@ pub fn callback(
 
     match transition {
         Some(t) => {
+            // Guard: never move to "done" via ALREADY_DONE if there's an open PR.
+            // An open PR means work is in progress — the analyst misjudged.
+            if verdict_str == "already_done"
+                && t.status == "done"
+                && has_open_pr_for_issue(working_dir, linear_issue_id)
+            {
+                eprintln!(
+                    "callback: blocking ALREADY_DONE→done for {linear_issue_id} — open PR exists. \
+                     Issue stays in current state."
+                );
+                let _ = linear.comment(
+                    linear_issue_id,
+                    &format!(
+                        "**Analyst ALREADY_DONE blocked** (task: `{task_id}`): open PR exists for this issue. \
+                         An open PR means work is in progress, not done. Issue stays in current state."
+                    ),
+                );
+                return Ok(());
+            }
+
             // Move the issue first — this is the critical operation.
             if let Err(e) = linear.move_issue_by_name(linear_issue_id, &t.status) {
                 // Log and return error so the caller knows the move failed.
@@ -718,11 +753,21 @@ fn resolve_home(path: &str) -> PathBuf {
 /// Check if a merged PR exists for the given Linear issue identifier in the repo.
 /// Uses `gh pr list --search` to find merged PRs mentioning the issue.
 fn is_pr_merged_for_issue(working_dir: &str, identifier: &str) -> bool {
+    pr_exists_for_issue(working_dir, identifier, "merged")
+}
+
+/// Check if an open (unmerged) PR exists for the given Linear issue identifier.
+fn has_open_pr_for_issue(working_dir: &str, identifier: &str) -> bool {
+    pr_exists_for_issue(working_dir, identifier, "open")
+}
+
+/// Check if a PR exists for the given Linear issue identifier in a specific state.
+fn pr_exists_for_issue(working_dir: &str, identifier: &str, state: &str) -> bool {
     let working_dir = resolve_home(working_dir);
     let output = Command::new("gh")
         .args([
-            "pr", "list", "--search", identifier, "--state", "merged", "--json", "number",
-            "--limit", "1",
+            "pr", "list", "--search", identifier, "--state", state, "--json", "number", "--limit",
+            "1",
         ])
         .current_dir(&working_dir)
         .output();
