@@ -170,6 +170,7 @@ pub mod fakes {
         pub attach_calls: RefCell<Vec<(String, String, String)>>,
         pub estimate_calls: RefCell<Vec<(String, i32)>>,
         pub remove_label_calls: RefCell<Vec<(String, String)>>,
+        pub add_label_calls: RefCell<Vec<(String, String)>>,
         pub issues_by_status: RefCell<std::collections::HashMap<String, Vec<serde_json::Value>>>,
         pub issues_by_label: RefCell<std::collections::HashMap<String, Vec<serde_json::Value>>>,
         pub issue_data: RefCell<std::collections::HashMap<String, (String, String)>>,
@@ -185,6 +186,7 @@ pub mod fakes {
                 attach_calls: RefCell::new(Vec::new()),
                 estimate_calls: RefCell::new(Vec::new()),
                 remove_label_calls: RefCell::new(Vec::new()),
+                add_label_calls: RefCell::new(Vec::new()),
                 issues_by_status: RefCell::new(std::collections::HashMap::new()),
                 issues_by_label: RefCell::new(std::collections::HashMap::new()),
                 issue_data: RefCell::new(std::collections::HashMap::new()),
@@ -307,6 +309,13 @@ pub mod fakes {
 
         fn remove_label(&self, issue_id: &str, label_name: &str) -> Result<()> {
             self.remove_label_calls
+                .borrow_mut()
+                .push((issue_id.to_string(), label_name.to_string()));
+            Ok(())
+        }
+
+        fn add_label(&self, issue_id: &str, label_name: &str) -> Result<()> {
+            self.add_label_calls
                 .borrow_mut()
                 .push((issue_id.to_string(), label_name.to_string()));
             Ok(())

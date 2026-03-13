@@ -22,6 +22,7 @@ pub trait LinearApi {
     fn attach_url(&self, issue_id: &str, url: &str, title: &str) -> Result<()>;
     fn update_estimate(&self, issue_id: &str, estimate: i32) -> Result<()>;
     fn remove_label(&self, issue_id: &str, label_name: &str) -> Result<()>;
+    fn add_label(&self, issue_id: &str, label_name: &str) -> Result<()>;
 }
 
 impl LinearApi for LinearClient {
@@ -62,6 +63,10 @@ impl LinearApi for LinearClient {
 
     fn remove_label(&self, issue_id: &str, label_name: &str) -> Result<()> {
         self.remove_label(issue_id, label_name)
+    }
+
+    fn add_label(&self, issue_id: &str, label_name: &str) -> Result<()> {
+        self.add_label(issue_id, label_name)
     }
 }
 
@@ -734,6 +739,50 @@ impl LinearClient {
 
         Ok(())
     }
+
+    /// Add a label to an issue by label name.
+    pub fn add_label(&self, issue_id: &str, label_name: &str) -> Result<()> {
+        let uuid = self.resolve_uuid(issue_id)?;
+        let config = load_config()?;
+
+        // Find the label ID by name from team labels, and get the issue's current labels
+        let data = self.query(
+            r#"query($issueId: ID!, $teamId: ID!, $name: String!) {
+                issue(id: $issueId) {
+                    labels { nodes { id } }
+                }
+                issueLabels(filter: { team: { id: { eq: $teamId } }, name: { eq: $name } }) {
+                    nodes { id }
+                }
+            }"#,
+            &json!({"issueId": uuid, "teamId": config.team_id, "name": label_name}),
+        )?;
+
+        let new_label_id = data["issueLabels"]["nodes"][0]["id"]
+            .as_str()
+            .with_context(|| format!("label '{label_name}' not found in team labels"))?;
+
+        let mut label_ids: Vec<String> = data["issue"]["labels"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|l| l["id"].as_str().map(String::from))
+            .collect();
+
+        if !label_ids.iter().any(|id| id == new_label_id) {
+            label_ids.push(new_label_id.to_string());
+        }
+
+        self.query(
+            r#"mutation($id: String!, $labelIds: [String!]!) {
+                issueUpdate(id: $id, input: { labelIds: $labelIds }) { success }
+            }"#,
+            &json!({"id": uuid, "labelIds": label_ids}),
+        )?;
+
+        Ok(())
+    }
 }
 
 // --- Helper functions ---
@@ -908,6 +957,7 @@ pub mod fakes {
         pub attach_calls: RefCell<Vec<(String, String, String)>>,
         pub estimate_calls: RefCell<Vec<(String, i32)>>,
         pub remove_label_calls: RefCell<Vec<(String, String)>>,
+        pub add_label_calls: RefCell<Vec<(String, String)>>,
     }
 
     impl FakeLinearApi {
@@ -921,6 +971,7 @@ pub mod fakes {
                 attach_calls: RefCell::new(vec![]),
                 estimate_calls: RefCell::new(vec![]),
                 remove_label_calls: RefCell::new(vec![]),
+                add_label_calls: RefCell::new(vec![]),
             }
         }
 
@@ -1009,6 +1060,13 @@ pub mod fakes {
 
         fn remove_label(&self, issue_id: &str, label_name: &str) -> Result<()> {
             self.remove_label_calls
+                .borrow_mut()
+                .push((issue_id.to_string(), label_name.to_string()));
+            Ok(())
+        }
+
+        fn add_label(&self, issue_id: &str, label_name: &str) -> Result<()> {
+            self.add_label_calls
                 .borrow_mut()
                 .push((issue_id.to_string(), label_name.to_string()));
             Ok(())

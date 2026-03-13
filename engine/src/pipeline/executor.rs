@@ -574,6 +574,18 @@ pub fn callback(
                 return Err(e);
             }
 
+            // Analyst label swap: add "analyze:done" after successful completion
+            if stage == "analyst" {
+                if let Some(ref label) = stage_cfg.linear_label {
+                    let done_label = format!("{label}:done");
+                    if let Err(e) = linear.add_label(linear_issue_id, &done_label) {
+                        eprintln!(
+                            "callback: failed to add '{done_label}' label to {linear_issue_id}: {e}"
+                        );
+                    }
+                }
+            }
+
             // Auto-create PR for engineer stage completion
             let pr_url = if stage == "engineer" && verdict_str == "done" {
                 // Try to extract PR URL from agent output first (agent may have created it)
