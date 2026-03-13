@@ -16,6 +16,7 @@ const TICK_INTERVAL_SECS: u64 = 5;
 const PIPELINE_POLL_INTERVAL_SECS: u64 = 30;
 const MERGE_CHECK_INTERVAL_SECS: u64 = 60;
 const UPDATE_CHECK_INTERVAL_SECS: u64 = 300; // 5 minutes
+const ZOMBIE_CHECK_INTERVAL_SECS: u64 = 30; // check for dead tmux sessions
 const CLEANLINESS_CHECK_INTERVAL_SECS: u64 = 30; // rate-limit git status calls
 const CLEANLINESS_COOLDOWN_SECS: u64 = 300; // 5 minutes per-repo notification cooldown
 const MAX_LOG_SIZE_BYTES: u64 = 5 * 1024 * 1024;
@@ -63,6 +64,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     // Per-repo cooldown for main-branch cleanliness notifications.
     let mut cleanliness_notified: std::collections::HashMap<PathBuf, Instant> =
         std::collections::HashMap::new();
+    let mut last_zombie_check = Instant::now(); // skip on first tick (tasks just started)
     let mut last_cleanliness_check =
         Instant::now() - Duration::from_secs(CLEANLINESS_CHECK_INTERVAL_SECS);
 
@@ -80,6 +82,14 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
             if let Err(e) = process_completed_pipeline_tasks(&db, werma_dir) {
                 log_daemon(&log_path, &format!("pipeline callback error: {e}"));
+            }
+
+            // Check for zombie tasks: running status but dead tmux session.
+            if last_zombie_check.elapsed() >= Duration::from_secs(ZOMBIE_CHECK_INTERVAL_SECS) {
+                if let Err(e) = check_zombie_tasks(&db, werma_dir) {
+                    log_daemon(&log_path, &format!("zombie check error: {e}"));
+                }
+                last_zombie_check = Instant::now();
             }
 
             if let Err(e) = drain_queue(&db, werma_dir, max_concurrent) {
@@ -350,6 +360,47 @@ fn process_completed_pipeline_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+/// Detect zombie tasks: status is `running` but the tmux session has died.
+/// Marks them as failed and sends notifications.
+fn check_zombie_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
+    let log_path = werma_dir.join("logs/daemon.log");
+    let running = db.list_tasks(Some(crate::models::Status::Running))?;
+
+    for task in &running {
+        let session_name = format!("werma-{}", task.id);
+        let result = std::process::Command::new("tmux")
+            .args(["has-session", "-t", &session_name])
+            .output();
+
+        let session_alive = matches!(result, Ok(out) if out.status.success());
+        if session_alive {
+            continue;
+        }
+
+        // Session is dead but task is still running — zombie detected.
+        let reason = "tmux session died unexpectedly";
+        log_daemon(
+            &log_path,
+            &format!("ZOMBIE detected: {} — {reason}", task.id),
+        );
+
+        db.set_task_status(&task.id, crate::models::Status::Failed)?;
+        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        db.update_task_field(&task.id, "finished_at", &now)?;
+
+        let label =
+            crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);
+        crate::notify::notify_macos(
+            "werma: zombie task detected",
+            &format!("{label} — {reason}"),
+            "Basso",
+        );
+        crate::notify::notify_slack("#werma-alerts", &format!(":zombie: *{label}* — {reason}"));
     }
 
     Ok(())
@@ -867,6 +918,86 @@ mod tests {
         assert!(content.contains("second message"));
         // Two lines.
         assert_eq!(content.lines().count(), 2);
+    }
+
+    #[test]
+    fn check_zombie_tasks_marks_dead_sessions_as_failed() {
+        // Create a task in running state with a tmux session name that doesn't exist.
+        // check_zombie_tasks should mark it as failed.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = crate::models::Task {
+            id: "20260313-999".to_string(),
+            status: crate::models::Status::Running,
+            priority: 1,
+            created_at: "2026-03-13T10:00:00".to_string(),
+            started_at: Some("2026-03-13T10:00:00".to_string()),
+            finished_at: None,
+            task_type: "pipeline-engineer".to_string(),
+            prompt: "test".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            model: "sonnet".to_string(),
+            max_turns: 15,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: "RIG-210".to_string(),
+            linear_pushed: false,
+            pipeline_stage: "engineer".to_string(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: String::new(),
+            estimate: 0,
+        };
+        db.insert_task(&task).unwrap();
+
+        // No tmux session "werma-20260313-999" exists, so it should be detected as zombie.
+        check_zombie_tasks(&db, werma_dir.path()).unwrap();
+
+        let updated = db.task("20260313-999").unwrap().unwrap();
+        assert_eq!(updated.status, crate::models::Status::Failed);
+        assert!(updated.finished_at.is_some());
+    }
+
+    #[test]
+    fn check_zombie_tasks_ignores_non_running() {
+        // A completed task should not be affected by zombie check.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = crate::models::Task {
+            id: "20260313-998".to_string(),
+            status: crate::models::Status::Completed,
+            priority: 1,
+            created_at: "2026-03-13T10:00:00".to_string(),
+            started_at: Some("2026-03-13T10:00:00".to_string()),
+            finished_at: Some("2026-03-13T10:05:00".to_string()),
+            task_type: "research".to_string(),
+            prompt: "test".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            model: "sonnet".to_string(),
+            max_turns: 15,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: String::new(),
+            linear_pushed: false,
+            pipeline_stage: String::new(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: String::new(),
+            estimate: 0,
+        };
+        db.insert_task(&task).unwrap();
+
+        check_zombie_tasks(&db, werma_dir.path()).unwrap();
+
+        // Should remain completed — zombie check only queries running tasks.
+        let updated = db.task("20260313-998").unwrap().unwrap();
+        assert_eq!(updated.status, crate::models::Status::Completed);
     }
 
     #[test]
