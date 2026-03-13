@@ -134,6 +134,22 @@ impl super::Db {
         Ok(count > 0)
     }
 
+    /// Check if any running or pending review task exists for a given issue,
+    /// regardless of pipeline_stage name. Catches cross-stage duplicates where
+    /// different stage names (e.g. "reviewer" vs "pipeline-reviewer") both
+    /// represent review work for the same issue.
+    pub fn has_any_review_task_for_issue(&self, issue_id: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE linear_issue_id = ?1
+               AND status IN ('pending', 'running')
+               AND (pipeline_stage LIKE '%review%' OR type LIKE '%review%')",
+            params![issue_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Check if callback was recently fired for a task (within `window_secs` seconds).
     pub fn is_callback_recently_fired(&self, task_id: &str, window_secs: i64) -> Result<bool> {
         let fired_at: String = self

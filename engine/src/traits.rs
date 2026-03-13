@@ -162,6 +162,156 @@ pub mod fakes {
                 .push((channel.to_string(), text.to_string()));
         }
     }
+
+    /// Fake Linear API that records all calls and supports configurable failures.
+    pub struct FakeLinearApi {
+        pub move_calls: RefCell<Vec<(String, String)>>,
+        pub comment_calls: RefCell<Vec<(String, String)>>,
+        pub attach_calls: RefCell<Vec<(String, String, String)>>,
+        pub estimate_calls: RefCell<Vec<(String, i32)>>,
+        pub remove_label_calls: RefCell<Vec<(String, String)>>,
+        pub issues_by_status: RefCell<std::collections::HashMap<String, Vec<serde_json::Value>>>,
+        pub issues_by_label: RefCell<std::collections::HashMap<String, Vec<serde_json::Value>>>,
+        pub issue_data: RefCell<std::collections::HashMap<String, (String, String)>>,
+        fail_next_moves: RefCell<u32>,
+    }
+
+    #[allow(dead_code)]
+    impl FakeLinearApi {
+        pub fn new() -> Self {
+            Self {
+                move_calls: RefCell::new(Vec::new()),
+                comment_calls: RefCell::new(Vec::new()),
+                attach_calls: RefCell::new(Vec::new()),
+                estimate_calls: RefCell::new(Vec::new()),
+                remove_label_calls: RefCell::new(Vec::new()),
+                issues_by_status: RefCell::new(std::collections::HashMap::new()),
+                issues_by_label: RefCell::new(std::collections::HashMap::new()),
+                issue_data: RefCell::new(std::collections::HashMap::new()),
+                fail_next_moves: RefCell::new(0),
+            }
+        }
+
+        /// Configure the next N move_issue_by_name calls to return Err.
+        pub fn fail_next_n_moves(&self, n: u32) {
+            *self.fail_next_moves.borrow_mut() = n;
+        }
+
+        /// Add issues that will be returned by get_issues_by_status.
+        pub fn set_issues_for_status(&self, status: &str, issues: Vec<serde_json::Value>) {
+            self.issues_by_status
+                .borrow_mut()
+                .insert(status.to_string(), issues);
+        }
+
+        /// Add issues that will be returned by get_issues_by_label.
+        pub fn set_issues_for_label(&self, label: &str, issues: Vec<serde_json::Value>) {
+            self.issues_by_label
+                .borrow_mut()
+                .insert(label.to_string(), issues);
+        }
+
+        /// Set issue data returned by get_issue.
+        pub fn set_issue_data(&self, id: &str, title: &str, description: &str) {
+            self.issue_data
+                .borrow_mut()
+                .insert(id.to_string(), (title.to_string(), description.to_string()));
+        }
+    }
+
+    impl crate::linear::LinearApi for FakeLinearApi {
+        fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<serde_json::Value>> {
+            Ok(self
+                .issues_by_status
+                .borrow()
+                .get(status_name)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        fn get_issues_by_label(&self, label_name: &str) -> Result<Vec<serde_json::Value>> {
+            Ok(self
+                .issues_by_label
+                .borrow()
+                .get(label_name)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        fn move_issue_by_name(&self, issue_id: &str, status_name: &str) -> Result<()> {
+            let mut fail_count = self.fail_next_moves.borrow_mut();
+            if *fail_count > 0 {
+                *fail_count -= 1;
+                return Err(anyhow::anyhow!(
+                    "fake move failure: {} -> {}",
+                    issue_id,
+                    status_name
+                ));
+            }
+            self.move_calls
+                .borrow_mut()
+                .push((issue_id.to_string(), status_name.to_string()));
+            Ok(())
+        }
+
+        fn comment(&self, issue_id: &str, body: &str) -> Result<()> {
+            self.comment_calls
+                .borrow_mut()
+                .push((issue_id.to_string(), body.to_string()));
+            Ok(())
+        }
+
+        fn attach_url(&self, issue_id: &str, url: &str, title: &str) -> Result<()> {
+            self.attach_calls.borrow_mut().push((
+                issue_id.to_string(),
+                url.to_string(),
+                title.to_string(),
+            ));
+            Ok(())
+        }
+
+        fn update_estimate(&self, issue_id: &str, estimate: i32) -> Result<()> {
+            self.estimate_calls
+                .borrow_mut()
+                .push((issue_id.to_string(), estimate));
+            Ok(())
+        }
+
+        fn get_issue(&self, issue_id: &str) -> Result<(String, String)> {
+            Ok(self
+                .issue_data
+                .borrow()
+                .get(issue_id)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        fn get_issue_by_identifier(
+            &self,
+            identifier: &str,
+        ) -> Result<(String, String, String, String, Vec<String>)> {
+            let (title, desc) = self
+                .issue_data
+                .borrow()
+                .get(identifier)
+                .cloned()
+                .unwrap_or_default();
+            Ok((
+                format!("fake-uuid-{identifier}"),
+                identifier.to_string(),
+                title,
+                desc,
+                vec![],
+            ))
+        }
+
+        fn remove_label(&self, issue_id: &str, label_name: &str) -> Result<()> {
+            self.remove_label_calls
+                .borrow_mut()
+                .push((issue_id.to_string(), label_name.to_string()));
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

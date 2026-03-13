@@ -20,6 +20,9 @@ mod ui;
 mod update;
 mod worktree;
 
+#[cfg(test)]
+mod integration_tests;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};

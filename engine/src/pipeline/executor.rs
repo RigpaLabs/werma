@@ -113,7 +113,9 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
 
         db.insert_task(&task)?;
         // Move to In Progress so it doesn't get picked up again
-        let _ = linear.move_issue_by_name(issue_id, "in_progress");
+        if let Err(e) = linear.move_issue_by_name(issue_id, "in_progress") {
+            eprintln!("  ! research move to in_progress failed for {identifier}: {e}");
+        }
         println!("  + {task_id} [{identifier}] type=research (research pipeline)");
         total_created += 1;
     }
@@ -185,6 +187,13 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     eprintln!(
                         "  ! skipping {identifier} [{title}] stage={stage_name}: working dir '{working_dir}' does not exist"
                     );
+                    total_skipped += 1;
+                    continue;
+                }
+
+                // RIG-135: Cross-stage dedup for reviewer — skip if any review task
+                // (regardless of stage name) is already active for this issue.
+                if stage_name == "reviewer" && db.has_any_review_task_for_issue(identifier)? {
                     total_skipped += 1;
                     continue;
                 }
@@ -339,6 +348,12 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
+            // RIG-135: Cross-stage dedup for reviewer (label-based path)
+            if *stage_name == "reviewer" && db.has_any_review_task_for_issue(identifier)? {
+                total_skipped += 1;
+                continue;
+            }
+
             // For reviewer stage: skip if PR is already merged
             if *stage_name == "reviewer" && is_pr_merged_for_issue(cmd, &working_dir, identifier) {
                 println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
@@ -468,16 +483,8 @@ pub fn callback(
 
     let verdict = parse_verdict(result);
 
-    // Stages with no verdicts in transitions (engineer/analyst) are auto-complete.
     // For stages that require a verdict (reviewer, qa, devops), warn if missing.
     let has_explicit_transitions = !stage_cfg.transitions.is_empty();
-    let is_auto_complete = stage_cfg.transitions.values().all(|t| t.spawn.is_none())
-        && stage_cfg
-            .transitions
-            .values()
-            .any(|t| t.status != "in_progress");
-
-    let _ = is_auto_complete; // used implicitly via logic below
 
     if verdict.is_none() && has_explicit_transitions && stage != "engineer" && stage != "analyst" {
         eprintln!(
