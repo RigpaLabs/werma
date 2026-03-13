@@ -3,6 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::db::Db;
+use crate::traits::RealCommandRunner;
 use crate::{linear, pipeline};
 
 use super::log_daemon;
@@ -18,8 +19,24 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
+    // Create shared instances for all tasks in this batch.
+    let linear_client = match linear::LinearClient::new() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            log_daemon(
+                &log_path,
+                &format!("LinearClient init failed (will skip pipeline callbacks): {e}"),
+            );
+            None
+        }
+    };
+    let cmd_runner = RealCommandRunner;
+
     for task in &tasks {
         if !task.pipeline_stage.is_empty() {
+            let Some(ref linear_client) = linear_client else {
+                continue;
+            };
             // Pipeline task: read output and call pipeline::callback()
             let output_file = werma_dir.join(format!("logs/{}-output.md", task.id));
             let output = std::fs::read_to_string(&output_file).unwrap_or_default();
@@ -31,6 +48,8 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                 &output,
                 &task.linear_issue_id,
                 &task.working_dir,
+                linear_client,
+                &cmd_runner,
             ) {
                 Ok(()) => {
                     db.set_linear_pushed(&task.id, true)?;
@@ -53,11 +72,14 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                 }
             }
         } else if task.task_type == "research" {
+            let Some(ref linear_client) = linear_client else {
+                continue;
+            };
             // Research task: post summary comment and create curator follow-up.
             let output_file = werma_dir.join(format!("logs/{}-output.md", task.id));
             let output = std::fs::read_to_string(&output_file).unwrap_or_default();
 
-            match pipeline::handle_research_completion(db, task, &output) {
+            match pipeline::handle_research_completion(db, task, &output, linear_client) {
                 Ok(()) => {
                     db.set_linear_pushed(&task.id, true)?;
                     log_daemon(

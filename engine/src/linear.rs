@@ -5,6 +5,66 @@ use serde_json::{Value, json};
 use crate::db::Db;
 use crate::models::{Status, Task};
 
+// ─── LinearApi trait ─────────────────────────────────────────────────────────
+
+/// Trait abstracting Linear API operations for testability.
+/// Covers all methods called by pipeline/executor, pipeline/mod, daemon, and runner.
+pub trait LinearApi {
+    fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<Value>>;
+    fn get_issues_by_label(&self, label_name: &str) -> Result<Vec<Value>>;
+    fn get_issue(&self, issue_id: &str) -> Result<(String, String)>;
+    fn get_issue_by_identifier(
+        &self,
+        identifier: &str,
+    ) -> Result<(String, String, String, String, Vec<String>)>;
+    fn move_issue_by_name(&self, issue_id: &str, status_name: &str) -> Result<()>;
+    fn comment(&self, issue_id: &str, body: &str) -> Result<()>;
+    fn attach_url(&self, issue_id: &str, url: &str, title: &str) -> Result<()>;
+    fn update_estimate(&self, issue_id: &str, estimate: i32) -> Result<()>;
+    fn remove_label(&self, issue_id: &str, label_name: &str) -> Result<()>;
+}
+
+impl LinearApi for LinearClient {
+    fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<Value>> {
+        self.get_issues_by_status(status_name)
+    }
+
+    fn get_issues_by_label(&self, label_name: &str) -> Result<Vec<Value>> {
+        self.get_issues_by_label(label_name)
+    }
+
+    fn get_issue(&self, issue_id: &str) -> Result<(String, String)> {
+        self.get_issue(issue_id)
+    }
+
+    fn get_issue_by_identifier(
+        &self,
+        identifier: &str,
+    ) -> Result<(String, String, String, String, Vec<String>)> {
+        self.get_issue_by_identifier(identifier)
+    }
+
+    fn move_issue_by_name(&self, issue_id: &str, status_name: &str) -> Result<()> {
+        self.move_issue_by_name(issue_id, status_name)
+    }
+
+    fn comment(&self, issue_id: &str, body: &str) -> Result<()> {
+        self.comment(issue_id, body)
+    }
+
+    fn attach_url(&self, issue_id: &str, url: &str, title: &str) -> Result<()> {
+        self.attach_url(issue_id, url, title)
+    }
+
+    fn update_estimate(&self, issue_id: &str, estimate: i32) -> Result<()> {
+        self.update_estimate(issue_id, estimate)
+    }
+
+    fn remove_label(&self, issue_id: &str, label_name: &str) -> Result<()> {
+        self.remove_label(issue_id, label_name)
+    }
+}
+
 const LINEAR_API: &str = "https://api.linear.app/graphql";
 
 /// Configuration stored in ~/.werma/linear.json.
@@ -825,6 +885,107 @@ pub fn infer_working_dir(title: &str, labels: &[&str]) -> String {
     }
 
     "~/projects/rigpa/werma".to_string()
+}
+
+// ─── FakeLinearApi (test-only) ────────────────────────────────────────────────
+
+#[cfg(test)]
+pub mod fakes {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// Fake LinearApi that records calls and returns pre-configured responses.
+    pub struct FakeLinearApi {
+        pub issues_by_status: RefCell<Vec<Value>>,
+        pub issues_by_label: RefCell<Vec<Value>>,
+        pub issue_details: RefCell<Option<(String, String, String, String, Vec<String>)>>,
+        pub move_calls: RefCell<Vec<(String, String)>>,
+        pub comment_calls: RefCell<Vec<(String, String)>>,
+        pub attach_calls: RefCell<Vec<(String, String, String)>>,
+        pub estimate_calls: RefCell<Vec<(String, i32)>>,
+        pub remove_label_calls: RefCell<Vec<(String, String)>>,
+    }
+
+    impl FakeLinearApi {
+        pub fn new() -> Self {
+            Self {
+                issues_by_status: RefCell::new(vec![]),
+                issues_by_label: RefCell::new(vec![]),
+                issue_details: RefCell::new(None),
+                move_calls: RefCell::new(vec![]),
+                comment_calls: RefCell::new(vec![]),
+                attach_calls: RefCell::new(vec![]),
+                estimate_calls: RefCell::new(vec![]),
+                remove_label_calls: RefCell::new(vec![]),
+            }
+        }
+    }
+
+    impl LinearApi for FakeLinearApi {
+        fn get_issues_by_status(&self, _status_name: &str) -> Result<Vec<Value>> {
+            Ok(self.issues_by_status.borrow().clone())
+        }
+
+        fn get_issues_by_label(&self, _label_name: &str) -> Result<Vec<Value>> {
+            Ok(self.issues_by_label.borrow().clone())
+        }
+
+        fn get_issue(&self, _issue_id: &str) -> Result<(String, String)> {
+            if let Some(ref d) = *self.issue_details.borrow() {
+                Ok((d.2.clone(), d.3.clone()))
+            } else {
+                Ok((String::new(), String::new()))
+            }
+        }
+
+        fn get_issue_by_identifier(
+            &self,
+            _identifier: &str,
+        ) -> Result<(String, String, String, String, Vec<String>)> {
+            if let Some(ref d) = *self.issue_details.borrow() {
+                Ok(d.clone())
+            } else {
+                bail!("issue not found")
+            }
+        }
+
+        fn move_issue_by_name(&self, issue_id: &str, status_name: &str) -> Result<()> {
+            self.move_calls
+                .borrow_mut()
+                .push((issue_id.to_string(), status_name.to_string()));
+            Ok(())
+        }
+
+        fn comment(&self, issue_id: &str, body: &str) -> Result<()> {
+            self.comment_calls
+                .borrow_mut()
+                .push((issue_id.to_string(), body.to_string()));
+            Ok(())
+        }
+
+        fn attach_url(&self, issue_id: &str, url: &str, title: &str) -> Result<()> {
+            self.attach_calls.borrow_mut().push((
+                issue_id.to_string(),
+                url.to_string(),
+                title.to_string(),
+            ));
+            Ok(())
+        }
+
+        fn update_estimate(&self, issue_id: &str, estimate: i32) -> Result<()> {
+            self.estimate_calls
+                .borrow_mut()
+                .push((issue_id.to_string(), estimate));
+            Ok(())
+        }
+
+        fn remove_label(&self, issue_id: &str, label_name: &str) -> Result<()> {
+            self.remove_label_calls
+                .borrow_mut()
+                .push((issue_id.to_string(), label_name.to_string()));
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
