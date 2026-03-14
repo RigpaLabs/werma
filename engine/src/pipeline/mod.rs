@@ -1,6 +1,10 @@
+pub mod callback;
 pub mod config;
 pub mod executor;
+pub mod helpers;
 pub mod loader;
+pub mod poll;
+pub mod pr;
 pub mod prompt;
 pub mod verdict;
 
