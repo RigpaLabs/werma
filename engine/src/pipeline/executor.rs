@@ -12,13 +12,14 @@ use super::verdict::{
 use crate::db::Db;
 use crate::linear::LinearApi;
 use crate::models::{Status, Task};
-use crate::notify;
-use crate::traits::CommandRunner;
+use crate::traits::{CommandRunner, Notifier};
 
 /// Max retries for Linear status move operations.
 const CALLBACK_MAX_RETRIES: u32 = 3;
-/// Backoff delays in milliseconds between retries: 500ms, 1s, 2s.
-const CALLBACK_BACKOFF_MS: [u64; 3] = [500, 1000, 2000];
+/// Backoff delays in milliseconds between retries: 50ms, 100ms, 200ms.
+/// Kept short to avoid blocking the daemon tick loop — Linear API failures
+/// are usually immediate (auth, rate-limit), not transient network issues.
+const CALLBACK_BACKOFF_MS: [u64; 3] = [50, 100, 200];
 
 /// Default maximum review cycles when not configured in YAML.
 const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 3;
@@ -536,6 +537,7 @@ pub fn callback(
     working_dir: &str,
     linear: &dyn LinearApi,
     cmd: &dyn CommandRunner,
+    notifier: &dyn Notifier,
 ) -> Result<()> {
     // Dedup guard: if callback SUCCEEDED recently, skip to prevent
     // duplicate Linear comments from overlapping daemon ticks / cmd_complete races.
@@ -656,8 +658,8 @@ pub fn callback(
                      failed to move to '{}' after {CALLBACK_MAX_RETRIES} retries: {e}",
                     t.status
                 );
-                notify::notify_macos("Werma Callback Failed", &alert_msg, "Basso");
-                notify::notify_slack("#werma-alerts", &alert_msg);
+                notifier.notify_macos("Werma Callback Failed", &alert_msg, "Basso");
+                notifier.notify_slack("#werma-alerts", &alert_msg);
                 return Err(e);
             }
 
@@ -753,7 +755,7 @@ pub fn callback(
                             "review cycle limit ({max_rounds}) reached for issue {linear_issue_id}, \
                              escalating to blocked"
                         );
-                        linear.move_issue_by_name(linear_issue_id, "blocked")?;
+                        move_with_retry(linear, linear_issue_id, "blocked")?;
                         if let Err(e) = linear.comment(
                             linear_issue_id,
                             &format!(

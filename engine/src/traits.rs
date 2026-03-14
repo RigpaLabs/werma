@@ -52,8 +52,7 @@ impl CommandRunner for RealCommandRunner {
 // ─── Notifier trait ──────────────────────────────────────────────────────────
 
 /// Trait abstracting notifications (macOS + Slack) for testability.
-/// Not yet consumed by daemon handlers — will be wired in a follow-up.
-#[allow(dead_code)]
+/// Used by pipeline callback and move_with_retry for alert notifications.
 pub trait Notifier {
     fn notify_macos(&self, title: &str, message: &str, sound: &str);
     fn notify_slack(&self, channel: &str, text: &str);

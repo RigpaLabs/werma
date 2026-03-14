@@ -557,6 +557,7 @@ pub fn cmd_complete(
     if !task.pipeline_stage.is_empty() && !task.linear_issue_id.is_empty() {
         let linear_client = crate::linear::LinearClient::new()?;
         let cmd_runner = crate::traits::RealCommandRunner;
+        let notifier = crate::traits::RealNotifier;
         match pipeline::callback(
             db,
             id,
@@ -566,6 +567,7 @@ pub fn cmd_complete(
             &task.working_dir,
             &linear_client,
             &cmd_runner,
+            &notifier,
         ) {
             Ok(()) => {
                 db.set_linear_pushed(id, true)?;
