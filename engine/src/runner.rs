@@ -456,9 +456,20 @@ FALLBACK_MODEL='{fallback_model}'
 LOG_FILE='{log_file_str}'
 RESULT_FILE="${{LOG_FILE%.log}}-output.md"
 
-cd "$WORKING_DIR"
+# Redirect all stderr to log from the start, so setup errors are captured
+exec 2>> "$LOG_FILE"
+
+echo "$(date): EXEC_START task=$TASK_ID model=$MODEL tools=$ALLOWED_TOOLS" >> "$LOG_FILE"
+
+cd "$WORKING_DIR" || {{
+    echo "$(date): FAILED — cd to $WORKING_DIR failed" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+}}
 {worktree_guard}
 PROMPT=$(cat "$PROMPT_FILE")
+
+echo "$(date): CLAUDE_START pid=$$" >> "$LOG_FILE"
 
 run_claude() {{
     local use_model="$1"
@@ -466,11 +477,12 @@ run_claude() {{
         --allowedTools "$ALLOWED_TOOLS" \
         --max-turns "$MAX_TURNS" \
         --model "$use_model" \
-        --output-format json 2>> "$LOG_FILE"
+        --output-format json
 }}
 
 RESULT_JSON=$(run_claude "$MODEL") || {{
     EXIT_CODE=$?
+    echo "$(date): CLAUDE_EXIT code=$EXIT_CODE model=$MODEL" >> "$LOG_FILE"
     # Check if fallback model is configured and error looks like a rate limit
     if [ -n "$FALLBACK_MODEL" ]; then
         LAST_LINES=$(tail -20 "$LOG_FILE" 2>/dev/null || echo "")
@@ -877,6 +889,9 @@ mod tests {
         assert!(script.contains("--output-format json"));
         assert!(script.contains("jq -r"));
         assert!(script.contains("--result-file"));
+        assert!(script.contains("EXEC_START"));
+        assert!(script.contains("CLAUDE_START"));
+        assert!(script.contains("exec 2>>"));
         // No more raw sqlite3 or osascript — handled by werma complete/fail
         assert!(!script.contains("sqlite3"));
         assert!(!script.contains("osascript"));
@@ -906,6 +921,8 @@ mod tests {
         // Guard: empty output detection and fail
         assert!(script.contains("EMPTY OUTPUT"));
         assert!(script.contains("werma fail \"$TASK_ID\""));
+        // Claude exit code is logged
+        assert!(script.contains("CLAUDE_EXIT"));
     }
 
     #[test]
