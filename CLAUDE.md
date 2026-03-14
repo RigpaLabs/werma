@@ -17,12 +17,11 @@ Agent identity, memory & orchestration for RigpaLabs pipeline. Each agent has:
 
 ## Pipeline Configuration
 
-Pipeline stages, transitions, and prompts are defined in YAML (`engine/pipelines/default.yaml`), compiled into the binary via `include_str!`. Runtime overrides go to `~/.werma/pipelines/`.
+Pipeline stages, transitions, and prompts are defined in YAML (`engine/pipelines/default.yaml`), compiled into the binary via `include_str!`. No runtime overrides — the binary is the single source of truth.
 
 ```bash
 werma pipeline show              # display current pipeline stages/transitions
 werma pipeline validate          # validate YAML config
-werma pipeline eject             # export builtin config to ~/.werma/pipelines/ for editing
 ```
 
 **Config format** — see `engine/pipelines/default.yaml` for full example. Key fields per stage:
@@ -42,7 +41,7 @@ The werma CLI (`engine/`) is a Rust binary that manages the agent queue, schedul
 - `werma daemon` — heartbeat + scheduler (replaces heartbeat.sh)
 - `werma sched` — cron-based scheduling
 - `werma linear` — Linear issue integration
-- `werma pipeline show/validate/eject` — YAML-driven CI/CD pipeline management
+- `werma pipeline show/validate` — YAML-driven CI/CD pipeline management
 - `werma dash` — status dashboard
 - `werma migrate` — import from old aq system
 

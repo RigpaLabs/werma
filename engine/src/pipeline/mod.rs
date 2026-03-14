@@ -319,11 +319,6 @@ pub fn cmd_validate() -> Result<()> {
     }
 }
 
-/// `werma pipeline eject` — export builtin config to `~/.werma/pipelines/`.
-pub fn cmd_eject() -> Result<()> {
-    loader::eject()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

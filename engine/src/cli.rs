@@ -300,8 +300,6 @@ pub enum PipelineAction {
     },
     /// Validate pipeline YAML config
     Validate,
-    /// Export builtin pipeline config to ~/.werma/pipelines/
-    Eject,
     /// Manually trigger a pipeline stage for Linear issues
     Run {
         /// Linear issue identifiers (e.g. RIG-95 RIG-100)
