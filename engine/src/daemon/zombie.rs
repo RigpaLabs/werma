@@ -104,8 +104,9 @@ fn mark_zombie(
 /// Truncate a string for log output, replacing newlines with ` | `.
 fn truncate_for_log(s: &str, max_len: usize) -> String {
     let flat = s.replace('\n', " | ");
-    if flat.len() > max_len {
-        format!("{}...", &flat[..max_len])
+    if flat.chars().count() > max_len {
+        let truncated: String = flat.chars().take(max_len).collect();
+        format!("{truncated}...")
     } else {
         flat
     }
