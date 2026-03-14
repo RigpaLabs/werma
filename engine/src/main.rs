@@ -23,6 +23,9 @@ mod worktree;
 #[cfg(test)]
 mod integration_tests;
 
+#[cfg(test)]
+mod full_cycle_tests;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
