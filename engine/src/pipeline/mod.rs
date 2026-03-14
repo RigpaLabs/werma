@@ -1,6 +1,10 @@
+pub mod callback;
 pub mod config;
 pub mod executor;
+pub mod helpers;
 pub mod loader;
+pub mod poll;
+pub mod pr;
 pub mod prompt;
 pub mod verdict;
 
@@ -313,11 +317,6 @@ pub fn cmd_validate() -> Result<()> {
             Err(e)
         }
     }
-}
-
-/// `werma pipeline eject` — export builtin config to `~/.werma/pipelines/`.
-pub fn cmd_eject() -> Result<()> {
-    loader::eject()
 }
 
 #[cfg(test)]

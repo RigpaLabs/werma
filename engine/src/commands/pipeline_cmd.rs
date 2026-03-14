@@ -39,10 +39,6 @@ pub fn cmd_pipeline_validate() -> Result<()> {
     pipeline::cmd_validate()
 }
 
-pub fn cmd_pipeline_eject() -> Result<()> {
-    pipeline::cmd_eject()
-}
-
 pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<()> {
     let db = crate::open_db()?;
     let linear_client = linear::LinearClient::new()?;

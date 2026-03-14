@@ -23,6 +23,9 @@ mod worktree;
 #[cfg(test)]
 mod integration_tests;
 
+#[cfg(test)]
+mod full_cycle_tests;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -267,7 +270,6 @@ fn main() -> anyhow::Result<()> {
                     commands::pipeline_cmd::cmd_pipeline_show(stage.as_deref())?;
                 }
                 cli::PipelineAction::Validate => commands::pipeline_cmd::cmd_pipeline_validate()?,
-                cli::PipelineAction::Eject => commands::pipeline_cmd::cmd_pipeline_eject()?,
                 cli::PipelineAction::Run { issues, stage } => {
                     commands::pipeline_cmd::cmd_pipeline_run(&issues, stage.as_deref())?;
                 }
@@ -774,16 +776,6 @@ mod tests {
                     action: crate::cli::PipelineAction::Validate,
                 } => {}
                 other => panic!("expected Pipeline Validate, got {other:?}"),
-            }
-        }
-
-        #[test]
-        fn parse_pipeline_eject() {
-            match parse(&["pipeline", "eject"]) {
-                Commands::Pipeline {
-                    action: crate::cli::PipelineAction::Eject,
-                } => {}
-                other => panic!("expected Pipeline Eject, got {other:?}"),
             }
         }
 

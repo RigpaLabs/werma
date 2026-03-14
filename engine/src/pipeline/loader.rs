@@ -1,5 +1,3 @@
-use std::path::{Path, PathBuf};
-
 use anyhow::{Context, Result};
 
 use super::config::PipelineConfig;
@@ -7,38 +5,31 @@ use super::config::PipelineConfig;
 /// Built-in default pipeline YAML compiled into the binary.
 const BUILTIN_DEFAULT_YAML: &str = include_str!("../../pipelines/default.yaml");
 
-/// Returns the runtime pipelines override directory: `~/.werma/pipelines/`.
-pub fn runtime_pipelines_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".werma/pipelines"))
-}
-
-/// Load the pipeline config.
-///
-/// Priority (highest to lowest):
-/// 1. `~/.werma/pipelines/default.yaml` (runtime override)
-/// 2. Built-in `default.yaml` compiled into the binary
+/// Load the pipeline config (always uses the compiled-in builtin).
 pub fn load_default() -> Result<PipelineConfig> {
-    // Try runtime override first.
-    if let Some(runtime_dir) = runtime_pipelines_dir() {
-        let override_path = runtime_dir.join("default.yaml");
-        if override_path.exists() {
-            let config = load_from_file(&override_path)?;
-            warn_deprecated_per_stage(&config);
-            return Ok(config);
-        }
-    }
-
-    // Fall back to builtin.
+    warn_stale_runtime_override();
     let config = load_from_str(BUILTIN_DEFAULT_YAML, "<builtin>")?;
     warn_deprecated_per_stage(&config);
     Ok(config)
 }
 
-/// Load a pipeline config from a YAML file path.
-pub fn load_from_file(path: &Path) -> Result<PipelineConfig> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("failed to read pipeline config: {}", path.display()))?;
-    load_from_str(&content, &path.display().to_string())
+/// Warn once if a stale runtime override exists from a previous `werma pipeline eject`.
+fn warn_stale_runtime_override() {
+    use std::sync::Once;
+    static WARNED: Once = Once::new();
+    if let Some(home) = dirs::home_dir() {
+        let stale = home.join(".werma/pipelines/default.yaml");
+        if stale.exists() {
+            WARNED.call_once(|| {
+                eprintln!(
+                    "warning: stale pipeline override found at {}. \
+                     Runtime overrides are no longer supported — this file is ignored. \
+                     Delete it to silence this warning.",
+                    stale.display()
+                );
+            });
+        }
+    }
 }
 
 /// Parse a pipeline config from a YAML string.
@@ -105,9 +96,8 @@ pub fn validate(config: &PipelineConfig, source: &str) -> Result<()> {
 /// Resolve a prompt source to its rendered content string.
 ///
 /// - If `prompt_source` contains a newline → it's an inline prompt, return as-is.
-/// - Otherwise → treat as a file path relative to the runtime pipelines dir (if it
-///   exists) or the builtin pipelines embed map. Falls back to empty string with a
-///   warning if not found.
+/// - Otherwise → treat as a builtin prompt file path. Falls back to empty string
+///   with a warning if not found.
 pub fn resolve_prompt(prompt_source: &str) -> String {
     let trimmed = prompt_source.trim();
 
@@ -116,30 +106,12 @@ pub fn resolve_prompt(prompt_source: &str) -> String {
         return trimmed.to_string();
     }
 
-    // File path: try runtime override first, then builtin.
-    let rel_path = trimmed;
-
-    if let Some(runtime_dir) = runtime_pipelines_dir() {
-        let full_path = runtime_dir.join(rel_path);
-        if full_path.exists() {
-            match std::fs::read_to_string(&full_path) {
-                Ok(content) => return content,
-                Err(e) => {
-                    eprintln!(
-                        "warning: failed to read prompt file {}: {e}",
-                        full_path.display()
-                    );
-                }
-            }
-        }
-    }
-
     // Builtin file embeds — resolved at compile time via a match.
-    if let Some(content) = builtin_prompt(rel_path) {
+    if let Some(content) = builtin_prompt(trimmed) {
         return content.to_string();
     }
 
-    eprintln!("warning: prompt file not found: {rel_path}");
+    eprintln!("warning: prompt file not found: {trimmed}");
     String::new()
 }
 
@@ -154,52 +126,6 @@ fn builtin_prompt(rel_path: &str) -> Option<&'static str> {
         "prompts/deployer.md" => Some(include_str!("../../pipelines/prompts/deployer.md")),
         _ => None,
     }
-}
-
-/// Export the builtin config + prompt files to `~/.werma/pipelines/`.
-pub fn eject() -> Result<()> {
-    let runtime_dir = runtime_pipelines_dir().context("cannot determine home directory")?;
-    let prompts_dir = runtime_dir.join("prompts");
-
-    std::fs::create_dir_all(&prompts_dir)
-        .with_context(|| format!("failed to create {}", prompts_dir.display()))?;
-
-    // Write default.yaml
-    let config_path = runtime_dir.join("default.yaml");
-    std::fs::write(&config_path, BUILTIN_DEFAULT_YAML)
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
-    println!("wrote: {}", config_path.display());
-
-    // Write each builtin prompt file.
-    let prompts: &[(&str, &str)] = &[
-        (
-            "prompts/engineer.md",
-            include_str!("../../pipelines/prompts/engineer.md"),
-        ),
-        (
-            "prompts/reviewer.md",
-            include_str!("../../pipelines/prompts/reviewer.md"),
-        ),
-        (
-            "prompts/qa.md",
-            include_str!("../../pipelines/prompts/qa.md"),
-        ),
-        (
-            "prompts/devops.md",
-            include_str!("../../pipelines/prompts/devops.md"),
-        ),
-    ];
-
-    for (rel, content) in prompts {
-        let path = runtime_dir.join(rel);
-        std::fs::write(&path, content)
-            .with_context(|| format!("failed to write {}", path.display()))?;
-        println!("wrote: {}", path.display());
-    }
-
-    println!("\nPipeline config ejected to: {}", runtime_dir.display());
-    println!("Edit files there to override the builtin pipeline.");
-    Ok(())
 }
 
 #[cfg(test)]
@@ -308,29 +234,5 @@ stages:
     fn resolve_builtin_devops_prompt() {
         let content = builtin_prompt("prompts/devops.md");
         assert!(content.is_some());
-    }
-
-    #[test]
-    fn runtime_pipelines_dir_is_some() {
-        // Should always succeed on a system with a home dir
-        let dir = runtime_pipelines_dir();
-        assert!(dir.is_some());
-        let path = dir.unwrap();
-        assert!(path.ends_with(".werma/pipelines"));
-    }
-
-    #[test]
-    fn load_from_file_missing_returns_error() {
-        let result = load_from_file(Path::new("/tmp/nonexistent-werma-pipeline.yaml"));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn load_from_file_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("test.yaml");
-        std::fs::write(&path, BUILTIN_DEFAULT_YAML).unwrap();
-        let config = load_from_file(&path).unwrap();
-        assert_eq!(config.pipeline, "default");
     }
 }

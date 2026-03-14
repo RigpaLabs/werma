@@ -1,0 +1,516 @@
+use std::collections::HashMap;
+
+use anyhow::Result;
+
+use super::config::PipelineConfig;
+use super::loader::load_default;
+use super::loader::resolve_prompt;
+use super::prompt::{build_vars, render_prompt};
+use crate::db::Db;
+use crate::linear::LinearApi;
+use crate::models::{Status, Task};
+use crate::traits::CommandRunner;
+
+use super::pr::is_pr_merged_for_issue;
+
+/// Check if an issue is a research issue (has `research` label).
+pub fn is_research_issue(labels: &[&str]) -> bool {
+    labels.iter().any(|l| l.eq_ignore_ascii_case("research"))
+}
+
+/// Poll Linear for issues at pipeline-relevant statuses and create tasks.
+pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<()> {
+    let config = load_default()?;
+
+    let mut total_created = 0;
+    let mut total_skipped = 0;
+
+    // Research issues in Todo → research task (not pipeline task)
+    let todo_issues = linear.get_issues_by_status("todo")?;
+    for issue in &todo_issues {
+        let issue_id = issue["id"].as_str().unwrap_or("");
+        let identifier = issue["identifier"].as_str().unwrap_or("");
+        let title = issue["title"].as_str().unwrap_or("");
+        let description = issue["description"].as_str().unwrap_or("");
+
+        if issue_id.is_empty() {
+            continue;
+        }
+
+        let labels: Vec<&str> = issue["labels"]["nodes"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|l| l["name"].as_str())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if !is_research_issue(&labels) {
+            continue; // Not a research issue — handled by standard pipeline below
+        }
+
+        // Skip manual research issues — human does the research
+        if crate::linear::is_manual_issue(&labels) {
+            total_skipped += 1;
+            continue;
+        }
+
+        // Skip if active task already exists for this issue
+        let existing = db.tasks_by_linear_issue(identifier, None, true)?;
+        if !existing.is_empty() {
+            total_skipped += 1;
+            continue;
+        }
+
+        let working_dir = crate::linear::infer_working_dir(title, &labels);
+        if crate::linear::validate_working_dir(&working_dir).is_none() {
+            eprintln!(
+                "  ! skipping {identifier} [{title}]: working dir '{working_dir}' does not exist"
+            );
+            total_skipped += 1;
+            continue;
+        }
+        let prompt = format!(
+            "[{identifier}] {title}\n\n{description}\n\nSave the research output as a markdown file in docs/research/. \
+             On the last line of your output, write: OUTPUT_FILE=<path-to-saved-file>"
+        );
+
+        let task_id = db.next_task_id()?;
+        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        let max_turns = crate::default_turns("research");
+        let allowed_tools = crate::runner::tools_for_type("research", false);
+
+        let task = Task {
+            id: task_id.clone(),
+            status: Status::Pending,
+            priority: 2,
+            created_at: now,
+            started_at: None,
+            finished_at: None,
+            task_type: "research".to_string(),
+            prompt,
+            output_path: String::new(),
+            working_dir,
+            model: "sonnet".to_string(),
+            max_turns,
+            allowed_tools,
+            session_id: String::new(),
+            linear_issue_id: identifier.to_string(),
+            linear_pushed: false,
+            pipeline_stage: String::new(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: crate::runtime_repo_hash(),
+            estimate: 0,
+        };
+
+        db.insert_task(&task)?;
+        // Move to In Progress so it doesn't get picked up again
+        if let Err(e) = linear.move_issue_by_name(issue_id, "in_progress") {
+            eprintln!("  ! research move to in_progress failed for {identifier}: {e}");
+        }
+        println!("  + {task_id} [{identifier}] type=research (research pipeline)");
+        total_created += 1;
+    }
+
+    // Standard pipeline: iterate config stages that have linear_status
+    let poll_stages = config.poll_stages();
+
+    // Collect all unique status keys across all polled stages
+    let mut status_to_stages: HashMap<String, Vec<String>> = HashMap::new();
+    for (stage_name, stage_cfg) in &poll_stages {
+        for key in stage_cfg.status_keys() {
+            status_to_stages
+                .entry(key.to_string())
+                .or_default()
+                .push(stage_name.to_string());
+        }
+    }
+
+    for (status_key, stage_names) in &status_to_stages {
+        let issues = linear.get_issues_by_status(status_key)?;
+
+        for issue in &issues {
+            let issue_id = issue["id"].as_str().unwrap_or("");
+            let identifier = issue["identifier"].as_str().unwrap_or("");
+            let title = issue["title"].as_str().unwrap_or("");
+            let description = issue["description"].as_str().unwrap_or("");
+
+            if issue_id.is_empty() {
+                continue;
+            }
+
+            let labels: Vec<&str> = issue["labels"]["nodes"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|l| l["name"].as_str())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            // Research issues in todo bypass the standard pipeline
+            if is_research_issue(&labels) && status_key == "todo" {
+                continue;
+            }
+
+            for stage_name in stage_names {
+                let stage_cfg = match config.stage(stage_name) {
+                    Some(s) => s,
+                    None => continue,
+                };
+
+                // Skip if any non-failed task exists for this issue + stage.
+                // This covers active (pending/running), completed-but-unpushed (callback
+                // pending), AND completed-and-pushed tasks where the Linear status didn't
+                // actually move (RIG-209). Failed tasks don't block — poll can retry those.
+                if db.has_any_nonfailed_task_for_issue_stage(identifier, stage_name)? {
+                    total_skipped += 1;
+                    continue;
+                }
+
+                // Manual issues: skip execution stages (skip_manual=true)
+                if crate::linear::is_manual_issue(&labels) && stage_cfg.skip_manual() {
+                    total_skipped += 1;
+                    continue;
+                }
+
+                let working_dir = crate::linear::infer_working_dir(title, &labels);
+                if crate::linear::validate_working_dir(&working_dir).is_none() {
+                    eprintln!(
+                        "  ! skipping {identifier} [{title}] stage={stage_name}: working dir '{working_dir}' does not exist"
+                    );
+                    total_skipped += 1;
+                    continue;
+                }
+
+                // RIG-135: Cross-stage dedup for reviewer — skip if any review task
+                // (regardless of stage name) is already active for this issue.
+                if stage_name == "reviewer" && db.has_any_review_task_for_issue(identifier)? {
+                    total_skipped += 1;
+                    continue;
+                }
+
+                // For reviewer stage: skip if PR is already merged (manual merge while in Review)
+                if stage_name == "reviewer" && is_pr_merged_for_issue(cmd, &working_dir, identifier)
+                {
+                    println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
+                    if let Err(e) = linear.move_issue_by_name(issue_id, "done") {
+                        eprintln!("  ! failed to move {identifier} to done: {e}");
+                    }
+                    total_skipped += 1;
+                    continue;
+                }
+
+                // Build prompt from config
+                let prompt = build_poll_prompt(&config, stage_cfg, identifier, title, description);
+
+                let task_id = db.next_task_id()?;
+                let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+
+                let issue_estimate = issue["estimate"].as_i64().unwrap_or(0) as i32;
+
+                // For polled stages (first invocation), review_round=0
+                let review_round: i64 = if stage_name == "reviewer" {
+                    db.count_completed_tasks_for_issue_stage(identifier, "reviewer")?
+                } else {
+                    0
+                };
+
+                let max_turns = stage_cfg
+                    .max_turns
+                    .map(|t| t as i32)
+                    .unwrap_or_else(|| crate::default_turns(&stage_cfg.agent));
+                let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
+                let effective_model = stage_cfg
+                    .effective_model(issue_estimate, review_round)
+                    .to_string();
+
+                let task = Task {
+                    id: task_id.clone(),
+                    status: Status::Pending,
+                    priority: 1,
+                    created_at: now,
+                    started_at: None,
+                    finished_at: None,
+                    task_type: stage_cfg.agent.clone(),
+                    prompt,
+                    output_path: String::new(),
+                    working_dir,
+                    model: effective_model,
+                    max_turns,
+                    allowed_tools,
+                    session_id: String::new(),
+                    linear_issue_id: identifier.to_string(),
+                    linear_pushed: false,
+                    pipeline_stage: stage_name.clone(),
+                    depends_on: vec![],
+                    context_files: vec![],
+                    repo_hash: crate::runtime_repo_hash(),
+                    estimate: issue_estimate,
+                };
+
+                db.insert_task(&task)?;
+
+                // on_start: move issue to a different status when task is created
+                if let Some(ref on_start) = stage_cfg.on_start
+                    && let Err(e) = linear.move_issue_by_name(issue_id, &on_start.status)
+                {
+                    eprintln!(
+                        "  ! on_start move failed for {} -> {}: {e}",
+                        identifier, on_start.status
+                    );
+                }
+
+                println!(
+                    "  + {} [{}] stage={} type={}",
+                    task_id, identifier, stage_name, stage_cfg.agent
+                );
+                total_created += 1;
+            }
+        }
+    }
+
+    // Label-based polling: iterate stages with linear_label
+    for (stage_name, stage_cfg) in &poll_stages {
+        let label = match &stage_cfg.linear_label {
+            Some(l) => l.clone(),
+            None => continue,
+        };
+
+        let issues = linear.get_issues_by_label(&label)?;
+
+        for issue in &issues {
+            let issue_id = issue["id"].as_str().unwrap_or("");
+            let identifier = issue["identifier"].as_str().unwrap_or("");
+            let title = issue["title"].as_str().unwrap_or("");
+            let description = issue["description"].as_str().unwrap_or("");
+
+            if issue_id.is_empty() {
+                continue;
+            }
+
+            // Label-based triggers only fire on Backlog issues.
+            // Issues in any other status (In Progress, Review, etc.) are ignored.
+            let state_type = issue["state"]["type"].as_str().unwrap_or("");
+            if state_type != "backlog" {
+                total_skipped += 1;
+                continue;
+            }
+
+            let labels: Vec<&str> = issue["labels"]["nodes"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|l| l["name"].as_str())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            // Manual issues: never auto-process via label triggers.
+            if crate::linear::is_manual_issue(&labels) {
+                total_skipped += 1;
+                continue;
+            }
+
+            // Skip if any non-failed task exists for this issue + stage (RIG-209).
+            if db.has_any_nonfailed_task_for_issue_stage(identifier, stage_name)? {
+                total_skipped += 1;
+                continue;
+            }
+
+            // Guard: don't re-run analyst if engineer has already started for this issue.
+            // Prevents analyst from seeing an open PR and declaring ALREADY_DONE.
+            if *stage_name == "analyst" {
+                let engineer_tasks =
+                    db.tasks_by_linear_issue(identifier, Some("engineer"), false)?;
+                if !engineer_tasks.is_empty() {
+                    eprintln!(
+                        "  ~ skipping analyst for {identifier}: engineer already ran ({} tasks)",
+                        engineer_tasks.len()
+                    );
+                    total_skipped += 1;
+                    continue;
+                }
+            }
+
+            let working_dir = crate::linear::infer_working_dir(title, &labels);
+            if crate::linear::validate_working_dir(&working_dir).is_none() {
+                eprintln!(
+                    "  ! skipping {identifier} [{title}] stage={stage_name}: working dir '{working_dir}' does not exist"
+                );
+                total_skipped += 1;
+                continue;
+            }
+
+            // RIG-135: Cross-stage dedup for reviewer (label-based path)
+            if *stage_name == "reviewer" && db.has_any_review_task_for_issue(identifier)? {
+                total_skipped += 1;
+                continue;
+            }
+
+            // For reviewer stage: skip if PR is already merged
+            if *stage_name == "reviewer" && is_pr_merged_for_issue(cmd, &working_dir, identifier) {
+                println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
+                if let Err(e) = linear.move_issue_by_name(issue_id, "done") {
+                    eprintln!("  ! failed to move {identifier} to done: {e}");
+                }
+                total_skipped += 1;
+                continue;
+            }
+
+            let prompt = build_poll_prompt(&config, stage_cfg, identifier, title, description);
+
+            let task_id = db.next_task_id()?;
+            let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+
+            let issue_estimate = issue["estimate"].as_i64().unwrap_or(0) as i32;
+
+            let review_round: i64 = if *stage_name == "reviewer" {
+                db.count_completed_tasks_for_issue_stage(identifier, "reviewer")?
+            } else {
+                0
+            };
+
+            let max_turns = stage_cfg
+                .max_turns
+                .map(|t| t as i32)
+                .unwrap_or_else(|| crate::default_turns(&stage_cfg.agent));
+            let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
+            let effective_model = stage_cfg
+                .effective_model(issue_estimate, review_round)
+                .to_string();
+
+            let task = Task {
+                id: task_id.clone(),
+                status: Status::Pending,
+                priority: 1,
+                created_at: now,
+                started_at: None,
+                finished_at: None,
+                task_type: stage_cfg.agent.clone(),
+                prompt,
+                output_path: String::new(),
+                working_dir,
+                model: effective_model,
+                max_turns,
+                allowed_tools,
+                session_id: String::new(),
+                linear_issue_id: identifier.to_string(),
+                linear_pushed: false,
+                pipeline_stage: stage_name.to_string(),
+                depends_on: vec![],
+                context_files: vec![],
+                repo_hash: crate::runtime_repo_hash(),
+                estimate: issue_estimate,
+            };
+
+            db.insert_task(&task)?;
+
+            // Remove the trigger label from the issue so it doesn't get picked up again
+            if let Err(e) = linear.remove_label(issue_id, &label) {
+                eprintln!("  ! failed to remove label '{label}' from {identifier}: {e}");
+            }
+
+            // on_start: move issue status
+            if let Some(ref on_start) = stage_cfg.on_start
+                && let Err(e) = linear.move_issue_by_name(issue_id, &on_start.status)
+            {
+                eprintln!(
+                    "  ! on_start move failed for {} -> {}: {e}",
+                    identifier, on_start.status
+                );
+            }
+
+            println!(
+                "  + {} [{}] stage={} type={} (label: {})",
+                task_id, identifier, stage_name, stage_cfg.agent, label
+            );
+            total_created += 1;
+        }
+    }
+
+    println!("\nPipeline poll: {total_created} created, {total_skipped} skipped");
+    Ok(())
+}
+
+/// Build the initial prompt for a polled stage (from config, with issue vars).
+pub(crate) fn build_poll_prompt(
+    config: &PipelineConfig,
+    stage_cfg: &super::config::StageConfig,
+    identifier: &str,
+    title: &str,
+    description: &str,
+) -> String {
+    let prompt_source = match &stage_cfg.prompt {
+        Some(p) => resolve_prompt(p),
+        None => {
+            // No prompt in config — minimal fallback
+            return format!(
+                "[{identifier}] {title}\n\nStage: {agent}\n\n{description}",
+                agent = stage_cfg.agent
+            );
+        }
+    };
+
+    let mut runtime: HashMap<String, String> = HashMap::new();
+    runtime.insert("issue_id".to_string(), identifier.to_string());
+    runtime.insert("issue_title".to_string(), title.to_string());
+    runtime.insert("issue_description".to_string(), description.to_string());
+
+    let vars = build_vars(&config.templates, &runtime);
+    render_prompt(&prompt_source, &vars)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::loader::load_from_str;
+
+    fn test_config() -> PipelineConfig {
+        load_from_str(include_str!("../../pipelines/default.yaml"), "<test>").unwrap()
+    }
+
+    #[test]
+    fn research_issue_detection() {
+        assert!(is_research_issue(&["research"]));
+        assert!(is_research_issue(&["Research"]));
+        assert!(is_research_issue(&["RESEARCH"]));
+        assert!(is_research_issue(&["Feature", "research", "repo:ar-quant"]));
+        assert!(!is_research_issue(&["Feature", "Bug"]));
+        assert!(!is_research_issue(&[]));
+    }
+
+    #[test]
+    fn research_issue_mixed_labels() {
+        assert!(is_research_issue(&["Feature", "Research", "repo:werma"]));
+        assert!(!is_research_issue(&["researcher"])); // partial match should not trigger
+    }
+
+    #[test]
+    fn build_poll_prompt_uses_issue_vars() {
+        let config = test_config();
+        let stage_cfg = config.stage("analyst").unwrap();
+        let prompt = build_poll_prompt(&config, stage_cfg, "RIG-65", "My title", "My description");
+        assert!(prompt.contains("RIG-65"));
+        assert!(prompt.contains("My title"));
+    }
+
+    #[test]
+    fn build_poll_prompt_fallback_when_no_prompt() {
+        let yaml = r#"
+pipeline: minimal
+stages:
+  bare:
+    agent: pipeline-test
+    model: sonnet
+"#;
+        let config = load_from_str(yaml, "<test>").unwrap();
+        let stage_cfg = config.stage("bare").unwrap();
+        let prompt = build_poll_prompt(&config, stage_cfg, "RIG-99", "Bare title", "Bare desc");
+        assert!(prompt.contains("RIG-99"));
+        assert!(prompt.contains("Bare title"));
+        assert!(prompt.contains("pipeline-test")); // agent name in fallback
+    }
+}
