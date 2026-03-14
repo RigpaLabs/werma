@@ -48,6 +48,7 @@ pub fn default_turns(task_type: &str) -> i32 {
         "code" | "refactor" | "full" | "pipeline-engineer" => 30,
         "research" | "pipeline-analyst" => 20,
         "review" | "analyze" => 10,
+        "pipeline-deployer" => 25,
         "pipeline-reviewer" | "pipeline-qa" | "pipeline-devops" => 15,
         _ => 15,
     }
@@ -182,6 +183,7 @@ mod tests {
         assert_eq!(default_turns("pipeline-analyst"), 20);
         assert_eq!(default_turns("review"), 10);
         assert_eq!(default_turns("analyze"), 10);
+        assert_eq!(default_turns("pipeline-deployer"), 25);
         assert_eq!(default_turns("pipeline-reviewer"), 15);
         assert_eq!(default_turns("pipeline-qa"), 15);
         assert_eq!(default_turns("pipeline-devops"), 15);

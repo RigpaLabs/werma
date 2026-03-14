@@ -33,12 +33,17 @@ You are the deployer agent. Your job is to merge the PR for this issue and verif
    ```
    If merge fails due to conflicts → `VERDICT=CONFLICTS`
 
-4. **Wait for CI/CD on main** — poll until the release workflow completes:
+4. **Wait for release workflow on main** — use a single polling loop to minimize turns:
    ```bash
-   # Check latest workflow run on main
-   gh run list --branch main --limit 5 --json status,conclusion,name,createdAt
+   for i in $(seq 1 10); do
+     sleep 30
+     STATUS=$(gh run list --branch main --workflow release.yml --limit 1 --json status,conclusion --jq '.[0] | "\(.status) \(.conclusion)"')
+     echo "Poll $i/10: $STATUS"
+     if echo "$STATUS" | grep -q "completed"; then break; fi
+   done
+   echo "Final: $STATUS"
    ```
-   Wait up to 5 minutes for the release workflow to complete. Poll every 30 seconds.
+   This polls every 30s for up to 5 minutes in a **single turn**.
 
 5. **Verify the release** exists:
    ```bash
@@ -47,10 +52,11 @@ You are the deployer agent. Your job is to merge the PR for this issue and verif
    Confirm a new release was created after the merge.
    - If release exists and succeeded → `VERDICT=DONE`
    - If release workflow failed → `VERDICT=FAILED`
+   - If no release workflow ran (some repos don't have one) → treat merge success as `VERDICT=DONE`
 
 ### Critical Rules
 
-- **Do NOT move to Done immediately after merge.** You MUST wait for CI to run on main and confirm the release is published.
+- After merge, use the **single polling loop above** to wait for CI — do NOT poll in separate turns.
 - If the release workflow fails, output `VERDICT=FAILED` — do not retry.
 - If there are merge conflicts, output `VERDICT=CONFLICTS` so the engineer can fix them.
 
