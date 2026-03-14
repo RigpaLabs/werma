@@ -52,8 +52,7 @@ impl CommandRunner for RealCommandRunner {
 // ─── Notifier trait ──────────────────────────────────────────────────────────
 
 /// Trait abstracting notifications (macOS + Slack) for testability.
-/// Not yet consumed by daemon handlers — will be wired in a follow-up.
-#[allow(dead_code)]
+/// Used by pipeline callback and move_with_retry for alert notifications.
 pub trait Notifier {
     fn notify_macos(&self, title: &str, message: &str, sound: &str);
     fn notify_slack(&self, channel: &str, text: &str);
@@ -174,6 +173,8 @@ pub mod fakes {
         pub issues_by_status: RefCell<std::collections::HashMap<String, Vec<serde_json::Value>>>,
         pub issues_by_label: RefCell<std::collections::HashMap<String, Vec<serde_json::Value>>>,
         pub issue_data: RefCell<std::collections::HashMap<String, (String, String)>>,
+        /// Maps issue_id -> current status name (for get_issue_status reconciliation).
+        pub issue_status: RefCell<std::collections::HashMap<String, String>>,
         fail_next_moves: RefCell<u32>,
     }
 
@@ -190,8 +191,16 @@ pub mod fakes {
                 issues_by_status: RefCell::new(std::collections::HashMap::new()),
                 issues_by_label: RefCell::new(std::collections::HashMap::new()),
                 issue_data: RefCell::new(std::collections::HashMap::new()),
+                issue_status: RefCell::new(std::collections::HashMap::new()),
                 fail_next_moves: RefCell::new(0),
             }
+        }
+
+        /// Set the status that get_issue_status will return for an issue.
+        pub fn set_issue_status(&self, issue_id: &str, status: &str) {
+            self.issue_status
+                .borrow_mut()
+                .insert(issue_id.to_string(), status.to_string());
         }
 
         /// Configure the next N move_issue_by_name calls to return Err.
@@ -253,6 +262,10 @@ pub mod fakes {
             self.move_calls
                 .borrow_mut()
                 .push((issue_id.to_string(), status_name.to_string()));
+            // Auto-update issue_status so reconciliation checks see the new status
+            self.issue_status
+                .borrow_mut()
+                .insert(issue_id.to_string(), status_name.to_string());
             Ok(())
         }
 
@@ -319,6 +332,15 @@ pub mod fakes {
                 .borrow_mut()
                 .push((issue_id.to_string(), label_name.to_string()));
             Ok(())
+        }
+
+        fn get_issue_status(&self, issue_id: &str) -> Result<String> {
+            Ok(self
+                .issue_status
+                .borrow()
+                .get(issue_id)
+                .cloned()
+                .unwrap_or_default())
         }
     }
 }

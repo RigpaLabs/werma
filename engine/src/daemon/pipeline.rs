@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::db::Db;
-use crate::traits::RealCommandRunner;
+use crate::traits::{RealCommandRunner, RealNotifier};
 use crate::{linear, pipeline};
 
 use super::log_daemon;
@@ -31,6 +31,7 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
         }
     };
     let cmd_runner = RealCommandRunner;
+    let notifier = RealNotifier;
 
     for task in &tasks {
         if !task.pipeline_stage.is_empty() {
@@ -50,14 +51,15 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                 &task.working_dir,
                 linear_client,
                 &cmd_runner,
+                &notifier,
             ) {
                 Ok(()) => {
                     db.set_linear_pushed(&task.id, true)?;
                     log_daemon(
                         &log_path,
                         &format!(
-                            "pipeline callback: {} stage={} issue={}",
-                            task.id, task.pipeline_stage, task.linear_issue_id
+                            "[CALLBACK] {}: {} stage={} -> OK",
+                            task.linear_issue_id, task.id, task.pipeline_stage
                         ),
                     );
                 }
@@ -65,8 +67,8 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                     log_daemon(
                         &log_path,
                         &format!(
-                            "pipeline callback failed: {} stage={} error={e}",
-                            task.id, task.pipeline_stage
+                            "[CALLBACK] {}: {} stage={} -> FAILED: {e}",
+                            task.linear_issue_id, task.id, task.pipeline_stage
                         ),
                     );
                 }

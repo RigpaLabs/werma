@@ -1,7 +1,7 @@
 use crate::db::{Db, make_test_task};
 use crate::models::Status;
 use crate::pipeline::executor::{callback, poll};
-use crate::traits::fakes::{FakeCommandRunner, FakeLinearApi};
+use crate::traits::fakes::{FakeCommandRunner, FakeLinearApi, FakeNotifier};
 use serde_json::json;
 
 /// Ensure `~/projects/rigpa/werma` exists so `validate_working_dir` passes on CI.
@@ -70,6 +70,7 @@ fn callback_done_moves_issue() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -83,6 +84,7 @@ fn callback_done_moves_issue() {
 }
 
 // ─── Test 2: callback_move_failure_returns_error ────────────────────────────
+// With RIG-211 retry logic, all 3 retries must fail for the callback to error.
 
 #[test]
 fn callback_move_failure_returns_error() {
@@ -90,8 +92,8 @@ fn callback_move_failure_returns_error() {
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
 
-    // Configure the fake to fail the next move
-    linear.fail_next_n_moves(1);
+    // Configure the fake to fail all 3 retry attempts
+    linear.fail_next_n_moves(3);
 
     let mut task = make_test_task("20260313-101");
     task.status = Status::Completed;
@@ -110,9 +112,13 @@ fn callback_move_failure_returns_error() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     );
 
-    assert!(err.is_err(), "callback should return Err when move fails");
+    assert!(
+        err.is_err(),
+        "callback should return Err when all retries fail"
+    );
 }
 
 // ─── Test 3: poll_no_duplicate_after_completion ─────────────────────────────
@@ -257,7 +263,9 @@ fn poll_research_move_failure_nonfatal() {
     assert_eq!(tasks[0].task_type, "research");
 }
 
-// ─── Test 7: callback_retry_after_move_failure (RIG-211 regression guard) ───
+// ─── Test 7: callback succeeds on retry after initial failure (RIG-211) ─────
+// move_with_retry retries within a single callback invocation. One failure
+// followed by a success means the callback itself returns Ok.
 
 #[test]
 fn callback_retry_after_move_failure() {
@@ -271,24 +279,11 @@ fn callback_retry_after_move_failure() {
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
-    let result = "## Implementation\nDone.\n\nVERDICT=DONE";
+    let result =
+        "## Implementation\nDone.\n\nPR_URL=https://github.com/org/repo/pull/99\nVERDICT=DONE";
 
-    // First callback: move fails → should return Err, dedup guard NOT set
+    // First move attempt fails, second succeeds (within the same callback call)
     linear.fail_next_n_moves(1);
-    let err = callback(
-        &db,
-        "20260313-300",
-        "engineer",
-        result,
-        "RIG-300",
-        "~/projects/rigpa/werma",
-        &linear,
-        &cmd,
-    );
-    assert!(err.is_err(), "first callback should fail when move fails");
-
-    // Dedup guard should NOT be set — verify by calling callback again
-    // (if guard was set, this would silently return Ok without moving)
     let ok = callback(
         &db,
         "20260313-300",
@@ -298,8 +293,9 @@ fn callback_retry_after_move_failure() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     );
-    assert!(ok.is_ok(), "retry callback should succeed");
+    assert!(ok.is_ok(), "callback should succeed on retry: {ok:?}");
 
     // The retry should have moved the issue to "review"
     let moves = linear.move_calls.borrow();
@@ -308,6 +304,187 @@ fn callback_retry_after_move_failure() {
             .iter()
             .any(|(id, status)| id == "RIG-300" && status == "review"),
         "retry should move to 'review', got: {moves:?}"
+    );
+}
+
+// ─── Test 7b: callback fails after all retries exhausted (RIG-211) ──────────
+
+#[test]
+fn callback_all_retries_exhausted() {
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+
+    let mut task = make_test_task("20260313-301");
+    task.status = Status::Completed;
+    task.linear_issue_id = "RIG-301".to_string();
+    task.pipeline_stage = "engineer".to_string();
+    db.insert_task(&task).unwrap();
+
+    let result = "## Done\nVERDICT=DONE";
+
+    // All 3 retry attempts fail
+    linear.fail_next_n_moves(3);
+    let err = callback(
+        &db,
+        "20260313-301",
+        "engineer",
+        result,
+        "RIG-301",
+        "~/projects/rigpa/werma",
+        &linear,
+        &cmd,
+        &FakeNotifier::new(),
+    );
+    assert!(
+        err.is_err(),
+        "callback should return Err when all retries exhausted"
+    );
+
+    // Dedup guard should NOT be set after failure
+    assert!(
+        !db.is_callback_recently_fired("20260313-301", 60).unwrap(),
+        "callback_fired_at should not be set after failure"
+    );
+}
+
+// ─── Test 7c: daemon-level retry — failed callback retried on next tick ──────
+// Verifies the dedup guard is NOT set on failure, allowing the daemon's next
+// tick to retry successfully. This is the two-invocation scenario: first call
+// fails (all moves fail), second call succeeds (moves work).
+
+#[test]
+fn callback_daemon_retry_after_failure() {
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+    let notifier = FakeNotifier::new();
+
+    let mut task = make_test_task("20260313-302");
+    task.status = Status::Completed;
+    task.linear_issue_id = "RIG-302".to_string();
+    task.pipeline_stage = "reviewer".to_string();
+    db.insert_task(&task).unwrap();
+
+    let result = "## Review\nLooks good.\n\nVERDICT=APPROVED";
+
+    // --- Daemon tick 1: all moves fail ---
+    linear.fail_next_n_moves(3);
+    let err = callback(
+        &db,
+        "20260313-302",
+        "reviewer",
+        result,
+        "RIG-302",
+        "~/projects/rigpa/werma",
+        &linear,
+        &cmd,
+        &notifier,
+    );
+    assert!(
+        err.is_err(),
+        "first callback should fail when all moves fail"
+    );
+
+    // Dedup guard must NOT be set — allows daemon retry on next tick
+    assert!(
+        !db.is_callback_recently_fired("20260313-302", 60).unwrap(),
+        "callback_fired_at should not be set after failure"
+    );
+
+    // Notifications should have been sent on failure
+    assert!(
+        !notifier.macos_calls.borrow().is_empty(),
+        "macOS alert should fire on retry exhaustion"
+    );
+    assert!(
+        !notifier.slack_calls.borrow().is_empty(),
+        "Slack alert should fire on retry exhaustion"
+    );
+
+    // --- Daemon tick 2: moves succeed now ---
+    // (fail_next_n_moves counter is exhausted, so moves work)
+    let ok = callback(
+        &db,
+        "20260313-302",
+        "reviewer",
+        result,
+        "RIG-302",
+        "~/projects/rigpa/werma",
+        &linear,
+        &cmd,
+        &notifier,
+    );
+    assert!(ok.is_ok(), "second callback should succeed: {ok:?}");
+
+    // Dedup guard should now be set after success
+    assert!(
+        db.is_callback_recently_fired("20260313-302", 60).unwrap(),
+        "callback_fired_at should be set after successful retry"
+    );
+
+    // Issue should have been moved to "ready" (reviewer APPROVED transition)
+    let moves = linear.move_calls.borrow();
+    assert!(
+        moves
+            .iter()
+            .any(|(id, status)| id == "RIG-302" && status == "ready"),
+        "retry should move to 'ready', got: {moves:?}"
+    );
+}
+
+// ─── Test 7d: callback failure sends notifications via Notifier trait ────────
+
+#[test]
+fn callback_failure_sends_notifications() {
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+    let notifier = FakeNotifier::new();
+
+    let mut task = make_test_task("20260313-303");
+    task.status = Status::Completed;
+    task.linear_issue_id = "RIG-303".to_string();
+    task.pipeline_stage = "engineer".to_string();
+    db.insert_task(&task).unwrap();
+
+    let result = "## Done\nVERDICT=DONE";
+
+    // All retries fail
+    linear.fail_next_n_moves(3);
+    let _ = callback(
+        &db,
+        "20260313-303",
+        "engineer",
+        result,
+        "RIG-303",
+        "~/projects/rigpa/werma",
+        &linear,
+        &cmd,
+        &notifier,
+    );
+
+    // Verify notifications were sent via the Notifier trait
+    let macos = notifier.macos_calls.borrow();
+    assert_eq!(macos.len(), 1, "should send exactly one macOS notification");
+    assert!(
+        macos[0].0.contains("Callback Failed"),
+        "macOS title should mention failure, got: {:?}",
+        macos[0].0
+    );
+    assert!(
+        macos[0].1.contains("RIG-303"),
+        "macOS message should mention issue ID, got: {:?}",
+        macos[0].1
+    );
+
+    let slack = notifier.slack_calls.borrow();
+    assert_eq!(slack.len(), 1, "should send exactly one Slack notification");
+    assert_eq!(slack[0].0, "#werma-alerts");
+    assert!(
+        slack[0].1.contains("RIG-303"),
+        "Slack message should mention issue ID, got: {:?}",
+        slack[0].1
     );
 }
 
@@ -618,6 +795,7 @@ fn callback_dedup_guard_blocks_duplicate() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -633,6 +811,7 @@ fn callback_dedup_guard_blocks_duplicate() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -667,6 +846,7 @@ fn callback_empty_output_posts_comment() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -710,6 +890,7 @@ fn callback_unknown_stage_noop() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     );
 
     assert!(result.is_ok(), "unknown stage should return Ok");
@@ -744,6 +925,7 @@ fn callback_analyst_estimate_updates_linear() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -791,6 +973,7 @@ fn callback_analyst_adds_done_label() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -837,6 +1020,7 @@ fn callback_analyst_blocked_also_adds_done_label() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -875,6 +1059,7 @@ fn callback_missing_verdict_warns() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -924,6 +1109,7 @@ fn callback_already_done_blocked_by_open_pr() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -972,6 +1158,7 @@ fn callback_engineer_done_with_pr_url() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1035,6 +1222,7 @@ fn callback_engineer_done_auto_pr() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1087,6 +1275,7 @@ fn callback_engineer_done_no_pr_warns() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1129,6 +1318,7 @@ fn callback_reviewer_rejected_spawns_engineer() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1193,6 +1383,7 @@ fn callback_review_cycle_limit_escalates() {
         "~/projects/rigpa/werma",
         &linear,
         &cmd,
+        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1212,5 +1403,63 @@ fn callback_review_cycle_limit_escalates() {
     assert!(
         engineer_tasks.is_empty(),
         "review cycle limit should NOT spawn new engineer"
+    );
+}
+
+// ─── Test 27b: escalation to blocked retries on failure (RIG-211) ────────────
+// Verifies that the escalation path uses move_with_retry, not bare move.
+
+#[test]
+fn callback_review_escalation_retries_on_failure() {
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+
+    // Pre-insert 3 completed reviewer tasks (the max_review_rounds limit)
+    for i in 0..3 {
+        let mut task = make_test_task(&format!("20260313-28{i}"));
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-228".to_string();
+        task.pipeline_stage = "reviewer".to_string();
+        task.task_type = "pipeline-reviewer".to_string();
+        task.linear_pushed = true;
+        db.insert_task(&task).unwrap();
+    }
+
+    // Current (4th) reviewer task
+    let mut task = make_test_task("20260313-228");
+    task.status = Status::Completed;
+    task.linear_issue_id = "RIG-228".to_string();
+    task.pipeline_stage = "reviewer".to_string();
+    task.task_type = "pipeline-reviewer".to_string();
+    db.insert_task(&task).unwrap();
+
+    linear.set_issue_data("RIG-228", "Fix werma bug", "bug description");
+
+    let result = "## Review\nStill broken.\n\nVERDICT=REJECTED";
+
+    // First move attempt fails, but second should succeed (retry logic)
+    linear.fail_next_n_moves(1);
+
+    callback(
+        &db,
+        "20260313-228",
+        "reviewer",
+        result,
+        "RIG-228",
+        "~/projects/rigpa/werma",
+        &linear,
+        &cmd,
+        &FakeNotifier::new(),
+    )
+    .unwrap();
+
+    // Should still escalate to blocked despite initial move failure
+    let moves = linear.move_calls.borrow();
+    assert!(
+        moves
+            .iter()
+            .any(|(id, status)| id == "RIG-228" && status == "blocked"),
+        "escalation should retry and succeed moving to blocked, got: {moves:?}"
     );
 }
