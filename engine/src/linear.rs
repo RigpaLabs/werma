@@ -23,6 +23,8 @@ pub trait LinearApi {
     fn update_estimate(&self, issue_id: &str, estimate: i32) -> Result<()>;
     fn remove_label(&self, issue_id: &str, label_name: &str) -> Result<()>;
     fn add_label(&self, issue_id: &str, label_name: &str) -> Result<()>;
+    /// Get the current status name of an issue (for read-after-write reconciliation).
+    fn get_issue_status(&self, issue_id: &str) -> Result<String>;
 }
 
 impl LinearApi for LinearClient {
@@ -67,6 +69,10 @@ impl LinearApi for LinearClient {
 
     fn add_label(&self, issue_id: &str, label_name: &str) -> Result<()> {
         self.add_label(issue_id, label_name)
+    }
+
+    fn get_issue_status(&self, issue_id: &str) -> Result<String> {
+        self.get_issue_status(issue_id)
     }
 }
 
@@ -571,6 +577,22 @@ impl LinearClient {
         Ok((title, description))
     }
 
+    /// Fetch the current status name of an issue (for read-after-write reconciliation).
+    pub fn get_issue_status(&self, issue_id: &str) -> Result<String> {
+        let uuid = self.resolve_uuid(issue_id)?;
+        let data = self.query(
+            r#"query($id: ID!) {
+                issue(id: $id) { state { name } }
+            }"#,
+            &json!({"id": uuid}),
+        )?;
+        let status = data["issue"]["state"]["name"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        Ok(status)
+    }
+
     /// Fetch a single issue by identifier (e.g. "RIG-95").
     /// Returns (uuid, identifier, title, description, labels).
     pub fn get_issue_by_identifier(
@@ -1070,6 +1092,10 @@ pub mod fakes {
                 .borrow_mut()
                 .push((issue_id.to_string(), label_name.to_string()));
             Ok(())
+        }
+
+        fn get_issue_status(&self, _issue_id: &str) -> Result<String> {
+            Ok(String::new())
         }
     }
 }

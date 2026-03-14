@@ -83,6 +83,7 @@ fn callback_done_moves_issue() {
 }
 
 // ─── Test 2: callback_move_failure_returns_error ────────────────────────────
+// With RIG-211 retry logic, all 3 retries must fail for the callback to error.
 
 #[test]
 fn callback_move_failure_returns_error() {
@@ -90,8 +91,8 @@ fn callback_move_failure_returns_error() {
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
 
-    // Configure the fake to fail the next move
-    linear.fail_next_n_moves(1);
+    // Configure the fake to fail all 3 retry attempts
+    linear.fail_next_n_moves(3);
 
     let mut task = make_test_task("20260313-101");
     task.status = Status::Completed;
@@ -112,7 +113,10 @@ fn callback_move_failure_returns_error() {
         &cmd,
     );
 
-    assert!(err.is_err(), "callback should return Err when move fails");
+    assert!(
+        err.is_err(),
+        "callback should return Err when all retries fail"
+    );
 }
 
 // ─── Test 3: poll_no_duplicate_after_completion ─────────────────────────────
@@ -257,7 +261,9 @@ fn poll_research_move_failure_nonfatal() {
     assert_eq!(tasks[0].task_type, "research");
 }
 
-// ─── Test 7: callback_retry_after_move_failure (RIG-211 regression guard) ───
+// ─── Test 7: callback succeeds on retry after initial failure (RIG-211) ─────
+// move_with_retry retries within a single callback invocation. One failure
+// followed by a success means the callback itself returns Ok.
 
 #[test]
 fn callback_retry_after_move_failure() {
@@ -271,24 +277,10 @@ fn callback_retry_after_move_failure() {
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
-    let result = "## Implementation\nDone.\n\nVERDICT=DONE";
+    let result = "## Implementation\nDone.\n\nPR_URL=https://github.com/org/repo/pull/99\nVERDICT=DONE";
 
-    // First callback: move fails → should return Err, dedup guard NOT set
+    // First move attempt fails, second succeeds (within the same callback call)
     linear.fail_next_n_moves(1);
-    let err = callback(
-        &db,
-        "20260313-300",
-        "engineer",
-        result,
-        "RIG-300",
-        "~/projects/rigpa/werma",
-        &linear,
-        &cmd,
-    );
-    assert!(err.is_err(), "first callback should fail when move fails");
-
-    // Dedup guard should NOT be set — verify by calling callback again
-    // (if guard was set, this would silently return Ok without moving)
     let ok = callback(
         &db,
         "20260313-300",
@@ -299,7 +291,10 @@ fn callback_retry_after_move_failure() {
         &linear,
         &cmd,
     );
-    assert!(ok.is_ok(), "retry callback should succeed");
+    assert!(
+        ok.is_ok(),
+        "callback should succeed on retry: {ok:?}"
+    );
 
     // The retry should have moved the issue to "review"
     let moves = linear.move_calls.borrow();
@@ -308,6 +303,46 @@ fn callback_retry_after_move_failure() {
             .iter()
             .any(|(id, status)| id == "RIG-300" && status == "review"),
         "retry should move to 'review', got: {moves:?}"
+    );
+}
+
+// ─── Test 7b: callback fails after all retries exhausted (RIG-211) ──────────
+
+#[test]
+fn callback_all_retries_exhausted() {
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+
+    let mut task = make_test_task("20260313-301");
+    task.status = Status::Completed;
+    task.linear_issue_id = "RIG-301".to_string();
+    task.pipeline_stage = "engineer".to_string();
+    db.insert_task(&task).unwrap();
+
+    let result = "## Done\nVERDICT=DONE";
+
+    // All 3 retry attempts fail
+    linear.fail_next_n_moves(3);
+    let err = callback(
+        &db,
+        "20260313-301",
+        "engineer",
+        result,
+        "RIG-301",
+        "~/projects/rigpa/werma",
+        &linear,
+        &cmd,
+    );
+    assert!(
+        err.is_err(),
+        "callback should return Err when all retries exhausted"
+    );
+
+    // Dedup guard should NOT be set after failure
+    assert!(
+        !db.is_callback_recently_fired("20260313-301", 60).unwrap(),
+        "callback_fired_at should not be set after failure"
     );
 }
 

@@ -56,8 +56,8 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                     log_daemon(
                         &log_path,
                         &format!(
-                            "pipeline callback: {} stage={} issue={}",
-                            task.id, task.pipeline_stage, task.linear_issue_id
+                            "[CALLBACK] {}: {} stage={} -> OK",
+                            task.linear_issue_id, task.id, task.pipeline_stage
                         ),
                     );
                 }
@@ -65,8 +65,8 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                     log_daemon(
                         &log_path,
                         &format!(
-                            "pipeline callback failed: {} stage={} error={e}",
-                            task.id, task.pipeline_stage
+                            "[CALLBACK] {}: {} stage={} -> FAILED: {e}",
+                            task.linear_issue_id, task.id, task.pipeline_stage
                         ),
                     );
                 }
