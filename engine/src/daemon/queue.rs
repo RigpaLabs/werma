@@ -29,6 +29,44 @@ impl TmuxSession for RealTmux {
             Err(_) => 0,
         }
     }
+
+    fn is_pane_process_alive(&self, name: &str) -> bool {
+        // Get the PID of the process running in the tmux pane
+        let result = std::process::Command::new("tmux")
+            .args(["list-panes", "-t", name, "-F", "#{pane_pid}"])
+            .output();
+
+        match result {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let pid_str = stdout.trim();
+                if pid_str.is_empty() {
+                    return false;
+                }
+                // Use `ps -p <pid>` to check if process is still running
+                let ps_result = std::process::Command::new("ps")
+                    .args(["-p", pid_str])
+                    .output();
+                matches!(ps_result, Ok(ps_out) if ps_out.status.success())
+            }
+            _ => false,
+        }
+    }
+
+    fn capture_pane(&self, name: &str, lines: u32) -> Option<String> {
+        let start = format!("-{lines}");
+        let result = std::process::Command::new("tmux")
+            .args(["capture-pane", "-t", name, "-p", "-S", &start])
+            .output();
+
+        match result {
+            Ok(out) if out.status.success() => {
+                let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if text.is_empty() { None } else { Some(text) }
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Drain pending tasks into tmux sessions, respecting pipeline max_concurrent.
@@ -76,6 +114,14 @@ mod tests {
 
         fn count_werma_sessions(&self) -> usize {
             self.active_sessions
+        }
+
+        fn is_pane_process_alive(&self, _name: &str) -> bool {
+            false
+        }
+
+        fn capture_pane(&self, _name: &str, _lines: u32) -> Option<String> {
+            None
         }
     }
 

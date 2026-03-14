@@ -7,40 +7,109 @@ use crate::db::Db;
 use super::TmuxSession;
 use super::log_daemon;
 
-/// Detect zombie tasks: status is `running` but the tmux session has died.
-/// Marks them as failed and sends notifications.
+/// Detect zombie tasks: status is `running` but either:
+/// 1. The tmux session has died entirely, OR
+/// 2. The tmux session exists but the process inside has exited (silent crash).
+///
+/// Case 2 catches the bug where claude exits silently but tmux keeps the session
+/// alive (e.g., due to `remain-on-exit` or process tree issues).
 pub fn check_zombie_tasks(db: &Db, werma_dir: &Path, tmux: &impl TmuxSession) -> Result<()> {
     let log_path = werma_dir.join("logs/daemon.log");
     let running = db.list_tasks(Some(crate::models::Status::Running))?;
 
     for task in &running {
         let session_name = format!("werma-{}", task.id);
-        if tmux.has_session(&session_name) {
+
+        if !tmux.has_session(&session_name) {
+            // Case 1: session gone entirely
+            mark_zombie(
+                db,
+                &log_path,
+                werma_dir,
+                task,
+                "tmux session died unexpectedly",
+            );
             continue;
         }
 
-        // Session is dead but task is still running — zombie detected.
-        let reason = "tmux session died unexpectedly";
-        log_daemon(
-            &log_path,
-            &format!("ZOMBIE detected: {} — {reason}", task.id),
-        );
+        // Case 2: session exists but process inside is dead
+        if !tmux.is_pane_process_alive(&session_name) {
+            // Capture pane content for diagnostics before killing
+            let pane_content = tmux.capture_pane(&session_name, 20);
+            let diag = match &pane_content {
+                Some(text) => format!(" | last output: {}", truncate_for_log(text, 200)),
+                None => " | pane empty (no output)".to_string(),
+            };
 
-        db.set_task_status(&task.id, crate::models::Status::Failed)?;
-        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-        db.update_task_field(&task.id, "finished_at", &now)?;
+            // Save diagnostic info to the task's log file
+            let task_log = werma_dir.join("logs").join(format!("{}.log", task.id));
+            let diag_entry = format!(
+                "{}: ZOMBIE (dead process in live session){diag}\n",
+                chrono::Local::now().format("%Y-%m-%dT%H:%M:%S")
+            );
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&task_log)
+                .and_then(|mut f| {
+                    use std::io::Write;
+                    f.write_all(diag_entry.as_bytes())
+                });
 
-        let label =
-            crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);
-        crate::notify::notify_macos(
-            "werma: zombie task detected",
-            &format!("{label} — {reason}"),
-            "Basso",
-        );
-        crate::notify::notify_slack("#werma-alerts", &format!(":zombie: *{label}* — {reason}"));
+            // Kill the orphaned tmux session
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-session", "-t", &session_name])
+                .output();
+
+            mark_zombie(
+                db,
+                &log_path,
+                werma_dir,
+                task,
+                &format!("process died in live tmux session{diag}"),
+            );
+        }
     }
 
     Ok(())
+}
+
+/// Mark a task as zombie (failed) and send notifications.
+fn mark_zombie(
+    db: &Db,
+    log_path: &Path,
+    _werma_dir: &Path,
+    task: &crate::models::Task,
+    reason: &str,
+) {
+    log_daemon(
+        log_path,
+        &format!("ZOMBIE detected: {} — {reason}", task.id),
+    );
+
+    let _ = db.set_task_status(&task.id, crate::models::Status::Failed);
+    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let _ = db.update_task_field(&task.id, "finished_at", &now);
+
+    let label =
+        crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);
+    crate::notify::notify_macos(
+        "werma: zombie task detected",
+        &format!("{label} — {reason}"),
+        "Basso",
+    );
+    crate::notify::notify_slack("#werma-alerts", &format!(":zombie: *{label}* — {reason}"));
+}
+
+/// Truncate a string for log output, replacing newlines with ` | `.
+fn truncate_for_log(s: &str, max_len: usize) -> String {
+    let flat = s.replace('\n', " | ");
+    if flat.chars().count() > max_len {
+        let truncated: String = flat.chars().take(max_len).collect();
+        format!("{truncated}...")
+    } else {
+        flat
+    }
 }
 
 #[cfg(test)]
@@ -50,15 +119,41 @@ mod tests {
 
     struct FakeTmux {
         alive_sessions: Vec<String>,
+        /// Sessions where tmux exists but the process inside is dead.
+        dead_process_sessions: Vec<String>,
+    }
+
+    impl FakeTmux {
+        fn new(alive: Vec<String>) -> Self {
+            Self {
+                alive_sessions: alive,
+                dead_process_sessions: vec![],
+            }
+        }
+
+        fn with_dead_process(mut self, sessions: Vec<String>) -> Self {
+            self.dead_process_sessions = sessions;
+            self
+        }
     }
 
     impl super::super::TmuxSession for FakeTmux {
         fn has_session(&self, name: &str) -> bool {
             self.alive_sessions.iter().any(|s| s == name)
+                || self.dead_process_sessions.iter().any(|s| s == name)
         }
 
         fn count_werma_sessions(&self) -> usize {
-            self.alive_sessions.len()
+            self.alive_sessions.len() + self.dead_process_sessions.len()
+        }
+
+        fn is_pane_process_alive(&self, name: &str) -> bool {
+            // Only truly alive if in alive_sessions (not dead_process_sessions)
+            self.alive_sessions.iter().any(|s| s == name)
+        }
+
+        fn capture_pane(&self, _name: &str, _lines: u32) -> Option<String> {
+            None
         }
     }
 
@@ -98,9 +193,7 @@ mod tests {
         db.insert_task(&task).unwrap();
 
         // No alive sessions — zombie detected
-        let tmux = FakeTmux {
-            alive_sessions: vec![],
-        };
+        let tmux = FakeTmux::new(vec![]);
 
         check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
 
@@ -140,9 +233,7 @@ mod tests {
         };
         db.insert_task(&task).unwrap();
 
-        let tmux = FakeTmux {
-            alive_sessions: vec![],
-        };
+        let tmux = FakeTmux::new(vec![]);
 
         check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
 
@@ -159,16 +250,33 @@ mod tests {
         let task = make_running_task("20260313-997");
         db.insert_task(&task).unwrap();
 
-        // Session is alive — should not be marked as zombie
-        let tmux = FakeTmux {
-            alive_sessions: vec!["werma-20260313-997".to_string()],
-        };
+        // Session is alive with process running — should not be marked as zombie
+        let tmux = FakeTmux::new(vec!["werma-20260313-997".to_string()]);
 
         check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
 
         let updated = db.task("20260313-997").unwrap().unwrap();
         assert_eq!(updated.status, Status::Running);
         assert!(updated.finished_at.is_none());
+    }
+
+    #[test]
+    fn detects_dead_process_in_live_session() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_running_task("20260313-995");
+        db.insert_task(&task).unwrap();
+
+        // Session exists but process inside is dead (the core bug scenario)
+        let tmux = FakeTmux::new(vec![]).with_dead_process(vec!["werma-20260313-995".to_string()]);
+
+        check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
+
+        let updated = db.task("20260313-995").unwrap().unwrap();
+        assert_eq!(updated.status, Status::Failed);
+        assert!(updated.finished_at.is_some());
     }
 
     #[test]
@@ -182,9 +290,7 @@ mod tests {
         db.insert_task(&alive_task).unwrap();
         db.insert_task(&dead_task).unwrap();
 
-        let tmux = FakeTmux {
-            alive_sessions: vec!["werma-20260313-001".to_string()],
-        };
+        let tmux = FakeTmux::new(vec!["werma-20260313-001".to_string()]);
 
         check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
 
@@ -204,9 +310,7 @@ mod tests {
         let werma_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
 
-        let tmux = FakeTmux {
-            alive_sessions: vec![],
-        };
+        let tmux = FakeTmux::new(vec![]);
 
         check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
     }
@@ -220,9 +324,7 @@ mod tests {
         let task = make_running_task("20260313-996");
         db.insert_task(&task).unwrap();
 
-        let tmux = FakeTmux {
-            alive_sessions: vec![],
-        };
+        let tmux = FakeTmux::new(vec![]);
 
         check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
 
@@ -231,5 +333,57 @@ mod tests {
         // Should be a valid timestamp format
         assert!(finished.contains("T"));
         assert!(finished.len() >= 19); // "2026-03-13T10:00:00"
+    }
+
+    #[test]
+    fn mixed_alive_dead_process_and_dead_session() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        // 3 tasks: alive, dead process in live session, dead session
+        let t1 = make_running_task("20260313-010"); // alive
+        let t2 = make_running_task("20260313-011"); // dead process, live session
+        let t3 = make_running_task("20260313-012"); // dead session
+        db.insert_task(&t1).unwrap();
+        db.insert_task(&t2).unwrap();
+        db.insert_task(&t3).unwrap();
+
+        let tmux = FakeTmux::new(vec!["werma-20260313-010".to_string()])
+            .with_dead_process(vec!["werma-20260313-011".to_string()]);
+
+        check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
+
+        assert_eq!(
+            db.task("20260313-010").unwrap().unwrap().status,
+            Status::Running
+        );
+        assert_eq!(
+            db.task("20260313-011").unwrap().unwrap().status,
+            Status::Failed
+        );
+        assert_eq!(
+            db.task("20260313-012").unwrap().unwrap().status,
+            Status::Failed
+        );
+    }
+
+    #[test]
+    fn dead_process_writes_diagnostic_log() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_running_task("20260313-994");
+        db.insert_task(&task).unwrap();
+
+        let tmux = FakeTmux::new(vec![]).with_dead_process(vec!["werma-20260313-994".to_string()]);
+
+        check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
+
+        // Check that a diagnostic entry was written to the task log
+        let task_log = werma_dir.path().join("logs/20260313-994.log");
+        let content = std::fs::read_to_string(&task_log).unwrap();
+        assert!(content.contains("ZOMBIE (dead process in live session)"));
     }
 }

@@ -30,6 +30,11 @@ const CLEANLINESS_COOLDOWN_SECS: u64 = 300;
 pub trait TmuxSession {
     fn has_session(&self, name: &str) -> bool;
     fn count_werma_sessions(&self) -> usize;
+    /// Check if the main process inside a tmux pane is still running.
+    /// Returns false if the session exists but the process has exited.
+    fn is_pane_process_alive(&self, name: &str) -> bool;
+    /// Capture the last N lines from a tmux pane for diagnostics.
+    fn capture_pane(&self, name: &str, lines: u32) -> Option<String>;
 }
 
 /// Trait abstracting GitHub CLI operations for testability.
