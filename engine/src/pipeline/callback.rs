@@ -7,7 +7,9 @@ use super::helpers::{infer_working_dir_from_issue, truncate_lines};
 use super::loader::{load_default, resolve_prompt};
 use super::pr::{auto_create_pr, has_open_pr_for_issue, pr_title_from_url};
 use super::prompt::{build_vars, render_prompt};
-use super::verdict::{extract_rejection_feedback, is_heavy_track, parse_estimate, parse_pr_url, parse_verdict};
+use super::verdict::{
+    extract_rejection_feedback, is_heavy_track, parse_estimate, parse_pr_url, parse_verdict,
+};
 use crate::db::Db;
 use crate::linear::LinearApi;
 use crate::traits::{CommandRunner, Notifier};
@@ -194,18 +196,17 @@ pub fn callback(
 
     let transition = stage_cfg.transition_for(&verdict_str);
 
-    match transition {
-        Some(t) => {
-            // Guard: never move to "done" via ALREADY_DONE if there's an open PR.
-            if verdict_str == "already_done"
-                && t.status == "done"
-                && has_open_pr_for_issue(cmd, working_dir, linear_issue_id)
-            {
-                eprintln!(
-                    "callback: blocking ALREADY_DONE→done for {linear_issue_id} — open PR exists. \
+    if let Some(t) = transition {
+        // Guard: never move to "done" via ALREADY_DONE if there's an open PR.
+        if verdict_str == "already_done"
+            && t.status == "done"
+            && has_open_pr_for_issue(cmd, working_dir, linear_issue_id)
+        {
+            eprintln!(
+                "callback: blocking ALREADY_DONE→done for {linear_issue_id} — open PR exists. \
                      Issue stays in current state."
-                );
-                if let Err(e) = linear.comment(
+            );
+            if let Err(e) = linear.comment(
                     linear_issue_id,
                     &format!(
                         "**Analyst ALREADY_DONE blocked** (task: `{task_id}`): open PR exists for this issue. \
@@ -214,151 +215,150 @@ pub fn callback(
                 ) {
                     eprintln!("callback: failed to post ALREADY_DONE comment on {linear_issue_id}: {e}");
                 }
-                return Ok(());
-            }
-
-            // Move the issue — retry with backoff + reconciliation check.
-            if let Err(e) = move_with_retry(linear, linear_issue_id, &t.status) {
-                let alert_msg = format!(
-                    "[CALLBACK FAILURE] {linear_issue_id} task `{task_id}` (stage: {stage}): \
-                     failed to move to '{}' after {CALLBACK_MAX_RETRIES} retries: {e}",
-                    t.status
-                );
-                notifier.notify_macos("Werma Callback Failed", &alert_msg, "Basso");
-                notifier.notify_slack("#werma-alerts", &alert_msg);
-                return Err(e);
-            }
-
-            // Analyst label swap: add "analyze:done" after successful completion
-            if stage == "analyst" {
-                if let Some(ref label) = stage_cfg.linear_label {
-                    let done_label = format!("{label}:done");
-                    if let Err(e) = linear.add_label(linear_issue_id, &done_label) {
-                        eprintln!(
-                            "callback: failed to add '{done_label}' label to {linear_issue_id}: {e}"
-                        );
-                    }
-                }
-            }
-
-            // Auto-create PR for engineer stage completion
-            let pr_url = if stage == "engineer" && verdict_str == "done" {
-                let url_from_output = parse_pr_url(result);
-
-                let url = url_from_output.or_else(|| {
-                    match auto_create_pr(cmd, working_dir, linear_issue_id, task_id) {
-                        Ok(url) => url,
-                        Err(e) => {
-                            eprintln!("auto-PR error: {e}");
-                            None
-                        }
-                    }
-                });
-
-                // RIG-232: engineer DONE without PR still spawns reviewer.
-                // Reviewer can check for open PRs or request the engineer to create one.
-                if url.is_none() {
-                    eprintln!(
-                        "callback: engineer DONE but no PR_URL found for {linear_issue_id} (task {task_id}). \
-                         Spawning reviewer anyway — reviewer can check for PR."
-                    );
-                    if let Err(e) = linear.comment(
-                        linear_issue_id,
-                        &format!(
-                            "**Engineer task `{task_id}` DONE but no PR created.** \
-                             The agent did not include `PR_URL=` in output. \
-                             Proceeding to reviewer — reviewer will verify or request a PR."
-                        ),
-                    ) {
-                        eprintln!(
-                            "callback: failed to post no-PR comment on {linear_issue_id}: {e}"
-                        );
-                    }
-                }
-
-                // Attach PR URL to Linear issue if we have one
-                if let Some(ref pr) = url {
-                    let pr_title = pr_title_from_url(pr);
-                    if let Err(e) = linear.attach_url(linear_issue_id, pr, &pr_title) {
-                        eprintln!("attach PR to Linear: {e}");
-                    }
-                }
-                url
-            } else {
-                None
-            };
-
-            // Post a comment — non-critical, don't fail the callback if this errors.
-            let comment = format_callback_comment(
-                task_id,
-                stage,
-                &verdict_str,
-                t.spawn.as_deref(),
-                pr_url.as_deref(),
-            );
-            if let Err(e) = linear.comment(linear_issue_id, &comment) {
-                eprintln!("callback: failed to post comment on {linear_issue_id}: {e}");
-            }
-
-            // Spawn next stage if configured
-            if let Some(ref next_stage) = t.spawn {
-                // Check review cycle limit: if reviewer has rejected too many times,
-                // escalate to Blocked to prevent infinite loops.
-                if stage == "reviewer" && next_stage == "engineer" {
-                    let review_count =
-                        db.count_completed_tasks_for_issue_stage(linear_issue_id, "reviewer")?;
-                    let max_rounds = stage_cfg
-                        .review_round_limit()
-                        .unwrap_or(DEFAULT_MAX_REVIEW_ROUNDS)
-                        as i64;
-                    if review_count >= max_rounds {
-                        eprintln!(
-                            "review cycle limit ({max_rounds}) reached for issue {linear_issue_id}, \
-                             escalating to blocked"
-                        );
-                        move_with_retry(linear, linear_issue_id, "blocked")?;
-                        if let Err(e) = linear.comment(
-                            linear_issue_id,
-                            &format!(
-                                "**Review cycle limit reached** ({max_rounds} rounds). \
-                                 Moving to Blocked — manual review required."
-                            ),
-                        ) {
-                            eprintln!(
-                                "callback: failed to post escalation comment on {linear_issue_id}: {e}"
-                            );
-                        }
-                        if let Err(e) = db.set_callback_fired_at(task_id) {
-                            eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
-                        }
-                        return Ok(());
-                    }
-                }
-
-                create_next_stage_task(&NextStageParams {
-                    db,
-                    config: &config,
-                    linear: Some(linear),
-                    linear_issue_id,
-                    next_stage,
-                    previous_output: result,
-                    prev_task_id: task_id,
-                    prev_stage: stage,
-                    working_dir,
-                    estimate,
-                    pr_url: pr_url.as_deref(),
-                })?;
-            }
-
-            // RIG-211: set callback_fired_at AFTER successful transition.
             if let Err(e) = db.set_callback_fired_at(task_id) {
                 eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
             }
+            return Ok(());
         }
-        None => {
-            eprintln!(
-                "stage '{stage}': no transition for verdict '{verdict_str}' — no action taken"
+
+        // Move the issue — retry with backoff + reconciliation check.
+        if let Err(e) = move_with_retry(linear, linear_issue_id, &t.status) {
+            let alert_msg = format!(
+                "[CALLBACK FAILURE] {linear_issue_id} task `{task_id}` (stage: {stage}): \
+                     failed to move to '{}' after {CALLBACK_MAX_RETRIES} retries: {e}",
+                t.status
             );
+            notifier.notify_macos("Werma Callback Failed", &alert_msg, "Basso");
+            notifier.notify_slack("#werma-alerts", &alert_msg);
+            return Err(e);
+        }
+
+        // Analyst label swap: add "analyze:done" after successful completion
+        if stage == "analyst" {
+            if let Some(ref label) = stage_cfg.linear_label {
+                let done_label = format!("{label}:done");
+                if let Err(e) = linear.add_label(linear_issue_id, &done_label) {
+                    eprintln!(
+                        "callback: failed to add '{done_label}' label to {linear_issue_id}: {e}"
+                    );
+                }
+            }
+        }
+
+        // Auto-create PR for engineer stage completion
+        let pr_url = if stage == "engineer" && verdict_str == "done" {
+            let url_from_output = parse_pr_url(result);
+
+            let url = url_from_output.or_else(|| {
+                match auto_create_pr(cmd, working_dir, linear_issue_id, task_id) {
+                    Ok(url) => url,
+                    Err(e) => {
+                        eprintln!("auto-PR error: {e}");
+                        None
+                    }
+                }
+            });
+
+            // RIG-232: engineer DONE without PR still spawns reviewer.
+            // Reviewer can check for open PRs or request the engineer to create one.
+            if url.is_none() {
+                eprintln!(
+                    "callback: engineer DONE but no PR_URL found for {linear_issue_id} (task {task_id}). \
+                         Spawning reviewer anyway — reviewer can check for PR."
+                );
+                if let Err(e) = linear.comment(
+                    linear_issue_id,
+                    &format!(
+                        "**Engineer task `{task_id}` DONE but no PR created.** \
+                             The agent did not include `PR_URL=` in output. \
+                             Proceeding to reviewer — reviewer will verify or request a PR."
+                    ),
+                ) {
+                    eprintln!("callback: failed to post no-PR comment on {linear_issue_id}: {e}");
+                }
+            }
+
+            // Attach PR URL to Linear issue if we have one
+            if let Some(ref pr) = url {
+                let pr_title = pr_title_from_url(pr);
+                if let Err(e) = linear.attach_url(linear_issue_id, pr, &pr_title) {
+                    eprintln!("attach PR to Linear: {e}");
+                }
+            }
+            url
+        } else {
+            None
+        };
+
+        // Post a comment — non-critical, don't fail the callback if this errors.
+        let comment = format_callback_comment(
+            task_id,
+            stage,
+            &verdict_str,
+            t.spawn.as_deref(),
+            pr_url.as_deref(),
+        );
+        if let Err(e) = linear.comment(linear_issue_id, &comment) {
+            eprintln!("callback: failed to post comment on {linear_issue_id}: {e}");
+        }
+
+        // Spawn next stage if configured
+        if let Some(ref next_stage) = t.spawn {
+            // Check review cycle limit: if reviewer has rejected too many times,
+            // escalate to Blocked to prevent infinite loops.
+            if stage == "reviewer" && next_stage == "engineer" {
+                let review_count =
+                    db.count_completed_tasks_for_issue_stage(linear_issue_id, "reviewer")?;
+                let max_rounds = stage_cfg
+                    .review_round_limit()
+                    .unwrap_or(DEFAULT_MAX_REVIEW_ROUNDS) as i64;
+                if review_count >= max_rounds {
+                    eprintln!(
+                        "review cycle limit ({max_rounds}) reached for issue {linear_issue_id}, \
+                             escalating to blocked"
+                    );
+                    move_with_retry(linear, linear_issue_id, "blocked")?;
+                    if let Err(e) = linear.comment(
+                        linear_issue_id,
+                        &format!(
+                            "**Review cycle limit reached** ({max_rounds} rounds). \
+                                 Moving to Blocked — manual review required."
+                        ),
+                    ) {
+                        eprintln!(
+                            "callback: failed to post escalation comment on {linear_issue_id}: {e}"
+                        );
+                    }
+                    if let Err(e) = db.set_callback_fired_at(task_id) {
+                        eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
+                    }
+                    return Ok(());
+                }
+            }
+
+            create_next_stage_task(&NextStageParams {
+                db,
+                config: &config,
+                linear: Some(linear),
+                linear_issue_id,
+                next_stage,
+                previous_output: result,
+                prev_task_id: task_id,
+                prev_stage: stage,
+                working_dir,
+                estimate,
+                pr_url: pr_url.as_deref(),
+            })?;
+        }
+
+        // RIG-211: set callback_fired_at AFTER successful transition.
+        if let Err(e) = db.set_callback_fired_at(task_id) {
+            eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
+        }
+    } else {
+        eprintln!("stage '{stage}': no transition for verdict '{verdict_str}' — no action taken");
+        if let Err(e) = db.set_callback_fired_at(task_id) {
+            eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
         }
     }
 
@@ -590,7 +590,10 @@ fn build_handoff_prompt(
     let mut runtime: HashMap<String, String> = HashMap::new();
     runtime.insert("issue_id".to_string(), linear_issue_id.to_string());
     runtime.insert("issue_title".to_string(), issue_title.to_string());
-    runtime.insert("issue_description".to_string(), issue_description.to_string());
+    runtime.insert(
+        "issue_description".to_string(),
+        issue_description.to_string(),
+    );
     runtime.insert("previous_output".to_string(), previous_output.to_string());
     runtime.insert(
         "rejection_feedback".to_string(),
@@ -1142,14 +1145,18 @@ stages:
         // Warning comment about missing PR should be posted
         let comments = linear.comment_calls.borrow();
         assert!(
-            comments.iter().any(|(id, body)| id == "RIG-232b" && body.contains("no PR created")),
+            comments
+                .iter()
+                .any(|(id, body)| id == "RIG-232b" && body.contains("no PR created")),
             "should warn about missing PR, got: {comments:?}"
         );
 
         // Issue should still move to review
         let moves = linear.move_calls.borrow();
         assert!(
-            moves.iter().any(|(id, status)| id == "RIG-232b" && status == "review"),
+            moves
+                .iter()
+                .any(|(id, status)| id == "RIG-232b" && status == "review"),
             "engineer DONE should move to review even without PR, got: {moves:?}"
         );
     }

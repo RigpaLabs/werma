@@ -231,7 +231,10 @@ mod tests {
         cmd.push_success(r#"[{"number":42}]"#);
 
         let found = pr_exists_for_issue(&cmd, "/tmp", "RIG-100", "open");
-        assert!(found, "should match when headRefName is absent (backward compat)");
+        assert!(
+            found,
+            "should match when headRefName is absent (backward compat)"
+        );
     }
 
     #[test]
@@ -241,7 +244,10 @@ mod tests {
         cmd.push_success(r#"[{"number":5,"headRefName":"feat/rig-100-my-feature"}]"#);
 
         let found = pr_exists_for_issue(&cmd, "/tmp", "RIG-100", "open");
-        assert!(found, "should match PR whose branch contains the identifier");
+        assert!(
+            found,
+            "should match PR whose branch contains the identifier"
+        );
     }
 
     #[test]

@@ -8,8 +8,8 @@ mod tests {
     use crate::db::{Db, make_test_task};
     use crate::linear::LinearApi;
     use crate::models::Status;
-    use crate::pipeline::callback::create_next_stage_task;
     use crate::pipeline::callback::NextStageParams;
+    use crate::pipeline::callback::create_next_stage_task;
     use crate::pipeline::executor::{callback, poll};
     use crate::pipeline::loader::load_from_str;
     use crate::traits::fakes::{FakeCommandRunner, FakeNotifier, StatefulFakeLinearApi};
@@ -65,7 +65,9 @@ mod tests {
 
         // Label should be removed after task creation
         assert!(
-            !linear.issue_labels("RIG-229").contains(&"analyze".to_string()),
+            !linear
+                .issue_labels("RIG-229")
+                .contains(&"analyze".to_string()),
             "trigger label should be removed"
         );
 
@@ -74,7 +76,8 @@ mod tests {
         db.set_task_status(&analyst_tasks[0].id, Status::Completed)
             .unwrap();
 
-        let analyst_output = "## Analysis\n\nThis feature needs X and Y.\n\nESTIMATE=3\nVERDICT=DONE";
+        let analyst_output =
+            "## Analysis\n\nThis feature needs X and Y.\n\nESTIMATE=3\nVERDICT=DONE";
 
         callback(
             &db,
@@ -122,7 +125,11 @@ mod tests {
         let engineer_tasks = db
             .tasks_by_linear_issue("RIG-229", Some("engineer"), false)
             .unwrap();
-        assert_eq!(engineer_tasks.len(), 1, "engineer task should be created by poll");
+        assert_eq!(
+            engineer_tasks.len(),
+            1,
+            "engineer task should be created by poll"
+        );
         assert_eq!(engineer_tasks[0].pipeline_stage, "engineer");
         assert_eq!(engineer_tasks[0].status, Status::Pending);
 
@@ -263,7 +270,10 @@ mod tests {
             .filter(|c| matches!(c, crate::traits::fakes::ApiCall::Move { .. }))
             .count();
         // StatefulFakeLinearApi records the successful move
-        assert_eq!(move_call_count, 1, "exactly 1 successful move should be recorded");
+        assert_eq!(
+            move_call_count, 1,
+            "exactly 1 successful move should be recorded"
+        );
     }
 
     // ─── RIG-231: Dedup guards ───────────────────────────────────────────────────
@@ -365,11 +375,7 @@ mod tests {
 
         // Insert completed reviewer tasks to simulate max_review_rounds (3) rejections
         // Load config (to reference pipeline settings for review round limit)
-        let _config = load_from_str(
-            include_str!("../pipelines/default.yaml"),
-            "<test>",
-        )
-        .unwrap();
+        let _config = load_from_str(include_str!("../pipelines/default.yaml"), "<test>").unwrap();
 
         // Create 3 completed reviewer tasks (= max_review_rounds)
         for i in 0..3 {
@@ -434,7 +440,11 @@ mod tests {
         let engineer_tasks = db
             .tasks_by_linear_issue("RIG-231c", Some("engineer"), false)
             .unwrap();
-        assert_eq!(engineer_tasks.len(), 0, "no engineer task should be spawned after limit");
+        assert_eq!(
+            engineer_tasks.len(),
+            0,
+            "no engineer task should be spawned after limit"
+        );
     }
 
     /// Test cross-stage reviewer dedup: if a reviewer task already exists (regardless of

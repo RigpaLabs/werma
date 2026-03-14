@@ -4,8 +4,8 @@ use anyhow::Result;
 
 use super::config::PipelineConfig;
 use super::loader::load_default;
-use super::prompt::{build_vars, render_prompt};
 use super::loader::resolve_prompt;
+use super::prompt::{build_vars, render_prompt};
 use crate::db::Db;
 use crate::linear::LinearApi;
 use crate::models::{Status, Task};
@@ -193,8 +193,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 }
 
                 // For reviewer stage: skip if PR is already merged (manual merge while in Review)
-                if stage_name == "reviewer"
-                    && is_pr_merged_for_issue(cmd, &working_dir, identifier)
+                if stage_name == "reviewer" && is_pr_merged_for_issue(cmd, &working_dir, identifier)
                 {
                     println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
                     if let Err(e) = linear.move_issue_by_name(issue_id, "done") {
@@ -352,9 +351,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             }
 
             // For reviewer stage: skip if PR is already merged
-            if *stage_name == "reviewer"
-                && is_pr_merged_for_issue(cmd, &working_dir, identifier)
-            {
+            if *stage_name == "reviewer" && is_pr_merged_for_issue(cmd, &working_dir, identifier) {
                 println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
                 if let Err(e) = linear.move_issue_by_name(issue_id, "done") {
                     eprintln!("  ! failed to move {identifier} to done: {e}");

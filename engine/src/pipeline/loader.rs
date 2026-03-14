@@ -7,9 +7,29 @@ const BUILTIN_DEFAULT_YAML: &str = include_str!("../../pipelines/default.yaml");
 
 /// Load the pipeline config (always uses the compiled-in builtin).
 pub fn load_default() -> Result<PipelineConfig> {
+    warn_stale_runtime_override();
     let config = load_from_str(BUILTIN_DEFAULT_YAML, "<builtin>")?;
     warn_deprecated_per_stage(&config);
     Ok(config)
+}
+
+/// Warn once if a stale runtime override exists from a previous `werma pipeline eject`.
+fn warn_stale_runtime_override() {
+    use std::sync::Once;
+    static WARNED: Once = Once::new();
+    if let Some(home) = dirs::home_dir() {
+        let stale = home.join(".werma/pipelines/default.yaml");
+        if stale.exists() {
+            WARNED.call_once(|| {
+                eprintln!(
+                    "warning: stale pipeline override found at {}. \
+                     Runtime overrides are no longer supported — this file is ignored. \
+                     Delete it to silence this warning.",
+                    stale.display()
+                );
+            });
+        }
+    }
 }
 
 /// Parse a pipeline config from a YAML string.
@@ -215,5 +235,4 @@ stages:
         let content = builtin_prompt("prompts/devops.md");
         assert!(content.is_some());
     }
-
 }

@@ -361,12 +361,31 @@ pub mod fakes {
     /// Call record for StatefulFakeLinearApi call tracking.
     #[derive(Debug, Clone)]
     pub enum ApiCall {
-        Move { identifier: String, status: String },
-        Comment { identifier: String, body: String },
-        AddLabel { identifier: String, label: String },
-        RemoveLabel { identifier: String, label: String },
-        AttachUrl { identifier: String, url: String, title: String },
-        UpdateEstimate { identifier: String, estimate: i32 },
+        Move {
+            identifier: String,
+            status: String,
+        },
+        Comment {
+            identifier: String,
+            body: String,
+        },
+        AddLabel {
+            identifier: String,
+            label: String,
+        },
+        RemoveLabel {
+            identifier: String,
+            label: String,
+        },
+        AttachUrl {
+            identifier: String,
+            url: String,
+            title: String,
+        },
+        UpdateEstimate {
+            identifier: String,
+            estimate: i32,
+        },
     }
 
     /// Status name → Linear state_type mapping.
@@ -477,12 +496,7 @@ pub mod fakes {
                 .borrow()
                 .get(identifier)
                 .cloned()
-                .and_then(|id| {
-                    self.issues
-                        .borrow()
-                        .get(&id)
-                        .map(|i| i.labels.clone())
-                })
+                .and_then(|id| self.issues.borrow().get(&id).map(|i| i.labels.clone()))
                 .unwrap_or_default()
         }
 
@@ -507,7 +521,10 @@ pub mod fakes {
     }
 
     impl crate::linear::LinearApi for StatefulFakeLinearApi {
-        fn get_issues_by_status(&self, status_name: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+        fn get_issues_by_status(
+            &self,
+            status_name: &str,
+        ) -> anyhow::Result<Vec<serde_json::Value>> {
             Ok(self
                 .issues
                 .borrow()
@@ -795,7 +812,14 @@ mod tests {
     #[test]
     fn stateful_fake_add_remove_label() {
         let fake = StatefulFakeLinearApi::new();
-        fake.add_issue("uuid-20", "RIG-20", "Title", "desc", "backlog", vec!["analyze".to_string()]);
+        fake.add_issue(
+            "uuid-20",
+            "RIG-20",
+            "Title",
+            "desc",
+            "backlog",
+            vec!["analyze".to_string()],
+        );
 
         // Remove label by identifier
         fake.remove_label("RIG-20", "analyze").unwrap();
@@ -807,7 +831,8 @@ mod tests {
         // Add new label
         fake.add_label("RIG-20", "analyze:done").unwrap();
         assert!(
-            fake.issue_labels("RIG-20").contains(&"analyze:done".to_string()),
+            fake.issue_labels("RIG-20")
+                .contains(&"analyze:done".to_string()),
             "new label should be added"
         );
     }
@@ -815,9 +840,30 @@ mod tests {
     #[test]
     fn stateful_fake_get_issues_by_label() {
         let fake = StatefulFakeLinearApi::new();
-        fake.add_issue("uuid-30", "RIG-30", "T1", "d", "backlog", vec!["analyze".to_string()]);
-        fake.add_issue("uuid-31", "RIG-31", "T2", "d", "backlog", vec!["feature".to_string()]);
-        fake.add_issue("uuid-32", "RIG-32", "T3", "d", "backlog", vec!["analyze".to_string(), "repo:werma".to_string()]);
+        fake.add_issue(
+            "uuid-30",
+            "RIG-30",
+            "T1",
+            "d",
+            "backlog",
+            vec!["analyze".to_string()],
+        );
+        fake.add_issue(
+            "uuid-31",
+            "RIG-31",
+            "T2",
+            "d",
+            "backlog",
+            vec!["feature".to_string()],
+        );
+        fake.add_issue(
+            "uuid-32",
+            "RIG-32",
+            "T3",
+            "d",
+            "backlog",
+            vec!["analyze".to_string(), "repo:werma".to_string()],
+        );
 
         let issues = fake.get_issues_by_label("analyze").unwrap();
         assert_eq!(issues.len(), 2);
