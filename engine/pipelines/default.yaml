@@ -83,6 +83,7 @@ stages:
     linear_status: deploy
     agent: pipeline-deployer
     model: haiku
+    max_turns: 25
     manual: skip
     prompt: prompts/deployer.md
     transitions:
