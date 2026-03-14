@@ -454,11 +454,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
 /// After a successful move, performs a read-after-write check to verify
 /// the status actually changed. Returns an error only if all retries
 /// are exhausted or reconciliation fails.
-fn move_with_retry(
-    linear: &dyn LinearApi,
-    issue_id: &str,
-    target_status: &str,
-) -> Result<()> {
+fn move_with_retry(linear: &dyn LinearApi, issue_id: &str, target_status: &str) -> Result<()> {
     let mut last_err = None;
 
     for attempt in 0..CALLBACK_MAX_RETRIES {

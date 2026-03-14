@@ -279,7 +279,8 @@ fn callback_retry_after_move_failure() {
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
-    let result = "## Implementation\nDone.\n\nPR_URL=https://github.com/org/repo/pull/99\nVERDICT=DONE";
+    let result =
+        "## Implementation\nDone.\n\nPR_URL=https://github.com/org/repo/pull/99\nVERDICT=DONE";
 
     // First move attempt fails, second succeeds (within the same callback call)
     linear.fail_next_n_moves(1);
@@ -294,10 +295,7 @@ fn callback_retry_after_move_failure() {
         &cmd,
         &FakeNotifier::new(),
     );
-    assert!(
-        ok.is_ok(),
-        "callback should succeed on retry: {ok:?}"
-    );
+    assert!(ok.is_ok(), "callback should succeed on retry: {ok:?}");
 
     // The retry should have moved the issue to "review"
     let moves = linear.move_calls.borrow();
@@ -383,7 +381,10 @@ fn callback_daemon_retry_after_failure() {
         &cmd,
         &notifier,
     );
-    assert!(err.is_err(), "first callback should fail when all moves fail");
+    assert!(
+        err.is_err(),
+        "first callback should fail when all moves fail"
+    );
 
     // Dedup guard must NOT be set — allows daemon retry on next tick
     assert!(
