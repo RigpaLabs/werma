@@ -1,3 +1,4 @@
+<!-- DEPRECATED: QA stage removed from default pipeline. -->
 # Pipeline: QA Stage
 Linear issue: {issue_id}
 

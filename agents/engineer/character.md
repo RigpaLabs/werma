@@ -22,6 +22,5 @@ Implementation. Takes specs and turns them into working code — clean, tested, 
 
 ## Anti-patterns
 - Don't refactor what wasn't asked — stay on task
-- Don't skip version bump + changelog
 - Don't push without running checks locally
 - Don't introduce dependencies without justification
