@@ -233,9 +233,14 @@ pub fn callback(
             return Err(e);
         }
 
-        // Analyst label swap: add "analyze:done" after successful completion
+        // Analyst label swap: remove trigger label, add "analyze:done"
         if stage == "analyst" {
             if let Some(ref label) = stage_cfg.linear_label {
+                if let Err(e) = linear.remove_label(linear_issue_id, label) {
+                    eprintln!(
+                        "callback: failed to remove '{label}' from {linear_issue_id}: {e}"
+                    );
+                }
                 let done_label = format!("{label}:done");
                 if let Err(e) = linear.add_label(linear_issue_id, &done_label) {
                     eprintln!(
@@ -1158,6 +1163,52 @@ stages:
                 .iter()
                 .any(|(id, status)| id == "RIG-232b" && status == "review"),
             "engineer DONE should move to review even without PR, got: {moves:?}"
+        );
+    }
+
+    #[test]
+    fn callback_analyst_done_swaps_labels() {
+        // RIG-253: analyst callback should remove trigger label and add analyze:done
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-253", "in_progress");
+
+        let mut task = crate::db::make_test_task("20260315-253");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-253".to_string();
+        task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&task).unwrap();
+
+        let result = "## Spec\nDo the thing.\nESTIMATE=3\nVERDICT=DONE";
+
+        callback(
+            &db,
+            "20260315-253",
+            "analyst",
+            result,
+            "RIG-253",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        // Trigger label "analyze" should be removed
+        let removes = linear.remove_label_calls.borrow();
+        assert!(
+            removes.iter().any(|(id, label)| id == "RIG-253" && label == "analyze"),
+            "should remove 'analyze' trigger label, got: {removes:?}"
+        );
+
+        // Done label "analyze:done" should be added
+        let adds = linear.add_label_calls.borrow();
+        assert!(
+            adds.iter().any(|(id, label)| id == "RIG-253" && label == "analyze:done"),
+            "should add 'analyze:done' label, got: {adds:?}"
         );
     }
 }
