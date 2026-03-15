@@ -25,10 +25,10 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.88.0"
-          targets: aarch64-apple-darwin
+      - name: Setup Rust
+        run: |
+          rustup show
+          rustup target add aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:
