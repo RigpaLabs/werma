@@ -119,6 +119,7 @@ pub fn resolve_prompt(prompt_source: &str) -> String {
 /// These are compiled into the binary via include_str!.
 fn builtin_prompt(rel_path: &str) -> Option<&'static str> {
     match rel_path {
+        "prompts/analyst.md" => Some(include_str!("../../pipelines/prompts/analyst.md")),
         "prompts/engineer.md" => Some(include_str!("../../pipelines/prompts/engineer.md")),
         "prompts/reviewer.md" => Some(include_str!("../../pipelines/prompts/reviewer.md")),
         "prompts/qa.md" => Some(include_str!("../../pipelines/prompts/qa.md")),
@@ -228,6 +229,13 @@ stages:
     fn resolve_builtin_qa_prompt() {
         let content = builtin_prompt("prompts/qa.md");
         assert!(content.is_some());
+    }
+
+    #[test]
+    fn resolve_builtin_analyst_prompt() {
+        let content = builtin_prompt("prompts/analyst.md");
+        assert!(content.is_some());
+        assert!(!content.unwrap().is_empty());
     }
 
     #[test]
