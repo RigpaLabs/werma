@@ -6,3 +6,4 @@ engine/target/
 .worktrees/
 .claude/
 CHANGELOG.md
+.idea/

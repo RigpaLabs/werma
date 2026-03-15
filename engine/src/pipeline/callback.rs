@@ -237,9 +237,7 @@ pub fn callback(
         if stage == "analyst" {
             if let Some(ref label) = stage_cfg.linear_label {
                 if let Err(e) = linear.remove_label(linear_issue_id, label) {
-                    eprintln!(
-                        "callback: failed to remove '{label}' from {linear_issue_id}: {e}"
-                    );
+                    eprintln!("callback: failed to remove '{label}' from {linear_issue_id}: {e}");
                 }
                 let done_label = format!("{label}:done");
                 if let Err(e) = linear.add_label(linear_issue_id, &done_label) {
@@ -1200,14 +1198,17 @@ stages:
         // Trigger label "analyze" should be removed
         let removes = linear.remove_label_calls.borrow();
         assert!(
-            removes.iter().any(|(id, label)| id == "RIG-253" && label == "analyze"),
+            removes
+                .iter()
+                .any(|(id, label)| id == "RIG-253" && label == "analyze"),
             "should remove 'analyze' trigger label, got: {removes:?}"
         );
 
         // Done label "analyze:done" should be added
         let adds = linear.add_label_calls.borrow();
         assert!(
-            adds.iter().any(|(id, label)| id == "RIG-253" && label == "analyze:done"),
+            adds.iter()
+                .any(|(id, label)| id == "RIG-253" && label == "analyze:done"),
             "should add 'analyze:done' label, got: {adds:?}"
         );
     }
