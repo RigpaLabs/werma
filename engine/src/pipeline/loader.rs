@@ -119,10 +119,11 @@ pub fn resolve_prompt(prompt_source: &str) -> String {
 /// These are compiled into the binary via include_str!.
 fn builtin_prompt(rel_path: &str) -> Option<&'static str> {
     match rel_path {
+        "prompts/analyst.md" => Some(include_str!("../../pipelines/prompts/analyst.md")),
         "prompts/engineer.md" => Some(include_str!("../../pipelines/prompts/engineer.md")),
         "prompts/reviewer.md" => Some(include_str!("../../pipelines/prompts/reviewer.md")),
         "prompts/qa.md" => Some(include_str!("../../pipelines/prompts/qa.md")),
-        "prompts/analyst.md" => Some(include_str!("../../pipelines/prompts/analyst.md")),
+        "prompts/devops.md" => Some(include_str!("../../pipelines/prompts/devops.md")),
         "prompts/deployer.md" => Some(include_str!("../../pipelines/prompts/deployer.md")),
         _ => None,
     }
