@@ -146,10 +146,9 @@ jobs:
             echo 'CHANGELOG_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@master
+      - name: Setup Rust
         if: steps.bump.outputs.skipped != 'true'
-        with:
-          toolchain: "1.88.0"
+        run: rustup show
 
       - name: Bump Cargo.toml, tag & push
         if: steps.bump.outputs.skipped != 'true'
@@ -264,10 +263,10 @@ jobs:
         with:
           ref: ${{ needs.version.outputs.tag }}
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.88.0"
-          targets: aarch64-apple-darwin
+      - name: Setup Rust
+        run: |
+          rustup show
+          rustup target add aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:

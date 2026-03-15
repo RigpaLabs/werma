@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Pre-commit hook: ensures Rust code is formatted
+set -euo pipefail
+
+# Only check if engine/ has staged changes
+if git diff --cached --name-only | grep -q "^engine/"; then
+    echo "Running cargo fmt check..."
+    cd engine
+    if ! cargo fmt --check 2>/dev/null; then
+        echo ""
+        echo "✗ Code is not formatted. Run 'cd engine && cargo fmt' and re-stage."
+        exit 1
+    fi
+    echo "✓ Format check passed"
+fi
+
+exit 0
