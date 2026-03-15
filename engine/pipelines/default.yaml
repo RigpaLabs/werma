@@ -54,9 +54,6 @@ stages:
       rejected:
         status: in_progress
         spawn: engineer
-      request_changes:
-        status: in_progress
-        spawn: engineer
 
   deployer:
     linear_status: deploy

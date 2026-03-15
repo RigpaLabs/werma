@@ -232,6 +232,13 @@ stages:
     }
 
     #[test]
+    fn resolve_builtin_analyst_prompt() {
+        let content = builtin_prompt("prompts/analyst.md");
+        assert!(content.is_some());
+        assert!(!content.unwrap().is_empty());
+    }
+
+    #[test]
     fn resolve_builtin_devops_prompt() {
         let content = builtin_prompt("prompts/devops.md");
         assert!(content.is_some());
