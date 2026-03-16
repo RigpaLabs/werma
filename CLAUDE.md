@@ -79,13 +79,24 @@ Post to `shared/signals.md`:
 
 Write tasks (code, full, refactor, pipeline-engineer, pipeline-devops) run in isolated git worktrees under `.trees/` in the working directory. Read-only tasks run directly. Worktrees are NOT auto-cleaned — failed tasks keep their worktree for inspection, completed tasks keep theirs for PR review.
 
+**Formatting:** Worktrees do NOT inherit pre-commit hooks from `.githooks/`. Agents MUST run `cd engine && cargo fmt` before committing. Verify with `cargo fmt -- --check`.
+
 ## Agent Permission Tiers
 
 | Tier | Operations |
 |------|-----------|
 | **Always OK** | Read files, run tests, commit to feature branch, create branches, create PRs with `ai-generated` label |
 | **Ask first** | Add dependencies, modify CI/CD, architectural changes |
-| **Never** | Force push, delete branches, commit secrets, push to main, merge PRs |
+| **Never** | Force push, delete branches, commit secrets, push to main, merge PRs with `--admin` |
+
+## PR Merging
+
+**Always use `--auto`, NEVER `--admin`:**
+```bash
+gh pr merge N --squash --delete-branch --auto   # correct — waits for CI
+gh pr merge N --squash --delete-branch --admin   # WRONG — bypasses CI
+```
+`--admin` bypasses required status checks (CI fmt/lint/test). This has caused main to break multiple times.
 
 ## Versioning (CI-driven, DO NOT do manually)
 
