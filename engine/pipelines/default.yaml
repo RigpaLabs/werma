@@ -11,6 +11,7 @@ stages:
     linear_label: analyze
     agent: pipeline-analyst
     model: opus
+    fallback: sonnet
     max_turns: 20
     manual: skip
     prompt: prompts/analyst.md
@@ -27,7 +28,7 @@ stages:
     agent: pipeline-engineer
     model: opus
     fallback: sonnet
-    light_model: sonnet
+    light_model: opus
     light_threshold: 2
     max_turns: 40
     manual: skip
@@ -41,6 +42,7 @@ stages:
     linear_status: review
     agent: pipeline-reviewer
     model: opus
+    fallback: sonnet
     recheck_model: sonnet
     max_review_rounds: 3
     max_turns: 15

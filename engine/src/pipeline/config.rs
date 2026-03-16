@@ -235,6 +235,7 @@ stages:
       status: in_progress
     agent: pipeline-analyst
     model: opus
+    fallback: sonnet
     manual: skip
     prompt: |
       Analyze issue {issue_id}: {issue_title}
@@ -247,7 +248,7 @@ stages:
     agent: pipeline-engineer
     model: opus
     fallback: sonnet
-    light_model: sonnet
+    light_model: opus
     light_threshold: 2
     max_turns: 40
     manual: skip
@@ -259,6 +260,7 @@ stages:
     linear_status: review
     agent: pipeline-reviewer
     model: opus
+    fallback: sonnet
     recheck_model: sonnet
     max_review_rounds: 3
     max_turns: 15
@@ -445,7 +447,7 @@ stages:
         assert_eq!(engineer.fallback.as_deref(), Some("sonnet"));
 
         let analyst = config.stage("analyst").unwrap();
-        assert!(analyst.fallback.is_none());
+        assert_eq!(analyst.fallback.as_deref(), Some("sonnet"));
     }
 
     #[test]
@@ -461,7 +463,7 @@ stages:
     fn light_model_deserialized() {
         let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
         let engineer = config.stage("engineer").unwrap();
-        assert_eq!(engineer.light_model.as_deref(), Some("sonnet"));
+        assert_eq!(engineer.light_model.as_deref(), Some("opus"));
         assert_eq!(engineer.light_threshold, Some(2));
         assert_eq!(engineer.max_turns, Some(40));
     }
@@ -481,9 +483,9 @@ stages:
     fn effective_model_uses_light_for_low_sp() {
         let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
         let engineer = config.stage("engineer").unwrap();
-        // Low SP (1-2): uses light_model
-        assert_eq!(engineer.effective_model(1, 0), "sonnet");
-        assert_eq!(engineer.effective_model(2, 0), "sonnet");
+        // Low SP (1-2): uses light_model (opus)
+        assert_eq!(engineer.effective_model(1, 0), "opus");
+        assert_eq!(engineer.effective_model(2, 0), "opus");
         // High SP (3+): uses base model
         assert_eq!(engineer.effective_model(3, 0), "opus");
         assert_eq!(engineer.effective_model(5, 0), "opus");
