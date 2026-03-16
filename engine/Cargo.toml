@@ -22,6 +22,7 @@ tempfile = "3"
 comfy-table = "7.2.2"
 indicatif = "0.18.4"
 ctrlc = "3"
+png = "0.17"
 
 [lints.rust]
 unsafe_code = "forbid"

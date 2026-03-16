@@ -1,3 +1,4 @@
+mod art;
 mod backup;
 mod cli;
 mod commands;
