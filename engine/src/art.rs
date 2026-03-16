@@ -9,7 +9,7 @@ const MAX_ART_WIDTH: usize = 80;
 // Decoded pixel buffer: (width, height, rgba_bytes)
 static DECODED: OnceLock<(u32, u32, Vec<u8>)> = OnceLock::new();
 
-// Cache: last rendered (term_width, string)
+// Cache: last rendered (term_width, string) — only used for tick == 0 (static mode)
 static CACHE: Mutex<(usize, String)> = Mutex::new((0, String::new()));
 
 fn decode_png() -> &'static (u32, u32, Vec<u8>) {
@@ -121,6 +121,57 @@ fn sample_pixel(
     }
 }
 
+/// Apply procedural animation effects to a pixel based on its color class and tick.
+///
+/// Three effects, all deterministic per (tick, x, y) — no RNG needed:
+/// - Flame flicker: fire/orange pixels get random brightness shifts
+/// - Eye glow pulse: bright white/blue pixels breathe on a sine wave
+/// - Golden shimmer: gold/yellow armor pixels get subtle hue shifts
+#[inline]
+fn animate_pixel(r: u8, g: u8, b: u8, a: u8, tick: u64, x: u32, y: u32) -> (u8, u8, u8, u8) {
+    if tick == 0 {
+        return (r, g, b, a);
+    }
+
+    // Flame flicker: fire/orange pixels
+    if r > 180 && g > 60 && g < 180 && b < 80 {
+        let hash = (tick
+            .wrapping_mul(7)
+            .wrapping_add(x as u64 * 13)
+            .wrapping_add(y as u64 * 31))
+            % 40;
+        let offset = hash as i16 - 20;
+        let nr = (r as i16 + offset).clamp(0, 255) as u8;
+        let ng = (g as i16 + offset / 2).clamp(0, 255) as u8;
+        return (nr, ng, b, a);
+    }
+
+    // Eye glow pulse: bright white/light-blue pixels (~2s period at 100ms ticks = 20 ticks)
+    if r > 200 && g > 200 && b > 200 {
+        let phase = (tick as f64) * std::f64::consts::PI / 10.0;
+        let factor = 1.0 + 0.15 * phase.sin();
+        let nr = ((r as f64) * factor).clamp(0.0, 255.0) as u8;
+        let ng = ((g as f64) * factor).clamp(0.0, 255.0) as u8;
+        let nb = ((b as f64) * factor).clamp(0.0, 255.0) as u8;
+        return (nr, ng, nb, a);
+    }
+
+    // Golden shimmer: gold/yellow armor pixels
+    if r > 180 && g > 120 && g < 200 && b < 100 {
+        let hash = (tick
+            .wrapping_mul(3)
+            .wrapping_add(x as u64 * 17)
+            .wrapping_add(y as u64 * 31))
+            % 20;
+        let shift = hash as i16 - 10;
+        let ng = (g as i16 + shift).clamp(0, 255) as u8;
+        let nr = (r as i16 + shift / 2).clamp(0, 255) as u8;
+        return (nr, ng, b, a);
+    }
+
+    (r, g, b, a)
+}
+
 /// True if this pixel should be treated as transparent (use terminal background).
 #[inline]
 fn is_transparent(r: u8, g: u8, b: u8, a: u8) -> bool {
@@ -129,16 +180,20 @@ fn is_transparent(r: u8, g: u8, b: u8, a: u8) -> bool {
 }
 
 /// Render the mascot as a halfblock string, centered for `term_width` columns.
+/// Pass `tick = 0` for static rendering (cached). Pass `tick > 0` for animated
+/// rendering (no cache — re-rendered each frame).
 /// Returns an empty string if term_width is too small or decoding failed.
-pub fn render_art(term_width: usize) -> String {
+pub fn render_art(term_width: usize, tick: u64) -> String {
     if term_width < MIN_ART_WIDTH {
         return String::new();
     }
 
-    // Fast path: return cached render if width hasn't changed
-    if let Ok(guard) = CACHE.lock() {
-        if guard.0 == term_width && !guard.1.is_empty() {
-            return guard.1.clone();
+    // Fast path: return cached render for static mode only
+    if tick == 0 {
+        if let Ok(guard) = CACHE.lock() {
+            if guard.0 == term_width && !guard.1.is_empty() {
+                return guard.1.clone();
+            }
         }
     }
 
@@ -166,8 +221,12 @@ pub fn render_art(term_width: usize) -> String {
 
         for col in 0..dst_w {
             let (tr, tg, tb, ta) = sample_pixel(rgba, *src_w, *src_h, col, top_y, dst_w, dst_h_px);
+            let (tr, tg, tb, ta) = animate_pixel(tr, tg, tb, ta, tick, col, top_y);
+
             let (br, bg, bb, ba) = if bot_y < dst_h_px {
-                sample_pixel(rgba, *src_w, *src_h, col, bot_y, dst_w, dst_h_px)
+                let (br, bg, bb, ba) =
+                    sample_pixel(rgba, *src_w, *src_h, col, bot_y, dst_w, dst_h_px);
+                animate_pixel(br, bg, bb, ba, tick, col, bot_y)
             } else {
                 (0, 0, 0, 0) // bottom row out of bounds → transparent
             };
@@ -201,9 +260,11 @@ pub fn render_art(term_width: usize) -> String {
         buf.push_str("\x1b[0m\n");
     }
 
-    // Store in cache
-    if let Ok(mut guard) = CACHE.lock() {
-        *guard = (term_width, buf.clone());
+    // Store in cache only for static mode
+    if tick == 0 {
+        if let Ok(mut guard) = CACHE.lock() {
+            *guard = (term_width, buf.clone());
+        }
     }
 
     buf
@@ -215,13 +276,13 @@ mod tests {
 
     #[test]
     fn render_art_too_narrow_returns_empty() {
-        assert_eq!(render_art(10), "");
-        assert_eq!(render_art(0), "");
+        assert_eq!(render_art(10, 0), "");
+        assert_eq!(render_art(0, 0), "");
     }
 
     #[test]
     fn render_art_normal_width_returns_nonempty() {
-        let s = render_art(80);
+        let s = render_art(80, 0);
         // Should produce ANSI output with newlines
         assert!(!s.is_empty());
         assert!(s.contains('\n'));
@@ -229,16 +290,27 @@ mod tests {
 
     #[test]
     fn render_art_caches_result() {
-        let first = render_art(80);
-        let second = render_art(80);
+        let first = render_art(80, 0);
+        let second = render_art(80, 0);
         assert_eq!(first, second);
     }
 
     #[test]
     fn render_art_different_widths() {
-        let narrow = render_art(40);
-        let wide = render_art(120);
+        let narrow = render_art(40, 0);
+        let wide = render_art(120, 0);
         // Wider terminal should produce more content
         assert!(wide.len() > narrow.len());
+    }
+
+    #[test]
+    fn render_art_animates() {
+        // Animated frames should differ from the static frame
+        let static_frame = render_art(80, 0);
+        let animated_frame = render_art(80, 5);
+        assert_ne!(
+            static_frame, animated_frame,
+            "tick=0 and tick=5 should produce different output"
+        );
     }
 }

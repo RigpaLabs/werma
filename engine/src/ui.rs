@@ -221,12 +221,13 @@ pub fn render_status_buf(
     failed: &[Task],
     interval: Option<u64>,
     term_width: usize,
+    tick: u64,
 ) -> String {
     use std::fmt::Write;
     let mut buf = String::new();
 
     // Pixel art mascot header (skipped in compact mode and narrow terminals)
-    let art = crate::art::render_art(term_width);
+    let art = crate::art::render_art(term_width, tick);
     if !art.is_empty() {
         buf.push_str(&art);
     }
@@ -316,12 +317,13 @@ pub fn render_compact_buf(
     failed: &[Task],
     interval: Option<u64>,
     term_width: usize,
+    tick: u64,
 ) -> String {
     use std::fmt::Write;
     let mut buf = String::new();
 
     // Pixel art mascot header
-    let art = crate::art::render_art(term_width);
+    let art = crate::art::render_art(term_width, tick);
     if !art.is_empty() {
         buf.push_str(&art);
     }
@@ -528,7 +530,7 @@ mod tests {
 
     #[test]
     fn status_buf_renders() {
-        let buf = render_status_buf(&[], &[], &[], &[], Some(3), 80);
+        let buf = render_status_buf(&[], &[], &[], &[], Some(3), 80, 0);
         assert!(buf.contains("running (0)"));
         assert!(buf.contains("pending (0)"));
         assert!(buf.contains("↻ 3s"));
@@ -538,7 +540,7 @@ mod tests {
 
     #[test]
     fn compact_buf_renders() {
-        let buf = render_compact_buf(&[], &[], &[], &[], Some(5), 80);
+        let buf = render_compact_buf(&[], &[], &[], &[], Some(5), 80, 0);
         // ANSI codes wrap the numbers, so check for the text without exact formatting
         assert!(buf.contains("running"));
         assert!(buf.contains("pending"));
