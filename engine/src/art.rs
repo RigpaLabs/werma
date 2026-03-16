@@ -4,7 +4,7 @@ use std::sync::{Mutex, OnceLock};
 const PNG_DATA: &[u8] = include_bytes!("../assets/werma.png");
 
 const MIN_ART_WIDTH: usize = 20;
-const MAX_ART_WIDTH: usize = 48;
+const MAX_ART_WIDTH: usize = 80;
 
 // Decoded pixel buffer: (width, height, rgba_bytes)
 static DECODED: OnceLock<(u32, u32, Vec<u8>)> = OnceLock::new();

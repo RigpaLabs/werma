@@ -176,7 +176,7 @@ pub fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<
             }
 
             let content = if use_compact {
-                ui::render_compact_buf(&running, &pending, &completed, &failed, Some(interval))
+                ui::render_compact_buf(&running, &pending, &completed, &failed, Some(interval), current_term_width)
             } else {
                 ui::render_status_buf(&running, &pending, &completed, &failed, Some(interval), current_term_width)
             };
@@ -281,6 +281,15 @@ fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
     let pending = db.list_tasks(Some(Status::Pending))?;
     let completed = db.list_tasks(Some(Status::Completed))?;
     let failed = db.list_tasks(Some(Status::Failed))?;
+
+    let term_width = terminal_size::terminal_size()
+        .map(|(w, _)| w.0 as usize)
+        .unwrap_or(80);
+
+    let art = crate::art::render_art(term_width);
+    if !art.is_empty() {
+        print!("{art}");
+    }
 
     let sep = "───────────────────────────────────";
 

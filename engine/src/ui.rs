@@ -315,9 +315,16 @@ pub fn render_compact_buf(
     completed: &[Task],
     failed: &[Task],
     interval: Option<u64>,
+    term_width: usize,
 ) -> String {
     use std::fmt::Write;
     let mut buf = String::new();
+
+    // Pixel art mascot header
+    let art = crate::art::render_art(term_width);
+    if !art.is_empty() {
+        buf.push_str(&art);
+    }
 
     let sep = "───────────────────────────────────";
     let spinner = braille_frame();
@@ -531,7 +538,7 @@ mod tests {
 
     #[test]
     fn compact_buf_renders() {
-        let buf = render_compact_buf(&[], &[], &[], &[], Some(5));
+        let buf = render_compact_buf(&[], &[], &[], &[], Some(5), 80);
         // ANSI codes wrap the numbers, so check for the text without exact formatting
         assert!(buf.contains("running"));
         assert!(buf.contains("pending"));
