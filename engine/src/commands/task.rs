@@ -159,6 +159,8 @@ pub fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<
         let mut pending: Vec<Task> = vec![];
         let mut completed: Vec<Task> = vec![];
         let mut failed: Vec<Task> = vec![];
+        // Track current term width for resize handling
+        let mut current_term_width = term_width;
 
         loop {
             if tick_count >= ticks_per_refresh {
@@ -166,13 +168,17 @@ pub fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<
                 pending = db.list_tasks(Some(Status::Pending))?;
                 completed = db.list_tasks(Some(Status::Completed))?;
                 failed = db.list_tasks(Some(Status::Failed))?;
+                // Re-read terminal size on each DB refresh to handle resizes
+                current_term_width = terminal_size::terminal_size()
+                    .map(|(w, _)| w.0 as usize)
+                    .unwrap_or(80);
                 tick_count = 0;
             }
 
             let content = if use_compact {
                 ui::render_compact_buf(&running, &pending, &completed, &failed, Some(interval))
             } else {
-                ui::render_status_buf(&running, &pending, &completed, &failed, Some(interval))
+                ui::render_status_buf(&running, &pending, &completed, &failed, Some(interval), current_term_width)
             };
 
             ui::refresh_screen(&content, prev_lines);
@@ -197,6 +203,14 @@ fn render_status(db: &Db) -> Result<()> {
     let pending = db.list_tasks(Some(Status::Pending))?;
     let completed = db.list_tasks(Some(Status::Completed))?;
     let failed = db.list_tasks(Some(Status::Failed))?;
+
+    let term_width = terminal_size::terminal_size()
+        .map(|(w, _)| w.0 as usize)
+        .unwrap_or(80);
+    let art = crate::art::render_art(term_width);
+    if !art.is_empty() {
+        print!("{art}");
+    }
 
     println!();
 

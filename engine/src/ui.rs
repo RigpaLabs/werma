@@ -220,9 +220,16 @@ pub fn render_status_buf(
     completed: &[Task],
     failed: &[Task],
     interval: Option<u64>,
+    term_width: usize,
 ) -> String {
     use std::fmt::Write;
     let mut buf = String::new();
+
+    // Pixel art mascot header (skipped in compact mode and narrow terminals)
+    let art = crate::art::render_art(term_width);
+    if !art.is_empty() {
+        buf.push_str(&art);
+    }
 
     let _ = writeln!(buf);
 
@@ -514,7 +521,7 @@ mod tests {
 
     #[test]
     fn status_buf_renders() {
-        let buf = render_status_buf(&[], &[], &[], &[], Some(3));
+        let buf = render_status_buf(&[], &[], &[], &[], Some(3), 80);
         assert!(buf.contains("running (0)"));
         assert!(buf.contains("pending (0)"));
         assert!(buf.contains("↻ 3s"));
