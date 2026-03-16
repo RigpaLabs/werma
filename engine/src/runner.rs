@@ -1029,10 +1029,10 @@ mod tests {
     #[test]
     fn resolve_fallback_model_stage_without_fallback() {
         let task = Task {
-            pipeline_stage: "analyst".to_string(),
+            pipeline_stage: "deployer".to_string(),
             ..Default::default()
         };
-        // analyst stage has no fallback in default config
+        // deployer stage has no fallback in default config
         assert!(resolve_fallback_model(&task).is_none());
     }
 
