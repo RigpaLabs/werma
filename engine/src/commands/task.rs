@@ -183,6 +183,7 @@ pub fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<
                     &failed,
                     Some(interval),
                     current_term_width,
+                    tick_count,
                 )
             } else {
                 ui::render_status_buf(
@@ -192,6 +193,7 @@ pub fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<
                     &failed,
                     Some(interval),
                     current_term_width,
+                    tick_count,
                 )
             };
 
@@ -221,7 +223,7 @@ fn render_status(db: &Db) -> Result<()> {
     let term_width = terminal_size::terminal_size()
         .map(|(w, _)| w.0 as usize)
         .unwrap_or(80);
-    let art = crate::art::render_art(term_width);
+    let art = crate::art::render_art(term_width, 0);
     if !art.is_empty() {
         print!("{art}");
     }
@@ -300,7 +302,7 @@ fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
         .map(|(w, _)| w.0 as usize)
         .unwrap_or(80);
 
-    let art = crate::art::render_art(term_width);
+    let art = crate::art::render_art(term_width, 0);
     if !art.is_empty() {
         print!("{art}");
     }
