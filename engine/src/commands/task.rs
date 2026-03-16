@@ -176,9 +176,23 @@ pub fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<
             }
 
             let content = if use_compact {
-                ui::render_compact_buf(&running, &pending, &completed, &failed, Some(interval), current_term_width)
+                ui::render_compact_buf(
+                    &running,
+                    &pending,
+                    &completed,
+                    &failed,
+                    Some(interval),
+                    current_term_width,
+                )
             } else {
-                ui::render_status_buf(&running, &pending, &completed, &failed, Some(interval), current_term_width)
+                ui::render_status_buf(
+                    &running,
+                    &pending,
+                    &completed,
+                    &failed,
+                    Some(interval),
+                    current_term_width,
+                )
             };
 
             ui::refresh_screen(&content, prev_lines);
