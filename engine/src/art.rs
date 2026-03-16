@@ -102,7 +102,15 @@ fn to_rgba(
 
 /// Sample a single RGBA pixel from the source buffer using nearest-neighbor.
 #[inline]
-fn sample_pixel(rgba: &[u8], src_w: u32, src_h: u32, dst_x: u32, dst_y: u32, dst_w: u32, dst_h: u32) -> (u8, u8, u8, u8) {
+fn sample_pixel(
+    rgba: &[u8],
+    src_w: u32,
+    src_h: u32,
+    dst_x: u32,
+    dst_y: u32,
+    dst_w: u32,
+    dst_h: u32,
+) -> (u8, u8, u8, u8) {
     let sx = (dst_x as u64 * src_w as u64 / dst_w as u64).min(src_w as u64 - 1) as u32;
     let sy = (dst_y as u64 * src_h as u64 / dst_h as u64).min(src_h as u64 - 1) as u32;
     let idx = ((sy * src_w + sx) * 4) as usize;
@@ -180,15 +188,11 @@ pub fn render_art(term_width: usize) -> String {
                 }
                 (true, false) => {
                     // Only bottom half has color — fg color on default bg
-                    buf.push_str(&format!(
-                        "\x1b[49m\x1b[38;2;{br};{bg};{bb}m\u{2584}"
-                    ));
+                    buf.push_str(&format!("\x1b[49m\x1b[38;2;{br};{bg};{bb}m\u{2584}"));
                 }
                 (false, true) => {
                     // Only top half has color — use upper-half-block ▀ with fg
-                    buf.push_str(&format!(
-                        "\x1b[49m\x1b[38;2;{tr};{tg};{tb}m\u{2580}"
-                    ));
+                    buf.push_str(&format!("\x1b[49m\x1b[38;2;{tr};{tg};{tb}m\u{2580}"));
                 }
             }
         }
