@@ -258,8 +258,8 @@ stages:
   reviewer:
     linear_status: review
     agent: pipeline-reviewer
-    model: sonnet
-    recheck_model: haiku
+    model: opus
+    recheck_model: sonnet
     max_review_rounds: 3
     max_turns: 15
     manual: process
@@ -452,7 +452,7 @@ stages:
     fn recheck_model_deserialized() {
         let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
         let reviewer = config.stage("reviewer").unwrap();
-        assert_eq!(reviewer.recheck_model.as_deref(), Some("haiku"));
+        assert_eq!(reviewer.recheck_model.as_deref(), Some("sonnet"));
         assert_eq!(reviewer.max_review_rounds, Some(3));
         assert_eq!(reviewer.max_turns, Some(15));
     }
@@ -471,10 +471,10 @@ stages:
         let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
         let reviewer = config.stage("reviewer").unwrap();
         // Round 0 (first review): uses base model
-        assert_eq!(reviewer.effective_model(0, 0), "sonnet");
+        assert_eq!(reviewer.effective_model(0, 0), "opus");
         // Round 1+ (re-review): uses recheck_model
-        assert_eq!(reviewer.effective_model(0, 1), "haiku");
-        assert_eq!(reviewer.effective_model(0, 3), "haiku");
+        assert_eq!(reviewer.effective_model(0, 1), "sonnet");
+        assert_eq!(reviewer.effective_model(0, 3), "sonnet");
     }
 
     #[test]
