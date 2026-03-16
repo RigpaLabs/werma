@@ -351,6 +351,7 @@ pub fn callback(
                 working_dir,
                 estimate,
                 pr_url: pr_url.as_deref(),
+                logs_dir: None,
             })?;
         }
 
@@ -422,6 +423,8 @@ pub(crate) struct NextStageParams<'a> {
     pub working_dir: &'a str,
     pub estimate: i32,
     pub pr_url: Option<&'a str>,
+    /// Override the logs directory for handoff files. `None` = use `~/.werma/logs/` (production).
+    pub logs_dir: Option<&'a std::path::Path>,
 }
 
 /// Create a task for the next pipeline stage with handoff context.
@@ -438,6 +441,7 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         working_dir,
         estimate: _,
         pr_url: _,
+        logs_dir: _,
     } = p;
 
     // Guard: don't spawn if an active task already exists for this issue + stage.
@@ -488,10 +492,13 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         previous_output,
     );
 
-    let werma_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("no home dir"))?
-        .join(".werma");
-    let logs_dir = werma_dir.join("logs");
+    let logs_dir = match p.logs_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("no home dir"))?
+            .join(".werma")
+            .join("logs"),
+    };
     std::fs::create_dir_all(&logs_dir)?;
     let handoff_path = logs_dir.join(format!("{task_id}-handoff.md"));
 
@@ -759,6 +766,7 @@ mod tests {
 
         let config = test_config();
         let analyst_output = "## Spec\nImplement feature X\n## Requirements\n- Do A\n- Do B";
+        let tmpdir = tempfile::tempdir().unwrap();
 
         create_next_stage_task(&NextStageParams {
             db: &db,
@@ -772,6 +780,7 @@ mod tests {
             working_dir: "~/projects/rigpa/werma",
             estimate: 0,
             pr_url: None,
+            logs_dir: Some(tmpdir.path()),
         })
         .unwrap();
 
@@ -793,6 +802,7 @@ mod tests {
         let config = test_config();
 
         let reviewer_output = "## Review\n- blocker: no tests\nREVIEW_VERDICT=REJECTED";
+        let tmpdir = tempfile::tempdir().unwrap();
 
         create_next_stage_task(&NextStageParams {
             db: &db,
@@ -806,6 +816,7 @@ mod tests {
             working_dir: "",
             estimate: 0,
             pr_url: None,
+            logs_dir: Some(tmpdir.path()),
         })
         .unwrap();
 
@@ -837,6 +848,7 @@ mod tests {
         };
         db.insert_task(&existing).unwrap();
 
+        let tmpdir = tempfile::tempdir().unwrap();
         create_next_stage_task(&NextStageParams {
             db: &db,
             config: &config,
@@ -849,6 +861,7 @@ mod tests {
             working_dir: "~/projects/rigpa/werma",
             estimate: 0,
             pr_url: None,
+            logs_dir: Some(tmpdir.path()),
         })
         .unwrap();
 
@@ -954,6 +967,8 @@ stages:
     fn handoff_includes_pr_url_when_provided() {
         let db = crate::db::Db::open_in_memory().unwrap();
         let config = test_config();
+        let tmpdir = tempfile::tempdir().unwrap();
+        let logs_dir = tmpdir.path().join("logs");
 
         let today = chrono::Local::now().format("%Y%m%d").to_string();
         for i in 0..20 {
@@ -979,6 +994,7 @@ stages:
             working_dir: "~/projects/rigpa/werma",
             estimate: 0,
             pr_url: Some(pr_url),
+            logs_dir: Some(&logs_dir),
         })
         .unwrap();
 
@@ -999,6 +1015,8 @@ stages:
     fn callback_reviewer_rejection_reuses_branch() {
         let db = crate::db::Db::open_in_memory().unwrap();
         let config = test_config();
+        let tmpdir = tempfile::tempdir().unwrap();
+        let logs_dir = tmpdir.path().join("logs");
 
         for i in 0..10 {
             let dummy = crate::models::Task {
@@ -1023,6 +1041,7 @@ stages:
             working_dir: "~/projects/rigpa/werma",
             estimate: 0,
             pr_url: None,
+            logs_dir: Some(&logs_dir),
         })
         .unwrap();
 
@@ -1048,6 +1067,7 @@ stages:
             working_dir: "~/projects/rigpa/werma",
             estimate: 0,
             pr_url: None,
+            logs_dir: Some(&logs_dir),
         })
         .unwrap();
 
@@ -1078,6 +1098,7 @@ stages:
 
         // Simulate the state after engineer completes without creating a PR.
         // Previously, callback returned early here — now it should spawn reviewer.
+        let tmpdir = tempfile::tempdir().unwrap();
         create_next_stage_task(&NextStageParams {
             db: &db,
             config: &config,
@@ -1090,6 +1111,7 @@ stages:
             working_dir: "~/projects/rigpa/werma",
             estimate: 0,
             pr_url: None, // No PR URL — this is the RIG-232 scenario
+            logs_dir: Some(tmpdir.path()),
         })
         .unwrap();
 

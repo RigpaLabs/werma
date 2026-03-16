@@ -3,6 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::db::Db;
+use crate::traits::Notifier;
 
 use super::TmuxSession;
 use super::log_daemon;
@@ -13,7 +14,12 @@ use super::log_daemon;
 ///
 /// Case 2 catches the bug where claude exits silently but tmux keeps the session
 /// alive (e.g., due to `remain-on-exit` or process tree issues).
-pub fn check_zombie_tasks(db: &Db, werma_dir: &Path, tmux: &impl TmuxSession) -> Result<()> {
+pub fn check_zombie_tasks(
+    db: &Db,
+    werma_dir: &Path,
+    tmux: &impl TmuxSession,
+    notifier: &dyn Notifier,
+) -> Result<()> {
     let log_path = werma_dir.join("logs/daemon.log");
     let running = db.list_tasks(Some(crate::models::Status::Running))?;
 
@@ -25,9 +31,9 @@ pub fn check_zombie_tasks(db: &Db, werma_dir: &Path, tmux: &impl TmuxSession) ->
             mark_zombie(
                 db,
                 &log_path,
-                werma_dir,
                 task,
                 "tmux session died unexpectedly",
+                notifier,
             );
             continue;
         }
@@ -64,9 +70,9 @@ pub fn check_zombie_tasks(db: &Db, werma_dir: &Path, tmux: &impl TmuxSession) ->
             mark_zombie(
                 db,
                 &log_path,
-                werma_dir,
                 task,
                 &format!("process died in live tmux session{diag}"),
+                notifier,
             );
         }
     }
@@ -78,9 +84,9 @@ pub fn check_zombie_tasks(db: &Db, werma_dir: &Path, tmux: &impl TmuxSession) ->
 fn mark_zombie(
     db: &Db,
     log_path: &Path,
-    _werma_dir: &Path,
     task: &crate::models::Task,
     reason: &str,
+    notifier: &dyn Notifier,
 ) {
     log_daemon(
         log_path,
@@ -93,12 +99,12 @@ fn mark_zombie(
 
     let label =
         crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);
-    crate::notify::notify_macos(
+    notifier.notify_macos(
         "werma: zombie task detected",
         &format!("{label} — {reason}"),
         "Basso",
     );
-    crate::notify::notify_slack("#werma-alerts", &format!(":zombie: *{label}* — {reason}"));
+    notifier.notify_slack("#werma-alerts", &format!(":zombie: *{label}* — {reason}"));
 }
 
 /// Truncate a string for log output, replacing newlines with ` | `.
@@ -116,6 +122,7 @@ fn truncate_for_log(s: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
     use crate::models::{Status, Task};
+    use crate::traits::fakes::FakeNotifier;
 
     struct FakeTmux {
         alive_sessions: Vec<String>,
@@ -195,7 +202,7 @@ mod tests {
         // No alive sessions — zombie detected
         let tmux = FakeTmux::new(vec![]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
+        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
 
         let updated = db.task("20260313-999").unwrap().unwrap();
         assert_eq!(updated.status, Status::Failed);
@@ -235,7 +242,7 @@ mod tests {
 
         let tmux = FakeTmux::new(vec![]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
+        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
 
         let updated = db.task("20260313-998").unwrap().unwrap();
         assert_eq!(updated.status, Status::Completed);
@@ -253,7 +260,7 @@ mod tests {
         // Session is alive with process running — should not be marked as zombie
         let tmux = FakeTmux::new(vec!["werma-20260313-997".to_string()]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
+        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
 
         let updated = db.task("20260313-997").unwrap().unwrap();
         assert_eq!(updated.status, Status::Running);
@@ -272,7 +279,7 @@ mod tests {
         // Session exists but process inside is dead (the core bug scenario)
         let tmux = FakeTmux::new(vec![]).with_dead_process(vec!["werma-20260313-995".to_string()]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
+        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
 
         let updated = db.task("20260313-995").unwrap().unwrap();
         assert_eq!(updated.status, Status::Failed);
@@ -292,7 +299,7 @@ mod tests {
 
         let tmux = FakeTmux::new(vec!["werma-20260313-001".to_string()]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
+        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
 
         // 001 should still be running
         let t1 = db.task("20260313-001").unwrap().unwrap();
@@ -312,7 +319,7 @@ mod tests {
 
         let tmux = FakeTmux::new(vec![]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
+        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
     }
 
     #[test]
@@ -326,7 +333,7 @@ mod tests {
 
         let tmux = FakeTmux::new(vec![]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
+        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
 
         let updated = db.task("20260313-996").unwrap().unwrap();
         let finished = updated.finished_at.unwrap();
@@ -352,7 +359,7 @@ mod tests {
         let tmux = FakeTmux::new(vec!["werma-20260313-010".to_string()])
             .with_dead_process(vec!["werma-20260313-011".to_string()]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
+        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
 
         assert_eq!(
             db.task("20260313-010").unwrap().unwrap().status,
@@ -379,7 +386,7 @@ mod tests {
 
         let tmux = FakeTmux::new(vec![]).with_dead_process(vec!["werma-20260313-994".to_string()]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux).unwrap();
+        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
 
         // Check that a diagnostic entry was written to the task log
         let task_log = werma_dir.path().join("logs/20260313-994.log");
