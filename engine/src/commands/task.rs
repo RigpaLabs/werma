@@ -119,7 +119,7 @@ const DEFAULT_RECENT_LIMIT: usize = 10;
 /// Fetch terminal-status tasks: recent (sorted by finished_at DESC, limited) or all.
 fn fetch_terminal_tasks(db: &Db, status: Status, show_all: bool) -> Result<Vec<Task>> {
     if show_all {
-        db.list_tasks(Some(status))
+        db.list_all_tasks_by_finished(status)
     } else {
         db.list_recent_tasks(status, DEFAULT_RECENT_LIMIT)
     }

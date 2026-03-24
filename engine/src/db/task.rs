@@ -11,6 +11,7 @@ pub trait TaskRepository {
     fn task(&self, id: &str) -> Result<Option<Task>>;
     fn list_tasks(&self, status: Option<Status>) -> Result<Vec<Task>>;
     fn list_recent_tasks(&self, status: Status, limit: usize) -> Result<Vec<Task>>;
+    fn list_all_tasks_by_finished(&self, status: Status) -> Result<Vec<Task>>;
     fn set_task_status(&self, id: &str, status: Status) -> Result<()>;
     fn find_next_pending(&self) -> Result<Option<Task>>;
     fn update_task_field(&self, id: &str, field: &str, value: &str) -> Result<()>;
@@ -31,6 +32,10 @@ impl TaskRepository for super::Db {
 
     fn list_recent_tasks(&self, status: Status, limit: usize) -> Result<Vec<Task>> {
         self.list_recent_tasks(status, limit)
+    }
+
+    fn list_all_tasks_by_finished(&self, status: Status) -> Result<Vec<Task>> {
+        self.list_all_tasks_by_finished(status)
     }
 
     fn set_task_status(&self, id: &str, status: Status) -> Result<()> {
@@ -186,6 +191,26 @@ impl super::Db {
         let rows = stmt.query_map(params![status.to_string(), limit as i64], |row| {
             Ok(task_from_row(row))
         })?;
+
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row??);
+        }
+        Ok(tasks)
+    }
+
+    /// List all tasks for a terminal status, sorted by finished_at DESC (no limit).
+    /// Used by `--all` flag to show full history with correct sort order.
+    pub fn list_all_tasks_by_finished(&self, status: Status) -> Result<Vec<Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, status, priority, created_at, started_at, finished_at,
+                    type, prompt, output_path, working_dir, model, max_turns,
+                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+             FROM tasks WHERE status = ?1
+             ORDER BY finished_at DESC, created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![status.to_string()], |row| Ok(task_from_row(row)))?;
 
         let mut tasks = Vec::new();
         for row in rows {
@@ -906,6 +931,53 @@ mod tests {
         let recent_failed = db.list_recent_tasks(Status::Failed, 10).unwrap();
         assert_eq!(recent_failed.len(), 1);
         assert_eq!(recent_failed[0].id, "20260324-002");
+    }
+
+    // ─── list_all_tasks_by_finished ─────────────────────────────────────
+
+    #[test]
+    fn list_all_tasks_by_finished_sorted_desc_no_limit() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Insert 15 completed tasks with different finished_at times
+        for i in 1..=15 {
+            let mut t = make_test_task(&format!("20260324-{i:03}"));
+            t.status = Status::Completed;
+            t.finished_at = Some(format!("2026-03-24T{i:02}:00:00"));
+            db.insert_task(&t).unwrap();
+        }
+
+        let all = db.list_all_tasks_by_finished(Status::Completed).unwrap();
+        // No limit — all 15 returned
+        assert_eq!(all.len(), 15);
+        // Newest first
+        assert_eq!(all[0].id, "20260324-015");
+        assert_eq!(all[14].id, "20260324-001");
+    }
+
+    #[test]
+    fn list_all_tasks_by_finished_ignores_priority() {
+        let db = Db::open_in_memory().unwrap();
+
+        // High priority (low number) but old
+        let mut old = make_test_task("20260310-001");
+        old.status = Status::Completed;
+        old.priority = 1;
+        old.finished_at = Some("2026-03-10T10:00:00".to_string());
+        db.insert_task(&old).unwrap();
+
+        // Low priority but recent
+        let mut new = make_test_task("20260324-001");
+        new.status = Status::Completed;
+        new.priority = 99;
+        new.finished_at = Some("2026-03-24T15:00:00".to_string());
+        db.insert_task(&new).unwrap();
+
+        let all = db.list_all_tasks_by_finished(Status::Completed).unwrap();
+        assert_eq!(all.len(), 2);
+        // Recent task first regardless of priority
+        assert_eq!(all[0].id, "20260324-001");
+        assert_eq!(all[1].id, "20260310-001");
     }
 
     #[test]
