@@ -189,13 +189,15 @@ pub fn callback(
         .to_lowercase();
 
     // RIG-227: Fallback spec posting for analyst stage.
-    // If the agent didn't use ---COMMENT--- blocks, the spec would be lost.
-    // Post the substantive output as a comment so the spec always reaches Linear.
+    // Post substantive plain-text output as a comment so the spec reaches Linear.
     // Only fire for "done" — ALREADY_DONE means no new spec was written,
     // and BLOCKED shouldn't post a partial spec.
-    if stage == "analyst" && comments.is_empty() && verdict_str == "done" {
+    // When COMMENT blocks were posted, require substantial plain-text content
+    // (>= 5 lines) to avoid posting trivial preamble alongside proper blocks.
+    if stage == "analyst" && verdict_str == "done" {
         let spec_body = extract_spec_from_output(result);
-        if !spec_body.is_empty() {
+        let min_lines = if comments.is_empty() { 1 } else { 5 };
+        if spec_body.lines().count() >= min_lines {
             let truncated = truncate_lines(&spec_body, 200);
             if let Err(e) = linear.comment(linear_issue_id, &truncated) {
                 eprintln!(
@@ -1825,6 +1827,105 @@ stages:
         assert!(
             fallback.is_none(),
             "ALREADY_DONE should NOT trigger fallback spec posting: {comments:?}"
+        );
+    }
+
+    #[test]
+    fn callback_analyst_posts_fallback_when_comment_block_plus_plain_text_spec() {
+        // Reviewer round 4: small COMMENT block + bulk spec as plain text.
+        // The fallback should fire for the plain-text spec even though a COMMENT block exists.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-227d", "todo");
+
+        let mut task = crate::db::make_test_task("20260324-230");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-227d".to_string();
+        task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Small COMMENT block (status note) + bulk spec as plain text (>= 5 lines)
+        let result = "---COMMENT---\nAnalysis started.\n---END COMMENT---\n\
+                       ## Spec\n\
+                       Implement feature X with the following requirements:\n\
+                       - Requirement A: handle edge cases\n\
+                       - Requirement B: add validation\n\
+                       - Requirement C: update tests\n\
+                       ## Acceptance Criteria\n\
+                       All tests pass.\n\
+                       ESTIMATE=3\nVERDICT=DONE";
+
+        callback(
+            &db,
+            "20260324-230",
+            "analyst",
+            result,
+            "RIG-227d",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        let comments = linear.comment_calls.borrow();
+        // Should have 3 comments: COMMENT block + fallback spec + status line
+        let spec_fallback = comments
+            .iter()
+            .find(|(_, body)| body.contains("## Spec") && body.contains("Requirement A"));
+        assert!(
+            spec_fallback.is_some(),
+            "plain-text spec should be posted as fallback even when COMMENT blocks exist: {comments:?}"
+        );
+    }
+
+    #[test]
+    fn callback_analyst_skips_fallback_when_comment_blocks_cover_spec_with_trivial_preamble() {
+        // When spec is in COMMENT blocks and only trivial text (< 5 lines) is outside,
+        // the fallback should NOT fire to avoid posting noise.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-227e", "todo");
+
+        let mut task = crate::db::make_test_task("20260324-231");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-227e".to_string();
+        task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Spec in COMMENT blocks + trivial preamble outside (< 5 lines)
+        let result = "I'll analyze this issue now.\n\
+                       ---COMMENT---\n## Full Spec\nDetailed implementation plan.\n---END COMMENT---\n\
+                       Analysis complete.\n\
+                       ESTIMATE=3\nVERDICT=DONE";
+
+        callback(
+            &db,
+            "20260324-231",
+            "analyst",
+            result,
+            "RIG-227e",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        let comments = linear.comment_calls.borrow();
+        // Should NOT have a fallback — only the COMMENT block + status line
+        let preamble_fallback = comments
+            .iter()
+            .find(|(_, body)| body.contains("analyze this issue"));
+        assert!(
+            preamble_fallback.is_none(),
+            "trivial preamble should NOT be posted as fallback: {comments:?}"
         );
     }
 }
