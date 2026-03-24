@@ -175,6 +175,8 @@ pub mod fakes {
         pub issue_data: RefCell<std::collections::HashMap<String, (String, String)>>,
         /// Maps issue_id -> current status name (for get_issue_status reconciliation).
         pub issue_status: RefCell<std::collections::HashMap<String, String>>,
+        /// Maps issue_id -> (state_type, team_key) for get_issue_state_and_team.
+        pub issue_state_and_team: RefCell<std::collections::HashMap<String, (String, String)>>,
         fail_next_moves: RefCell<u32>,
     }
 
@@ -192,6 +194,7 @@ pub mod fakes {
                 issues_by_label: RefCell::new(std::collections::HashMap::new()),
                 issue_data: RefCell::new(std::collections::HashMap::new()),
                 issue_status: RefCell::new(std::collections::HashMap::new()),
+                issue_state_and_team: RefCell::new(std::collections::HashMap::new()),
                 fail_next_moves: RefCell::new(0),
             }
         }
@@ -201,6 +204,14 @@ pub mod fakes {
             self.issue_status
                 .borrow_mut()
                 .insert(issue_id.to_string(), status.to_string());
+        }
+
+        /// Set state type and team key for get_issue_state_and_team.
+        pub fn set_issue_state_and_team(&self, issue_id: &str, state_type: &str, team_key: &str) {
+            self.issue_state_and_team.borrow_mut().insert(
+                issue_id.to_string(),
+                (state_type.to_string(), team_key.to_string()),
+            );
         }
 
         /// Configure the next N move_issue_by_name calls to return Err.
@@ -341,6 +352,29 @@ pub mod fakes {
                 .get(issue_id)
                 .cloned()
                 .unwrap_or_default())
+        }
+
+        fn get_issue_state_and_team(&self, issue_id: &str) -> Result<(String, String)> {
+            // If explicitly set, return that.
+            if let Some(result) = self.issue_state_and_team.borrow().get(issue_id) {
+                return Ok(result.clone());
+            }
+            // Derive from issue_status: map status name to Linear state type.
+            let status = self
+                .issue_status
+                .borrow()
+                .get(issue_id)
+                .cloned()
+                .unwrap_or_default();
+            let state_type = match status.as_str() {
+                "canceled" => "canceled",
+                "done" => "completed",
+                "backlog" => "backlog",
+                "todo" => "unstarted",
+                _ => "started",
+            };
+            // Default team: "RIG"
+            Ok((state_type.to_string(), "RIG".to_string()))
         }
     }
 
@@ -691,6 +725,27 @@ pub mod fakes {
                 }
             }
             Ok(String::new())
+        }
+
+        fn get_issue_state_and_team(&self, issue_id: &str) -> anyhow::Result<(String, String)> {
+            let find_issue = |id: &str| -> Option<(String, String)> {
+                self.issues.borrow().get(id).map(|i| {
+                    let state_type = status_to_state_type(&i.status).to_string();
+                    // Derive team key from identifier prefix (e.g. "RIG-42" → "RIG")
+                    let team_key = i.identifier.split('-').next().unwrap_or("").to_string();
+                    (state_type, team_key)
+                })
+            };
+
+            if let Some(result) = find_issue(issue_id) {
+                return Ok(result);
+            }
+            if let Some(uuid) = self.identifier_to_uuid.borrow().get(issue_id).cloned() {
+                if let Some(result) = find_issue(&uuid) {
+                    return Ok(result);
+                }
+            }
+            Ok((String::new(), String::new()))
         }
     }
 }

@@ -137,6 +137,7 @@ fn status_icon_cell(status: Status) -> Cell {
             .add_attribute(Attribute::Bold),
         Status::Completed => Cell::new("✓").fg(Color::DarkGrey),
         Status::Failed => Cell::new("✗").fg(Color::Red),
+        Status::Canceled => Cell::new("⊘").fg(Color::DarkGrey),
     }
 }
 

@@ -19,6 +19,7 @@ const MIGRATION_002_SQL: &str = include_str!("../../migrations/002_repo_hash.sql
 const MIGRATION_003_SQL: &str = include_str!("../../migrations/003_estimate.sql");
 const MIGRATION_004_SQL: &str = include_str!("../../migrations/004_normalize_linear_ids.sql");
 const MIGRATION_005_SQL: &str = include_str!("../../migrations/005_callback_fired_at.sql");
+const MIGRATION_006_SQL: &str = include_str!("../../migrations/006_add_canceled_status.sql");
 
 pub struct Db {
     pub(super) conn: Connection,
@@ -76,6 +77,20 @@ impl Db {
             if !msg.contains("duplicate column") {
                 return Err(e).context("migration 005_callback_fired_at");
             }
+        }
+        // 006: add 'canceled' to status CHECK constraint (idempotent — recreates table)
+        // Only needed for existing DBs; fresh DBs already have 'canceled' in 001_init.sql.
+        // Check if migration is needed by attempting to set a dummy value.
+        let needs_006: bool = {
+            let check = self
+                .conn
+                .execute("UPDATE tasks SET status = 'canceled' WHERE 0", []);
+            check.is_err()
+        };
+        if needs_006 {
+            self.conn
+                .execute_batch(MIGRATION_006_SQL)
+                .context("migration 006_add_canceled_status")?;
         }
         Ok(())
     }

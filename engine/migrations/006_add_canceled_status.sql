@@ -1,7 +1,7 @@
-PRAGMA journal_mode=WAL;
-PRAGMA busy_timeout=5000;
+-- Migration 006: Add 'canceled' to tasks.status CHECK constraint.
+-- SQLite cannot ALTER CHECK constraints, so we recreate the table.
 
-CREATE TABLE IF NOT EXISTS tasks (
+CREATE TABLE IF NOT EXISTS tasks_new (
     id              TEXT PRIMARY KEY,
     status          TEXT NOT NULL DEFAULT 'pending'
                     CHECK(status IN ('pending','running','completed','failed','canceled')),
@@ -21,35 +21,23 @@ CREATE TABLE IF NOT EXISTS tasks (
     linear_pushed   INTEGER DEFAULT 0,
     pipeline_stage  TEXT DEFAULT '',
     depends_on      TEXT DEFAULT '[]',
-    context_files   TEXT DEFAULT '[]'
+    context_files   TEXT DEFAULT '[]',
+    repo_hash       TEXT DEFAULT '',
+    estimate        INTEGER DEFAULT 0,
+    callback_fired_at TEXT
 );
+
+INSERT OR IGNORE INTO tasks_new
+    SELECT id, status, priority, created_at, started_at, finished_at,
+           type, prompt, output_path, working_dir, model, max_turns,
+           allowed_tools, session_id, linear_issue_id, linear_pushed,
+           pipeline_stage, depends_on, context_files, repo_hash, estimate,
+           callback_fired_at
+    FROM tasks;
+
+DROP TABLE IF EXISTS tasks;
+ALTER TABLE tasks_new RENAME TO tasks;
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status_priority ON tasks(status, priority);
 CREATE INDEX IF NOT EXISTS idx_tasks_linear ON tasks(linear_issue_id) WHERE linear_issue_id != '';
 CREATE INDEX IF NOT EXISTS idx_tasks_pipeline ON tasks(pipeline_stage) WHERE pipeline_stage != '';
-
-CREATE TABLE IF NOT EXISTS schedules (
-    id              TEXT PRIMARY KEY,
-    cron_expr       TEXT NOT NULL,
-    prompt          TEXT NOT NULL,
-    type            TEXT NOT NULL DEFAULT 'research',
-    model           TEXT NOT NULL DEFAULT 'opus',
-    output_path     TEXT DEFAULT '',
-    working_dir     TEXT NOT NULL,
-    max_turns       INTEGER DEFAULT 0,
-    enabled         INTEGER DEFAULT 1,
-    context_files   TEXT DEFAULT '[]',
-    last_enqueued   TEXT DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS pr_reviewed (
-    pr_key          TEXT PRIMARY KEY,
-    updated_at      TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS daily_usage (
-    date            TEXT PRIMARY KEY,
-    opus_calls      INTEGER DEFAULT 0,
-    sonnet_calls    INTEGER DEFAULT 0,
-    haiku_calls     INTEGER DEFAULT 0
-);

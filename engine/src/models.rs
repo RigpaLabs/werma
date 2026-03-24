@@ -10,6 +10,14 @@ pub enum Status {
     Running,
     Completed,
     Failed,
+    Canceled,
+}
+
+impl Status {
+    /// Returns true if the task is in a terminal state (no further transitions).
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Canceled)
+    }
 }
 
 impl fmt::Display for Status {
@@ -19,6 +27,7 @@ impl fmt::Display for Status {
             Self::Running => write!(f, "running"),
             Self::Completed => write!(f, "completed"),
             Self::Failed => write!(f, "failed"),
+            Self::Canceled => write!(f, "canceled"),
         }
     }
 }
@@ -32,6 +41,7 @@ impl FromStr for Status {
             "running" => Ok(Self::Running),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
+            "canceled" => Ok(Self::Canceled),
             _ => Err(anyhow::anyhow!("unknown status: {s}")),
         }
     }
@@ -99,6 +109,16 @@ mod tests {
         assert_eq!(Status::Running.to_string(), "running");
         assert_eq!(Status::Completed.to_string(), "completed");
         assert_eq!(Status::Failed.to_string(), "failed");
+        assert_eq!(Status::Canceled.to_string(), "canceled");
+    }
+
+    #[test]
+    fn status_is_terminal() {
+        assert!(!Status::Pending.is_terminal());
+        assert!(!Status::Running.is_terminal());
+        assert!(Status::Completed.is_terminal());
+        assert!(Status::Failed.is_terminal());
+        assert!(Status::Canceled.is_terminal());
     }
 
     #[test]
@@ -108,6 +128,7 @@ mod tests {
             Status::Running,
             Status::Completed,
             Status::Failed,
+            Status::Canceled,
         ] {
             let s = status.to_string();
             let parsed: Status = s.parse().unwrap();
