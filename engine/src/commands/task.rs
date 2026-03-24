@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -112,7 +113,13 @@ pub fn cmd_list(db: &Db, status_filter: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-pub fn cmd_status(db: &Db, watch: bool, compact: bool, interval: u64) -> Result<()> {
+pub fn cmd_status(db: &Db, watch: bool, compact: bool, plain: bool, interval: u64) -> Result<()> {
+    // Plain mode: explicit flag or auto-detect non-TTY (piped output)
+    let use_plain = plain || !std::io::stdout().is_terminal();
+    if use_plain {
+        return render_plain(db);
+    }
+
     let term_width = terminal_size::terminal_size()
         .map(|(w, _)| w.0 as usize)
         .unwrap_or(80);
@@ -404,6 +411,40 @@ fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
         refresh_str.dimmed(),
     );
 
+    Ok(())
+}
+
+fn render_plain(db: &Db) -> Result<()> {
+    let all_statuses = [
+        Status::Running,
+        Status::Pending,
+        Status::Completed,
+        Status::Failed,
+    ];
+    for status in all_statuses {
+        let tasks = db.list_tasks(Some(status))?;
+        for task in &tasks {
+            let duration = match (
+                task.started_at.as_deref(),
+                task.finished_at.as_deref(),
+                status,
+            ) {
+                (Some(s), Some(e), _) => format_duration_between(s, e),
+                (Some(s), None, Status::Running) => format_elapsed_since(s),
+                _ => String::new(),
+            };
+            let linear = if task.linear_issue_id.is_empty() {
+                "-"
+            } else {
+                &task.linear_issue_id
+            };
+            let description = task.prompt.lines().next().unwrap_or(&task.prompt);
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                task.id, task.task_type, task.status, linear, duration, description,
+            );
+        }
+    }
     Ok(())
 }
 

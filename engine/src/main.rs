@@ -137,10 +137,11 @@ fn main() -> anyhow::Result<()> {
         cli::Commands::Status {
             watch,
             compact,
+            plain,
             interval,
         } => {
             let db = open_db()?;
-            commands::task::cmd_status(&db, watch, compact, interval)?;
+            commands::task::cmd_status(&db, watch, compact, plain, interval)?;
         }
 
         cli::Commands::View { id } => {
@@ -435,10 +436,12 @@ mod tests {
                 Commands::Status {
                     watch,
                     compact,
+                    plain,
                     interval,
                 } => {
                     assert!(!watch);
                     assert!(!compact);
+                    assert!(!plain);
                     assert_eq!(interval, 3);
                 }
                 other => panic!("expected Status, got {other:?}"),
@@ -459,11 +462,41 @@ mod tests {
                 Commands::Status {
                     watch,
                     compact,
+                    plain,
                     interval,
                 } => {
                     assert!(watch);
                     assert!(compact);
+                    assert!(!plain);
                     assert_eq!(interval, 5);
+                }
+                other => panic!("expected Status, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_status_plain_flag() {
+            match parse(&["status", "--plain"]) {
+                Commands::Status {
+                    watch,
+                    compact,
+                    plain,
+                    interval,
+                } => {
+                    assert!(!watch);
+                    assert!(!compact);
+                    assert!(plain);
+                    assert_eq!(interval, 3);
+                }
+                other => panic!("expected Status, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_status_plain_short_flag() {
+            match parse(&["st", "-p"]) {
+                Commands::Status { plain, .. } => {
+                    assert!(plain);
                 }
                 other => panic!("expected Status, got {other:?}"),
             }
