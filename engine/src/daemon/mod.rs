@@ -156,19 +156,26 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 last_cancel_check = Instant::now();
             }
 
-            match queue::try_launch_one(
-                &db,
-                werma_dir,
-                max_concurrent,
-                launch_stagger_secs,
-                last_launch,
-                &tmux,
-            ) {
-                Ok(true) => last_launch = Some(Instant::now()),
-                Ok(false) => {}
-                Err(e) => {
-                    last_launch = Some(Instant::now());
-                    log_daemon(&log_path, &format!("queue launch error: {e}"));
+            // Drain the queue: launch as many tasks as possible in this tick,
+            // respecting max_concurrent and stagger cooldown.
+            // try_launch_one returns false when cooldown hasn't elapsed yet or no
+            // more tasks are available — either way, stop trying this tick.
+            loop {
+                match queue::try_launch_one(
+                    &db,
+                    werma_dir,
+                    max_concurrent,
+                    launch_stagger_secs,
+                    last_launch,
+                    &tmux,
+                ) {
+                    Ok(true) => last_launch = Some(Instant::now()),
+                    Ok(false) => break,
+                    Err(e) => {
+                        last_launch = Some(Instant::now());
+                        log_daemon(&log_path, &format!("queue launch error: {e}"));
+                        break;
+                    }
                 }
             }
 
