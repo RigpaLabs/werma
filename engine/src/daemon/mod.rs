@@ -118,7 +118,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     // Optional: absent if LINEAR_API_KEY is not configured.
     let linear_merge = merge::RealLinearMerge::new().ok();
     let linear_poll = crate::linear::LinearClient::new().ok();
-    let expected_team_key = crate::linear::configured_team_key().unwrap_or_default();
+    let expected_team_keys = crate::linear::configured_team_keys().unwrap_or_default();
 
     loop {
         let tick_start = Instant::now();
@@ -146,7 +146,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                         werma_dir,
                         lp,
                         &notifier,
-                        &expected_team_key,
+                        &expected_team_keys,
                     ) {
                         log_daemon(&log_path, &format!("cancel check error: {e}"));
                     }

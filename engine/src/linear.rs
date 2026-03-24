@@ -85,13 +85,84 @@ impl LinearApi for LinearClient {
 
 const LINEAR_API: &str = "https://api.linear.app/graphql";
 
-/// Configuration stored in ~/.werma/linear.json.
+/// Per-team configuration (team_id, team_key, and workflow status mapping).
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct LinearConfig {
+pub struct TeamConfig {
     pub team_id: String,
     #[serde(default)]
     pub team_key: String,
     pub statuses: std::collections::HashMap<String, String>,
+}
+
+/// Configuration stored in ~/.werma/linear.json.
+/// Supports both legacy single-team format and new multi-team format.
+///
+/// Legacy format:   `{ "team_id": "...", "team_key": "RIG", "statuses": {...} }`
+/// Multi-team:      `{ "teams": [ { "team_id": "...", "team_key": "RIG", "statuses": {...} }, ... ] }`
+#[derive(Debug, Clone)]
+pub struct LinearConfig {
+    pub teams: Vec<TeamConfig>,
+}
+
+/// For backward compatibility: the primary team (first in the list).
+impl LinearConfig {
+    pub fn primary_team(&self) -> Option<&TeamConfig> {
+        self.teams.first()
+    }
+
+    /// Look up team config by team_key (e.g. "RIG", "FAT").
+    pub fn team_by_key(&self, key: &str) -> Option<&TeamConfig> {
+        self.teams.iter().find(|t| t.team_key == key)
+    }
+
+    /// All configured team keys.
+    pub fn team_keys(&self) -> Vec<&str> {
+        self.teams.iter().map(|t| t.team_key.as_str()).collect()
+    }
+
+    /// Resolve a status name to a state ID for a given team key.
+    /// Falls back to primary team if team_key is empty.
+    pub fn status_id(&self, team_key: &str, status_name: &str) -> Option<&String> {
+        let team = if team_key.is_empty() {
+            self.primary_team()
+        } else {
+            self.team_by_key(team_key).or(self.primary_team())
+        };
+        team.and_then(|t| t.statuses.get(status_name))
+    }
+}
+
+// Custom serde: support both legacy single-team and new multi-team format.
+impl serde::Serialize for LinearConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Multi<'a> {
+            teams: &'a Vec<TeamConfig>,
+        }
+        Multi { teams: &self.teams }.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for LinearConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+
+        // New format: { "teams": [...] }
+        if raw.get("teams").is_some() {
+            #[derive(serde::Deserialize)]
+            struct Multi {
+                teams: Vec<TeamConfig>,
+            }
+            let m: Multi = serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
+            return Ok(LinearConfig { teams: m.teams });
+        }
+
+        // Legacy format: { "team_id": "...", "team_key": "...", "statuses": {...} }
+        let single: TeamConfig = serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
+        Ok(LinearConfig {
+            teams: vec![single],
+        })
+    }
 }
 
 pub struct LinearClient {
@@ -142,17 +213,19 @@ impl LinearClient {
         Ok(json["data"].clone())
     }
 
-    /// Discover team and workflow statuses, save to ~/.werma/linear.json.
+    /// Discover all teams and their workflow statuses, save to ~/.werma/linear.json.
     pub fn setup(&self) -> Result<()> {
         let config_path = config_path()?;
 
         // Check if already configured
         if config_path.exists() {
             let existing = load_config()?;
-            if !existing.team_id.is_empty() {
+            if !existing.teams.is_empty() {
+                let keys: Vec<&str> = existing.team_keys();
                 println!(
-                    "Already configured: {} ({})",
-                    existing.team_key, existing.team_id
+                    "Already configured: {} team(s): {}",
+                    keys.len(),
+                    keys.join(", ")
                 );
                 println!("  Delete ~/.werma/linear.json to reconfigure");
                 return Ok(());
@@ -161,32 +234,59 @@ impl LinearClient {
 
         println!("Discovering Linear workspace...");
 
-        // Get teams
+        // Get all teams
         let data = self.query("{ teams { nodes { id key name } } }", &json!({}))?;
-        let teams = data["teams"]["nodes"]
+        let api_teams = data["teams"]["nodes"]
             .as_array()
             .context("no teams found")?;
 
-        if teams.is_empty() {
+        if api_teams.is_empty() {
             bail!("no teams found in Linear workspace");
         }
 
-        let team = &teams[0];
-        let team_id = team["id"].as_str().context("team has no id")?.to_string();
-        let team_key = team["key"].as_str().unwrap_or("").to_string();
-        let team_name = team["name"].as_str().unwrap_or("").to_string();
-
-        if teams.len() > 1 {
-            println!("Multiple teams found, using first:");
-            for t in teams {
-                let name = t["name"].as_str().unwrap_or("?");
-                let key = t["key"].as_str().unwrap_or("?");
-                println!("  {name} ({key})");
-            }
+        println!("Found {} team(s):", api_teams.len());
+        for t in api_teams {
+            let name = t["name"].as_str().unwrap_or("?");
+            let key = t["key"].as_str().unwrap_or("?");
+            println!("  {name} ({key})");
         }
-        println!("Team: {team_name} ({team_key})");
 
-        // Get workflow statuses for this team
+        // Discover statuses for each team
+        let mut team_configs = Vec::new();
+        for team in api_teams {
+            let team_id = team["id"].as_str().context("team has no id")?.to_string();
+            let team_key = team["key"].as_str().unwrap_or("").to_string();
+            let team_name = team["name"].as_str().unwrap_or("").to_string();
+
+            let statuses = self.discover_team_statuses(&team_id)?;
+
+            println!("\n{team_name} ({team_key}) — {} statuses:", statuses.len());
+            for (name, id) in &statuses {
+                println!("  {name}: {id}");
+            }
+
+            team_configs.push(TeamConfig {
+                team_id,
+                team_key,
+                statuses,
+            });
+        }
+
+        let config = LinearConfig {
+            teams: team_configs,
+        };
+
+        save_config(&config)?;
+        println!("\nConfig saved to {}", config_path.display());
+
+        Ok(())
+    }
+
+    /// Discover workflow statuses for a single team. Extracted from setup() for reuse.
+    fn discover_team_statuses(
+        &self,
+        team_id: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
         let states_query = r#"
             query($teamId: ID!) {
                 workflowStates(filter: { team: { id: { eq: $teamId } } }) {
@@ -201,7 +301,6 @@ impl LinearClient {
 
         let mut statuses = std::collections::HashMap::new();
 
-        // Map by name (case-insensitive) and type
         let find_by_name = |name: &str| -> Option<String> {
             states
                 .iter()
@@ -220,7 +319,6 @@ impl LinearClient {
                 .and_then(|s| s["id"].as_str().map(String::from))
         };
 
-        // Core statuses (by type)
         if let Some(id) = find_by_type("backlog") {
             statuses.insert("backlog".to_string(), id);
         }
@@ -233,8 +331,6 @@ impl LinearClient {
         if let Some(id) = find_by_type("canceled") {
             statuses.insert("canceled".to_string(), id);
         }
-
-        // Name-based statuses
         if let Some(id) = find_by_name("Blocked") {
             statuses.insert("blocked".to_string(), id);
         }
@@ -257,32 +353,18 @@ impl LinearClient {
             statuses.insert("failed".to_string(), id);
         }
 
-        let config = LinearConfig {
-            team_id,
-            team_key,
-            statuses,
-        };
-
-        save_config(&config)?;
-        println!("Config saved to {}", config_path.display());
-
-        // Print discovered statuses
-        println!("\nStatuses:");
-        for (name, id) in &config.statuses {
-            println!("  {name}: {id}");
-        }
-
-        Ok(())
+        Ok(statuses)
     }
 
     /// Pull Todo issues from Linear and create werma tasks.
     pub fn sync(&self, db: &Db) -> Result<()> {
         let config = load_config()?;
-        if config.team_id.is_empty() {
+        if config.teams.is_empty() {
             bail!("Linear not configured. Run: werma linear setup");
         }
 
-        let todo_status_id = config
+        let primary = config.primary_team().context("no teams configured")?;
+        let todo_status_id = primary
             .statuses
             .get("todo")
             .context("'todo' status not found in linear.json")?;
@@ -310,7 +392,7 @@ impl LinearClient {
 
         let data = self.query(
             issues_query,
-            &json!({"teamId": config.team_id, "stateId": todo_status_id}),
+            &json!({"teamId": primary.team_id, "stateId": todo_status_id}),
         )?;
 
         let issues = data["issues"]["nodes"]
@@ -404,7 +486,7 @@ impl LinearClient {
             db.insert_task(&task)?;
 
             // Move issue to In Progress
-            if let Some(ip_id) = config.statuses.get("in_progress") {
+            if let Some(ip_id) = primary.statuses.get("in_progress") {
                 if let Err(e) = self.move_issue(issue_id, ip_id) {
                     eprintln!("warn: failed to move {identifier} to in_progress during sync: {e}");
                 }
@@ -453,12 +535,10 @@ impl LinearClient {
 
         self.comment(&task.linear_issue_id, &comment)?;
 
-        // If completed, move to Done
+        // If completed, move to Done (uses move_issue_by_name which resolves
+        // the correct team's status ID from the issue's team context).
         if task.status == Status::Completed {
-            let config = load_config()?;
-            if let Some(done_id) = config.statuses.get("done") {
-                self.move_issue(&task.linear_issue_id, done_id)?;
-            }
+            self.move_issue_by_name(&task.linear_issue_id, "done")?;
         }
 
         db.set_linear_pushed(task_id, true)?;
@@ -520,12 +600,13 @@ impl LinearClient {
     }
 
     /// Move an issue to a status by status name (looks up in config).
+    /// Resolves the correct team's status ID from the issue identifier prefix.
     pub fn move_issue_by_name(&self, issue_id: &str, status_name: &str) -> Result<()> {
         let config = load_config()?;
+        let team_key = team_key_from_identifier(issue_id);
         let state_id = config
-            .statuses
-            .get(status_name)
-            .context(format!("unknown status: {status_name}"))?;
+            .status_id(&team_key, status_name)
+            .with_context(|| format!("unknown status '{status_name}' for team '{team_key}'"))?;
         self.move_issue(issue_id, state_id)
     }
 
@@ -627,6 +708,12 @@ impl LinearClient {
         identifier: &str,
     ) -> Result<(String, String, String, String, Vec<String>)> {
         let config = load_config()?;
+        let team_key = team_key_from_identifier(identifier);
+        let team = config
+            .team_by_key(&team_key)
+            .or(config.primary_team())
+            .context("no teams configured")?;
+
         // Parse "RIG-95" → number 95
         let number: i64 = identifier
             .rsplit('-')
@@ -646,7 +733,7 @@ impl LinearClient {
                     }
                 }
             }"#,
-            &json!({"teamId": config.team_id, "number": number}),
+            &json!({"teamId": team.team_id, "number": number}),
         )?;
 
         let nodes = data["issues"]["nodes"]
@@ -679,75 +766,85 @@ impl LinearClient {
         Ok((id, ident, title, description, labels))
     }
 
-    /// Get issues filtered by team and status name.
+    /// Get issues filtered by status name, across all configured teams.
     pub fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<Value>> {
         let config = load_config()?;
-        let state_id = match config.statuses.get(status_name) {
-            Some(id) if !id.is_empty() => id.clone(),
-            _ => return Ok(vec![]),
-        };
+        let mut all_issues = Vec::new();
 
-        let data = self.query(
-            r#"query($teamId: ID!, $stateId: ID!) {
-                issues(
-                    filter: {
-                        team: { id: { eq: $teamId } },
-                        state: { id: { eq: $stateId } }
-                    },
-                    orderBy: updatedAt
-                ) {
-                    nodes {
-                        id
-                        identifier
-                        title
-                        description
-                        priority
-                        estimate
-                        state { type }
-                        labels { nodes { name } }
+        for team in &config.teams {
+            let state_id = match team.statuses.get(status_name) {
+                Some(id) if !id.is_empty() => id.clone(),
+                _ => continue,
+            };
+
+            let data = self.query(
+                r#"query($teamId: ID!, $stateId: ID!) {
+                    issues(
+                        filter: {
+                            team: { id: { eq: $teamId } },
+                            state: { id: { eq: $stateId } }
+                        },
+                        orderBy: updatedAt
+                    ) {
+                        nodes {
+                            id
+                            identifier
+                            title
+                            description
+                            priority
+                            estimate
+                            state { type }
+                            labels { nodes { name } }
+                        }
                     }
-                }
-            }"#,
-            &json!({"teamId": config.team_id, "stateId": state_id}),
-        )?;
+                }"#,
+                &json!({"teamId": team.team_id, "stateId": state_id}),
+            )?;
 
-        Ok(data["issues"]["nodes"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default())
+            if let Some(issues) = data["issues"]["nodes"].as_array() {
+                all_issues.extend(issues.clone());
+            }
+        }
+
+        Ok(all_issues)
     }
-    /// Get issues filtered by team and label name.
+
+    /// Get issues filtered by label name, across all configured teams.
     pub fn get_issues_by_label(&self, label_name: &str) -> Result<Vec<Value>> {
         let config = load_config()?;
+        let mut all_issues = Vec::new();
 
-        let data = self.query(
-            r#"query($teamId: ID!, $label: String!) {
-                issues(
-                    filter: {
-                        team: { id: { eq: $teamId } },
-                        labels: { some: { name: { eqIgnoreCase: $label } } }
-                    },
-                    orderBy: updatedAt
-                ) {
-                    nodes {
-                        id
-                        identifier
-                        title
-                        description
-                        priority
-                        estimate
-                        state { type }
-                        labels { nodes { id name } }
+        for team in &config.teams {
+            let data = self.query(
+                r#"query($teamId: ID!, $label: String!) {
+                    issues(
+                        filter: {
+                            team: { id: { eq: $teamId } },
+                            labels: { some: { name: { eqIgnoreCase: $label } } }
+                        },
+                        orderBy: updatedAt
+                    ) {
+                        nodes {
+                            id
+                            identifier
+                            title
+                            description
+                            priority
+                            estimate
+                            state { type }
+                            labels { nodes { id name } }
+                        }
                     }
-                }
-            }"#,
-            &json!({"teamId": config.team_id, "label": label_name}),
-        )?;
+                }"#,
+                &json!({"teamId": team.team_id, "label": label_name}),
+            )?;
 
-        Ok(data["issues"]["nodes"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default())
+            if let Some(issues) = data["issues"]["nodes"].as_array() {
+                all_issues.extend(issues.clone());
+            }
+        }
+
+        Ok(all_issues)
     }
 
     /// Remove a label from an issue by label name.
@@ -795,6 +892,11 @@ impl LinearClient {
     pub fn add_label(&self, issue_id: &str, label_name: &str) -> Result<()> {
         let uuid = self.resolve_uuid(issue_id)?;
         let config = load_config()?;
+        let team_key = team_key_from_identifier(issue_id);
+        let team = config
+            .team_by_key(&team_key)
+            .or(config.primary_team())
+            .context("no teams configured")?;
 
         // Find the label ID by name from team labels, and get the issue's current labels
         let data = self.query(
@@ -806,7 +908,7 @@ impl LinearClient {
                     nodes { id }
                 }
             }"#,
-            &json!({"issueId": uuid, "teamId": config.team_id, "name": label_name}),
+            &json!({"issueId": uuid, "teamId": team.team_id, "name": label_name}),
         )?;
 
         let new_label_id = data["issueLabels"]["nodes"][0]["id"]
@@ -844,9 +946,33 @@ fn config_path() -> Result<std::path::PathBuf> {
 }
 
 /// Get the configured team key (e.g. "RIG") from ~/.werma/linear.json.
+/// Returns the primary (first) team key for backward compatibility.
 pub fn configured_team_key() -> Result<String> {
     let config = load_config()?;
-    Ok(config.team_key)
+    Ok(config
+        .primary_team()
+        .map(|t| t.team_key.clone())
+        .unwrap_or_default())
+}
+
+/// Get all configured team keys (e.g. ["RIG", "FAT"]).
+pub fn configured_team_keys() -> Result<Vec<String>> {
+    let config = load_config()?;
+    Ok(config.teams.iter().map(|t| t.team_key.clone()).collect())
+}
+
+/// Extract the team key prefix from an issue identifier (e.g. "RIG-123" → "RIG").
+/// Returns empty string for UUIDs or unparseable identifiers.
+pub fn team_key_from_identifier(identifier: &str) -> String {
+    if let Some(pos) = identifier.rfind('-') {
+        let prefix = &identifier[..pos];
+        let suffix = &identifier[pos + 1..];
+        // Only treat as team key if suffix is all digits (e.g. "RIG-123")
+        if suffix.chars().all(|c| c.is_ascii_digit()) && !suffix.is_empty() {
+            return prefix.to_string();
+        }
+    }
+    String::new()
 }
 
 fn load_config() -> Result<LinearConfig> {
@@ -1354,5 +1480,134 @@ mod tests {
             "Found mutation(s) using ID! instead of String!:\n{}",
             bad_lines.join("\n")
         );
+    }
+
+    // ─── Multi-team config tests ────────────────────────────────────────
+
+    #[test]
+    fn multi_team_config_deserialize() {
+        let json = r#"{
+            "teams": [
+                {
+                    "team_id": "id-rig",
+                    "team_key": "RIG",
+                    "statuses": {"todo": "s1", "in_progress": "s2", "done": "s3"}
+                },
+                {
+                    "team_id": "id-fat",
+                    "team_key": "FAT",
+                    "statuses": {"todo": "s4", "in_progress": "s5", "done": "s6"}
+                }
+            ]
+        }"#;
+        let config: LinearConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.teams.len(), 2);
+        assert_eq!(config.teams[0].team_key, "RIG");
+        assert_eq!(config.teams[1].team_key, "FAT");
+        assert_eq!(config.team_keys(), vec!["RIG", "FAT"]);
+    }
+
+    #[test]
+    fn legacy_single_team_config_deserialize() {
+        let json = r#"{
+            "team_id": "id-rig",
+            "team_key": "RIG",
+            "statuses": {"todo": "s1", "done": "s2"}
+        }"#;
+        let config: LinearConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.teams.len(), 1);
+        assert_eq!(config.teams[0].team_key, "RIG");
+        assert_eq!(config.teams[0].team_id, "id-rig");
+    }
+
+    #[test]
+    fn multi_team_config_roundtrip() {
+        let config = LinearConfig {
+            teams: vec![
+                TeamConfig {
+                    team_id: "id-1".to_string(),
+                    team_key: "RIG".to_string(),
+                    statuses: [("todo".to_string(), "s1".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+                TeamConfig {
+                    team_id: "id-2".to_string(),
+                    team_key: "FAT".to_string(),
+                    statuses: [("todo".to_string(), "s2".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: LinearConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.teams.len(), 2);
+        assert_eq!(loaded.team_by_key("FAT").unwrap().team_id, "id-2");
+    }
+
+    #[test]
+    fn team_by_key_lookup() {
+        let config = LinearConfig {
+            teams: vec![
+                TeamConfig {
+                    team_id: "id-rig".to_string(),
+                    team_key: "RIG".to_string(),
+                    statuses: [("done".to_string(), "rig-done".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+                TeamConfig {
+                    team_id: "id-fat".to_string(),
+                    team_key: "FAT".to_string(),
+                    statuses: [("done".to_string(), "fat-done".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+            ],
+        };
+        assert_eq!(config.team_by_key("RIG").unwrap().team_id, "id-rig");
+        assert_eq!(config.team_by_key("FAT").unwrap().team_id, "id-fat");
+        assert!(config.team_by_key("UNKNOWN").is_none());
+    }
+
+    #[test]
+    fn status_id_resolves_per_team() {
+        let config = LinearConfig {
+            teams: vec![
+                TeamConfig {
+                    team_id: "id-rig".to_string(),
+                    team_key: "RIG".to_string(),
+                    statuses: [("in_progress".to_string(), "rig-ip".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+                TeamConfig {
+                    team_id: "id-fat".to_string(),
+                    team_key: "FAT".to_string(),
+                    statuses: [("in_progress".to_string(), "fat-ip".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+            ],
+        };
+        assert_eq!(config.status_id("RIG", "in_progress").unwrap(), "rig-ip");
+        assert_eq!(config.status_id("FAT", "in_progress").unwrap(), "fat-ip");
+        // Empty team key falls back to primary
+        assert_eq!(config.status_id("", "in_progress").unwrap(), "rig-ip");
+    }
+
+    #[test]
+    fn team_key_from_identifier_extracts_prefix() {
+        assert_eq!(team_key_from_identifier("RIG-123"), "RIG");
+        assert_eq!(team_key_from_identifier("FAT-42"), "FAT");
+        assert_eq!(team_key_from_identifier("AR-1"), "AR");
+        // UUIDs should return empty
+        assert_eq!(
+            team_key_from_identifier("d199cc43-40ef-4e63-9caa-467506b781f6"),
+            ""
+        );
+        // No dash
+        assert_eq!(team_key_from_identifier("nodash"), "");
     }
 }
