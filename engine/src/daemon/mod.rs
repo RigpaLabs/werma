@@ -107,7 +107,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     let mut cleanliness_notified: std::collections::HashMap<PathBuf, Instant> =
         std::collections::HashMap::new();
     let mut last_zombie_check = Instant::now();
-    let mut last_cancel_check = Instant::now();
+    let mut last_cancel_check = Instant::now() - Duration::from_secs(CANCEL_CHECK_INTERVAL_SECS);
     let mut last_cleanliness_check =
         Instant::now() - Duration::from_secs(CLEANLINESS_CHECK_INTERVAL_SECS);
 

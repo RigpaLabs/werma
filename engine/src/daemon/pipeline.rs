@@ -33,7 +33,28 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
     let cmd_runner = RealCommandRunner;
     let notifier = RealNotifier;
 
+    let now = chrono::Local::now().naive_local();
+
     for task in &tasks {
+        // TTL: skip callbacks for tasks finished more than 1 hour ago.
+        if let Some(ref finished) = task.finished_at {
+            if let Ok(finished_dt) =
+                chrono::NaiveDateTime::parse_from_str(finished, "%Y-%m-%dT%H:%M:%S")
+            {
+                if now.signed_duration_since(finished_dt).num_seconds() > 3600 {
+                    log_daemon(
+                        &log_path,
+                        &format!(
+                            "[CALLBACK] {}: {} — TTL expired (finished >1h ago), marking pushed",
+                            task.linear_issue_id, task.id
+                        ),
+                    );
+                    let _ = db.set_linear_pushed(&task.id, true);
+                    continue;
+                }
+            }
+        }
+
         if !task.pipeline_stage.is_empty() {
             let Some(ref linear_client) = linear_client else {
                 continue;
@@ -239,5 +260,57 @@ mod tests {
 
         let unpushed = db.unpushed_linear_tasks().unwrap();
         assert!(unpushed.is_empty());
+    }
+
+    #[test]
+    fn callback_ttl_marks_pushed_when_finished_over_1h_ago() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = Db::open_in_memory().unwrap();
+
+        // Task finished 2 hours ago — should be TTL'd
+        let mut task = make_task("20260324-ttl", "engineer", "pipeline-engineer");
+        let two_hours_ago = (chrono::Local::now() - chrono::Duration::hours(2))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        task.finished_at = Some(two_hours_ago);
+        db.insert_task(&task).unwrap();
+
+        // Verify it's in unpushed list before
+        assert_eq!(db.unpushed_linear_tasks().unwrap().len(), 1);
+
+        super::process_completed_tasks(&db, dir.path()).unwrap();
+
+        // After TTL, should be marked as pushed
+        let unpushed = db.unpushed_linear_tasks().unwrap();
+        assert!(unpushed.is_empty(), "TTL'd task should be marked pushed");
+    }
+
+    #[test]
+    fn callback_ttl_does_not_skip_recent_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = Db::open_in_memory().unwrap();
+
+        // Task finished 5 minutes ago — should NOT be TTL'd
+        let mut task = make_task("20260324-recent", "engineer", "pipeline-engineer");
+        let five_min_ago = (chrono::Local::now() - chrono::Duration::minutes(5))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        task.finished_at = Some(five_min_ago);
+        db.insert_task(&task).unwrap();
+
+        // Callback will fire (not TTL'd) — even if it fails/succeeds, the point
+        // is that TTL didn't skip it. Verify the task was NOT skipped by TTL
+        // by checking that the callback attempted to process it (log file will have output).
+        let _ = super::process_completed_tasks(&db, dir.path());
+
+        let log_content =
+            std::fs::read_to_string(dir.path().join("logs/daemon.log")).unwrap_or_default();
+        // Should NOT contain TTL skip message
+        assert!(
+            !log_content.contains("TTL expired"),
+            "recent task should not be TTL'd"
+        );
     }
 }
