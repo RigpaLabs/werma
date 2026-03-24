@@ -139,9 +139,10 @@ fn main() -> anyhow::Result<()> {
             compact,
             plain,
             interval,
+            all,
         } => {
             let db = open_db()?;
-            commands::task::cmd_status(&db, watch, compact, plain, interval)?;
+            commands::task::cmd_status(&db, watch, compact, plain, interval, all)?;
         }
 
         cli::Commands::View { id } => {
@@ -438,11 +439,13 @@ mod tests {
                     compact,
                     plain,
                     interval,
+                    all,
                 } => {
                     assert!(!watch);
                     assert!(!compact);
                     assert!(!plain);
                     assert_eq!(interval, 3);
+                    assert!(!all);
                 }
                 other => panic!("expected Status, got {other:?}"),
             }
@@ -464,11 +467,13 @@ mod tests {
                     compact,
                     plain,
                     interval,
+                    all,
                 } => {
                     assert!(watch);
                     assert!(compact);
                     assert!(!plain);
                     assert_eq!(interval, 5);
+                    assert!(!all);
                 }
                 other => panic!("expected Status, got {other:?}"),
             }
@@ -482,11 +487,23 @@ mod tests {
                     compact,
                     plain,
                     interval,
+                    all,
                 } => {
                     assert!(!watch);
                     assert!(!compact);
                     assert!(plain);
                     assert_eq!(interval, 3);
+                    assert!(!all);
+                }
+                other => panic!("expected Status, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_status_all_flag() {
+            match parse(&["st", "--all"]) {
+                Commands::Status { all, .. } => {
+                    assert!(all);
                 }
                 other => panic!("expected Status, got {other:?}"),
             }

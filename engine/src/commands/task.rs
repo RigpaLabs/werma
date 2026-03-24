@@ -113,7 +113,26 @@ pub fn cmd_list(db: &Db, status_filter: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-pub fn cmd_status(db: &Db, watch: bool, compact: bool, plain: bool, interval: u64) -> Result<()> {
+/// Default number of recent completed/failed/canceled tasks to show.
+const DEFAULT_RECENT_LIMIT: usize = 10;
+
+/// Fetch terminal-status tasks: recent (sorted by finished_at DESC, limited) or all.
+fn fetch_terminal_tasks(db: &Db, status: Status, show_all: bool) -> Result<Vec<Task>> {
+    if show_all {
+        db.list_tasks(Some(status))
+    } else {
+        db.list_recent_tasks(status, DEFAULT_RECENT_LIMIT)
+    }
+}
+
+pub fn cmd_status(
+    db: &Db,
+    watch: bool,
+    compact: bool,
+    plain: bool,
+    interval: u64,
+    all: bool,
+) -> Result<()> {
     // --plain and --watch are mutually exclusive: plain is for scripting (single snapshot),
     // watch is an interactive TUI loop. Combining them makes no sense.
     if plain && watch {
@@ -124,7 +143,7 @@ pub fn cmd_status(db: &Db, watch: bool, compact: bool, plain: bool, interval: u6
     let use_plain = plain || !std::io::stdout().is_terminal();
 
     if use_plain {
-        return render_plain(db);
+        return render_plain(db, all);
     }
 
     let term_width = terminal_size::terminal_size()
@@ -174,6 +193,7 @@ pub fn cmd_status(db: &Db, watch: bool, compact: bool, plain: bool, interval: u6
         let mut completed: Vec<Task> = vec![];
         let mut failed: Vec<Task> = vec![];
         let mut canceled: Vec<Task> = vec![];
+        let mut terminal_counts: Option<(usize, usize, usize)> = None;
         // Track current term width for resize handling
         let mut current_term_width = term_width;
 
@@ -181,9 +201,14 @@ pub fn cmd_status(db: &Db, watch: bool, compact: bool, plain: bool, interval: u6
             if tick_count >= ticks_per_refresh {
                 running = db.list_tasks(Some(Status::Running))?;
                 pending = db.list_tasks(Some(Status::Pending))?;
-                completed = db.list_tasks(Some(Status::Completed))?;
-                failed = db.list_tasks(Some(Status::Failed))?;
-                canceled = db.list_tasks(Some(Status::Canceled))?;
+                completed = fetch_terminal_tasks(db, Status::Completed, all)?;
+                failed = fetch_terminal_tasks(db, Status::Failed, all)?;
+                canceled = fetch_terminal_tasks(db, Status::Canceled, all)?;
+                terminal_counts = if all {
+                    None
+                } else {
+                    Some(db.terminal_task_counts()?)
+                };
                 // Re-read terminal size on each DB refresh to handle resizes
                 current_term_width = terminal_size::terminal_size()
                     .map(|(w, _)| w.0 as usize)
@@ -197,6 +222,7 @@ pub fn cmd_status(db: &Db, watch: bool, compact: bool, plain: bool, interval: u6
                 completed: &completed,
                 failed: &failed,
                 canceled: &canceled,
+                terminal_counts,
             };
             let content = if use_compact {
                 ui::render_compact_buf(&buckets, Some(interval), current_term_width, tick_count)
@@ -214,19 +240,24 @@ pub fn cmd_status(db: &Db, watch: bool, compact: bool, plain: bool, interval: u6
         if auto_compacted {
             eprintln!("tip: terminal width < 60, using compact mode (or pass -c)");
         }
-        render_compact(db, None)?;
+        render_compact(db, None, all)?;
     } else {
-        render_status(db)?;
+        render_status(db, all)?;
     }
     Ok(())
 }
 
-fn render_status(db: &Db) -> Result<()> {
+fn render_status(db: &Db, all: bool) -> Result<()> {
     let running = db.list_tasks(Some(Status::Running))?;
     let pending = db.list_tasks(Some(Status::Pending))?;
-    let completed = db.list_tasks(Some(Status::Completed))?;
-    let failed = db.list_tasks(Some(Status::Failed))?;
-    let canceled = db.list_tasks(Some(Status::Canceled))?;
+    let completed = fetch_terminal_tasks(db, Status::Completed, all)?;
+    let failed = fetch_terminal_tasks(db, Status::Failed, all)?;
+    let canceled = fetch_terminal_tasks(db, Status::Canceled, all)?;
+    let (total_completed, total_failed, total_canceled) = if all {
+        (completed.len(), failed.len(), canceled.len())
+    } else {
+        db.terminal_task_counts()?
+    };
 
     let term_width = terminal_size::terminal_size()
         .map(|(w, _)| w.0 as usize)
@@ -271,19 +302,15 @@ fn render_status(db: &Db) -> Result<()> {
     println!(
         " {} {}     {} {}     {} {}",
         "✓".dimmed(),
-        format!("completed ({})", completed.len()).dimmed(),
+        format!("completed ({total_completed})").dimmed(),
         "✗".red(),
-        format!("failed ({})", failed.len()).red(),
+        format!("failed ({total_failed})").red(),
         "⊘".dimmed(),
-        format!("canceled ({})", canceled.len()).dimmed(),
+        format!("canceled ({total_canceled})").dimmed(),
     );
 
-    // Show newest first: reverse order (DB returns oldest first typically)
-    let recent: Vec<&Task> = completed.iter().rev().take(10).collect();
-    let failed_recent: Vec<&Task> = failed.iter().rev().take(5).collect();
-    let canceled_recent: Vec<&Task> = canceled.iter().rev().take(5).collect();
-
-    for task in &recent {
+    // Data is already sorted by finished_at DESC and limited by the query
+    for task in &completed {
         let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
@@ -291,7 +318,7 @@ fn render_status(db: &Db) -> Result<()> {
         println!("{}", format_task_line(task, &dur));
     }
 
-    for task in &failed_recent {
+    for task in &failed {
         let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
@@ -299,7 +326,7 @@ fn render_status(db: &Db) -> Result<()> {
         println!("{}", format_task_line(task, &dur));
     }
 
-    for task in &canceled_recent {
+    for task in &canceled {
         let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
@@ -311,12 +338,17 @@ fn render_status(db: &Db) -> Result<()> {
     Ok(())
 }
 
-fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
+fn render_compact(db: &Db, interval: Option<u64>, all: bool) -> Result<()> {
     let running = db.list_tasks(Some(Status::Running))?;
     let pending = db.list_tasks(Some(Status::Pending))?;
-    let completed = db.list_tasks(Some(Status::Completed))?;
-    let failed = db.list_tasks(Some(Status::Failed))?;
-    let canceled = db.list_tasks(Some(Status::Canceled))?;
+    let completed = fetch_terminal_tasks(db, Status::Completed, all)?;
+    let failed = fetch_terminal_tasks(db, Status::Failed, all)?;
+    let canceled = fetch_terminal_tasks(db, Status::Canceled, all)?;
+    let (total_completed, total_failed, total_canceled) = if all {
+        (completed.len(), failed.len(), canceled.len())
+    } else {
+        db.terminal_task_counts()?
+    };
 
     let term_width = terminal_size::terminal_size()
         .map(|(w, _)| w.0 as usize)
@@ -374,9 +406,8 @@ fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
         println!(" {sep}");
     }
 
-    // Recent completed (last 5, newest first)
-    let recent: Vec<&Task> = completed.iter().rev().take(5).collect();
-    for task in &recent {
+    // Completed tasks (already sorted by finished_at DESC and limited by query)
+    for task in &completed {
         let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
@@ -392,9 +423,8 @@ fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
         );
     }
 
-    // Recent failed (last 5, newest first)
-    let failed_recent: Vec<&Task> = failed.iter().rev().take(5).collect();
-    for task in &failed_recent {
+    // Failed tasks (already sorted by finished_at DESC and limited by query)
+    for task in &failed {
         let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
@@ -410,9 +440,8 @@ fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
         );
     }
 
-    // Recent canceled (last 5, newest first)
-    let canceled_recent: Vec<&Task> = canceled.iter().rev().take(5).collect();
-    for task in &canceled_recent {
+    // Canceled tasks (already sorted by finished_at DESC and limited by query)
+    for task in &canceled {
         let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
@@ -437,16 +466,17 @@ fn render_compact(db: &Db, interval: Option<u64>) -> Result<()> {
     };
     println!(
         " {} done  {} fail  {} canceled{}",
-        completed.len().to_string().dimmed(),
-        failed.len().to_string().red(),
-        canceled.len().to_string().dimmed(),
+        total_completed.to_string().dimmed(),
+        total_failed.to_string().red(),
+        total_canceled.to_string().dimmed(),
         refresh_str.dimmed(),
     );
 
     Ok(())
 }
 
-fn render_plain(db: &Db) -> Result<()> {
+fn render_plain(db: &Db, all: bool) -> Result<()> {
+    let terminal_statuses = [Status::Completed, Status::Failed, Status::Canceled];
     let all_statuses = [
         Status::Running,
         Status::Pending,
@@ -455,7 +485,11 @@ fn render_plain(db: &Db) -> Result<()> {
         Status::Canceled,
     ];
     for status in all_statuses {
-        let tasks = db.list_tasks(Some(status))?;
+        let tasks = if terminal_statuses.contains(&status) {
+            fetch_terminal_tasks(db, status, all)?
+        } else {
+            db.list_tasks(Some(status))?
+        };
         for task in &tasks {
             let duration = match (
                 task.started_at.as_deref(),
@@ -1139,7 +1173,7 @@ mod tests {
     #[test]
     fn cmd_status_plain_watch_conflict() {
         let db = test_db();
-        let result = cmd_status(&db, true, false, true, 2);
+        let result = cmd_status(&db, true, false, true, 2, false);
         assert!(
             result.is_err(),
             "--plain and --watch must be rejected together"
