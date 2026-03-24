@@ -91,7 +91,7 @@ pub enum Commands {
         #[arg(short, long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..))]
         interval: u64,
 
-        /// Show all completed/failed/canceled tasks (default: last 10)
+        /// Show all completed/failed/canceled tasks (default: last 17, configurable via config.toml)
         #[arg(short, long)]
         all: bool,
     },
