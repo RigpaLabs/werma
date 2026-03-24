@@ -218,6 +218,15 @@ pub fn callback(
             if let Err(e) = db.set_callback_fired_at(task_id) {
                 eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
             }
+            // RIG-274: still add spec:done even when blocked by open PR — ensures
+            // the dedup label is set so re-adding the trigger label won't re-run analyst.
+            if stage == "analyst" {
+                if let Err(e) = linear.add_label(linear_issue_id, "spec:done") {
+                    eprintln!(
+                        "callback: failed to add 'spec:done' label to {linear_issue_id}: {e}"
+                    );
+                }
+            }
             return Ok(());
         }
 
@@ -233,7 +242,7 @@ pub fn callback(
             return Err(e);
         }
 
-        // Analyst label swap: remove trigger label, add "analyze:done"
+        // Analyst label swap: remove trigger label, add "analyze:done" + "spec:done"
         if stage == "analyst" {
             if let Some(ref label) = stage_cfg.linear_label {
                 if let Err(e) = linear.remove_label(linear_issue_id, label) {
@@ -243,6 +252,15 @@ pub fn callback(
                 if let Err(e) = linear.add_label(linear_issue_id, &done_label) {
                     eprintln!(
                         "callback: failed to add '{done_label}' label to {linear_issue_id}: {e}"
+                    );
+                }
+            }
+            // RIG-274: Add spec:done label for robust dedup — prevents re-running
+            // analyst even if trigger label is re-added later.
+            if verdict_str == "done" || verdict_str == "already_done" {
+                if let Err(e) = linear.add_label(linear_issue_id, "spec:done") {
+                    eprintln!(
+                        "callback: failed to add 'spec:done' label to {linear_issue_id}: {e}"
                     );
                 }
             }
@@ -1232,6 +1250,136 @@ stages:
             adds.iter()
                 .any(|(id, label)| id == "RIG-253" && label == "analyze:done"),
             "should add 'analyze:done' label, got: {adds:?}"
+        );
+
+        // RIG-274: spec:done label should also be added
+        assert!(
+            adds.iter()
+                .any(|(id, label)| id == "RIG-253" && label == "spec:done"),
+            "should add 'spec:done' label, got: {adds:?}"
+        );
+    }
+
+    #[test]
+    fn callback_analyst_already_done_adds_spec_done() {
+        // RIG-274: ALREADY_DONE verdict should also add spec:done label
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-274", "done");
+
+        let mut task = crate::db::make_test_task("20260324-274");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-274".to_string();
+        task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&task).unwrap();
+
+        let result = "Issue already has implementation.\nVERDICT=ALREADY_DONE";
+
+        callback(
+            &db,
+            "20260324-274",
+            "analyst",
+            result,
+            "RIG-274",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        let adds = linear.add_label_calls.borrow();
+        assert!(
+            adds.iter()
+                .any(|(id, label)| id == "RIG-274" && label == "spec:done"),
+            "ALREADY_DONE should add 'spec:done' label, got: {adds:?}"
+        );
+    }
+
+    #[test]
+    fn callback_analyst_already_done_with_open_pr_still_adds_spec_done() {
+        // RIG-274: ALREADY_DONE + open PR path should still add spec:done label.
+        // The early return guard (blocking ALREADY_DONE→done when PR exists) was
+        // exiting before reaching the spec:done label code — this test covers that path.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-274c", "in_progress");
+
+        let mut task = crate::db::make_test_task("20260324-274c");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-274c".to_string();
+        task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Simulate an open PR whose branch name contains "RIG-274c".
+        cmd.push_success(r#"[{"number":99,"headRefName":"feat/rig-274c-my-spec"}]"#);
+
+        let result = "Issue already has a spec.\nVERDICT=ALREADY_DONE";
+
+        callback(
+            &db,
+            "20260324-274c",
+            "analyst",
+            result,
+            "RIG-274c",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        let adds = linear.add_label_calls.borrow();
+        assert!(
+            adds.iter()
+                .any(|(id, label)| id == "RIG-274c" && label == "spec:done"),
+            "ALREADY_DONE with open PR should still add 'spec:done' label, got: {adds:?}"
+        );
+    }
+
+    #[test]
+    fn callback_analyst_blocked_does_not_add_spec_done() {
+        // RIG-274: BLOCKED verdict should NOT add spec:done label
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-274b", "blocked");
+
+        let mut task = crate::db::make_test_task("20260324-275");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-274b".to_string();
+        task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&task).unwrap();
+
+        let result = "Cannot proceed, missing requirements.\nVERDICT=BLOCKED";
+
+        callback(
+            &db,
+            "20260324-275",
+            "analyst",
+            result,
+            "RIG-274b",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        let adds = linear.add_label_calls.borrow();
+        assert!(
+            !adds
+                .iter()
+                .any(|(id, label)| id == "RIG-274b" && label == "spec:done"),
+            "BLOCKED should NOT add 'spec:done' label, got: {adds:?}"
         );
     }
 }
