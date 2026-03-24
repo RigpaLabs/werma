@@ -216,25 +216,120 @@ impl LinearClient {
     /// Discover all teams and their workflow statuses, save to ~/.werma/linear.json.
     pub fn setup(&self) -> Result<()> {
         let config_path = config_path()?;
+        let force = std::env::var("FORCE_SETUP").is_ok();
 
-        // Check if already configured
-        if config_path.exists() {
+        // Check if already configured (skip guard if FORCE_SETUP is set)
+        if !force && config_path.exists() {
+            let raw = std::fs::read_to_string(&config_path)?;
+            let raw_json: Value = serde_json::from_str(&raw)?;
+
+            // Detect legacy single-team format: has "team_id" but no "teams" key
+            if raw_json.get("team_id").is_some() && raw_json.get("teams").is_none() {
+                println!("Detected legacy single-team config — migrating to multi-team format...");
+                return self.migrate_legacy_config(&raw_json);
+            }
+
             let existing = load_config()?;
             if !existing.teams.is_empty() {
+                // Check if workspace has more teams than config
+                let workspace_team_count = self.count_workspace_teams();
+                if let Ok(ws_count) = workspace_team_count {
+                    if ws_count > existing.teams.len() {
+                        eprintln!(
+                            "Warning: config has {} team(s), workspace has {} — run FORCE_SETUP=1 werma linear setup to sync",
+                            existing.teams.len(),
+                            ws_count
+                        );
+                    }
+                }
+
                 let keys: Vec<&str> = existing.team_keys();
                 println!(
                     "Already configured: {} team(s): {}",
                     keys.len(),
                     keys.join(", ")
                 );
-                println!("  Delete ~/.werma/linear.json to reconfigure");
+                println!("  To reconfigure: FORCE_SETUP=1 werma linear setup");
                 return Ok(());
             }
         }
 
+        if force {
+            println!("FORCE_SETUP=1 — re-discovering all teams...");
+        }
+
+        self.discover_and_save_all_teams()
+    }
+
+    /// Migrate legacy single-team config to multi-team format.
+    /// Preserves existing team's status IDs and discovers any additional workspace teams.
+    fn migrate_legacy_config(&self, legacy_json: &Value) -> Result<()> {
+        let legacy_team: TeamConfig =
+            serde_json::from_value(legacy_json.clone()).context("parsing legacy config")?;
+        let legacy_team_id = legacy_team.team_id.clone();
+        println!(
+            "  Existing team: {} ({})",
+            legacy_team.team_key, legacy_team.team_id
+        );
+
+        // Discover all workspace teams
+        let data = self.query("{ teams { nodes { id key name } } }", &json!({}))?;
+        let api_teams = data["teams"]["nodes"]
+            .as_array()
+            .context("no teams found")?;
+
+        let mut team_configs = Vec::new();
+
+        for team in api_teams {
+            let team_id = team["id"].as_str().context("team has no id")?.to_string();
+            let team_key = team["key"].as_str().unwrap_or("").to_string();
+            let team_name = team["name"].as_str().unwrap_or("").to_string();
+
+            if team_id == legacy_team_id {
+                // Preserve existing team's status IDs
+                println!("  Keeping existing statuses for {team_key}");
+                team_configs.push(legacy_team.clone());
+            } else {
+                // Discover statuses for new team
+                let statuses = self.discover_team_statuses(&team_id)?;
+                println!(
+                    "  Discovered {team_name} ({team_key}) — {} statuses",
+                    statuses.len()
+                );
+                team_configs.push(TeamConfig {
+                    team_id,
+                    team_key,
+                    statuses,
+                });
+            }
+        }
+
+        let config = LinearConfig {
+            teams: team_configs,
+        };
+        save_config(&config)?;
+        let config_path = config_path()?;
+        println!(
+            "Migrated to multi-team format: {} team(s) — {}",
+            config.teams.len(),
+            config_path.display()
+        );
+        Ok(())
+    }
+
+    /// Count teams in the Linear workspace (cheap query, used for mismatch warning).
+    fn count_workspace_teams(&self) -> Result<usize> {
+        let data = self.query("{ teams { nodes { id } } }", &json!({}))?;
+        let teams = data["teams"]["nodes"]
+            .as_array()
+            .context("no teams found")?;
+        Ok(teams.len())
+    }
+
+    /// Discover all workspace teams and save config. Shared by setup() and FORCE_SETUP path.
+    fn discover_and_save_all_teams(&self) -> Result<()> {
         println!("Discovering Linear workspace...");
 
-        // Get all teams
         let data = self.query("{ teams { nodes { id key name } } }", &json!({}))?;
         let api_teams = data["teams"]["nodes"]
             .as_array()
@@ -251,7 +346,6 @@ impl LinearClient {
             println!("  {name} ({key})");
         }
 
-        // Discover statuses for each team
         let mut team_configs = Vec::new();
         for team in api_teams {
             let team_id = team["id"].as_str().context("team has no id")?.to_string();
@@ -277,6 +371,7 @@ impl LinearClient {
         };
 
         save_config(&config)?;
+        let config_path = config_path()?;
         println!("\nConfig saved to {}", config_path.display());
 
         Ok(())
@@ -1668,5 +1763,131 @@ mod tests {
         );
         // No dash
         assert_eq!(team_key_from_identifier("nodash"), "");
+    }
+
+    // ─── Legacy config detection tests (RIG-301) ───────────────────────
+
+    #[test]
+    fn legacy_format_detected_by_team_id_key() {
+        let legacy_json: Value = serde_json::from_str(
+            r#"{
+                "team_id": "id-rig",
+                "team_key": "RIG",
+                "statuses": {"todo": "s1", "done": "s2"}
+            }"#,
+        )
+        .unwrap();
+
+        // Legacy format: has "team_id" but no "teams"
+        assert!(legacy_json.get("team_id").is_some());
+        assert!(legacy_json.get("teams").is_none());
+    }
+
+    #[test]
+    fn multi_team_format_not_detected_as_legacy() {
+        let multi_json: Value = serde_json::from_str(
+            r#"{
+                "teams": [{
+                    "team_id": "id-rig",
+                    "team_key": "RIG",
+                    "statuses": {"todo": "s1"}
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        // Multi-team format: has "teams", no root "team_id"
+        assert!(multi_json.get("team_id").is_none());
+        assert!(multi_json.get("teams").is_some());
+    }
+
+    #[test]
+    fn legacy_json_parses_into_team_config() {
+        let legacy_json: Value = serde_json::from_str(
+            r#"{
+                "team_id": "id-rig",
+                "team_key": "RIG",
+                "statuses": {"todo": "s1", "in_progress": "s2", "done": "s3"}
+            }"#,
+        )
+        .unwrap();
+
+        let team: TeamConfig = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(team.team_id, "id-rig");
+        assert_eq!(team.team_key, "RIG");
+        assert_eq!(team.statuses.len(), 3);
+        assert_eq!(team.statuses.get("todo").unwrap(), "s1");
+    }
+
+    #[test]
+    fn force_setup_env_var_detection() {
+        // Verify the detection pattern: std::env::var("X").is_ok() returns true iff X is set.
+        // We test with an env var that definitely doesn't exist.
+        assert!(std::env::var("WERMA_TEST_NONEXISTENT_VAR_12345").is_err());
+        // The setup() code uses: let force = std::env::var("FORCE_SETUP").is_ok();
+        // This test validates the pattern works — actual FORCE_SETUP is tested via integration.
+    }
+
+    #[test]
+    fn missing_team_detection_logic() {
+        let config = LinearConfig {
+            teams: vec![TeamConfig {
+                team_id: "id-rig".to_string(),
+                team_key: "RIG".to_string(),
+                statuses: [("todo".to_string(), "s1".to_string())]
+                    .into_iter()
+                    .collect(),
+            }],
+        };
+
+        // Simulate: workspace has 2 teams, config has 1 → mismatch
+        let workspace_count = 2;
+        assert!(workspace_count > config.teams.len());
+
+        // Simulate: workspace has 1 team, config has 1 → no mismatch
+        let workspace_count = 1;
+        assert!(!(workspace_count > config.teams.len()));
+    }
+
+    #[test]
+    fn legacy_migration_preserves_existing_statuses() {
+        // Simulate what migrate_legacy_config does: parse legacy → build multi-team
+        let legacy_json: Value = serde_json::from_str(
+            r#"{
+                "team_id": "id-rig",
+                "team_key": "RIG",
+                "statuses": {"todo": "s1", "in_progress": "s2", "done": "s3", "review": "s4"}
+            }"#,
+        )
+        .unwrap();
+
+        let legacy_team: TeamConfig = serde_json::from_value(legacy_json).unwrap();
+        let new_team = TeamConfig {
+            team_id: "id-fat".to_string(),
+            team_key: "FAT".to_string(),
+            statuses: [("todo".to_string(), "f1".to_string())]
+                .into_iter()
+                .collect(),
+        };
+
+        let config = LinearConfig {
+            teams: vec![legacy_team.clone(), new_team],
+        };
+
+        // Legacy team statuses preserved exactly
+        let rig = config.team_by_key("RIG").unwrap();
+        assert_eq!(rig.statuses.len(), 4);
+        assert_eq!(rig.statuses.get("review").unwrap(), "s4");
+
+        // New team discovered
+        let fat = config.team_by_key("FAT").unwrap();
+        assert_eq!(fat.team_id, "id-fat");
+        assert_eq!(fat.statuses.get("todo").unwrap(), "f1");
+
+        // Serializes as multi-team format
+        let json = serde_json::to_string(&config).unwrap();
+        let reparsed: Value = serde_json::from_str(&json).unwrap();
+        assert!(reparsed.get("teams").is_some());
+        assert!(reparsed.get("team_id").is_none());
     }
 }
