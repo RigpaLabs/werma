@@ -615,6 +615,67 @@ stages:
     }
 
     #[test]
+    fn poll_creates_analyst_task_with_issue_id() {
+        // RIG-274: analyst tasks must include linear_issue_id for visibility in `werma st`
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        let issue = fake_issue(
+            "uuid-happy",
+            "FAT-18",
+            "Test werma issue",
+            &["analyze", "repo:werma"],
+        );
+        linear.set_issues_for_label("analyze", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        let tasks = db
+            .tasks_by_linear_issue("FAT-18", Some("analyst"), false)
+            .unwrap();
+        assert_eq!(tasks.len(), 1, "should create exactly one analyst task");
+        assert_eq!(
+            tasks[0].linear_issue_id, "FAT-18",
+            "analyst task must have linear_issue_id set"
+        );
+        assert_eq!(tasks[0].pipeline_stage, "analyst");
+    }
+
+    #[test]
+    fn poll_skips_analyst_when_engineer_already_ran() {
+        // RIG-274: don't re-run analyst if engineer has already started for the issue
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Insert a completed engineer task for this issue
+        let mut engineer_task = crate::db::make_test_task("20260324-eng");
+        engineer_task.status = crate::models::Status::Completed;
+        engineer_task.linear_issue_id = "RIG-280".to_string();
+        engineer_task.pipeline_stage = "engineer".to_string();
+        db.insert_task(&engineer_task).unwrap();
+
+        let issue = fake_issue(
+            "uuid-eng",
+            "RIG-280",
+            "Test werma issue",
+            &["analyze", "repo:werma"],
+        );
+        linear.set_issues_for_label("analyze", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        let tasks = db
+            .tasks_by_linear_issue("RIG-280", Some("analyst"), false)
+            .unwrap();
+        assert!(
+            tasks.is_empty(),
+            "should not create analyst task when engineer already ran"
+        );
+    }
+
+    #[test]
     fn poll_skips_analyst_when_nonfailed_task_exists() {
         // Existing dedup: non-failed task blocks re-creation
         let db = crate::db::Db::open_in_memory().unwrap();
