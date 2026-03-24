@@ -409,8 +409,8 @@ mod tests {
         .unwrap();
 
         // The reviewer REJECTED transition first moves to "in_progress" (the normal transition).
-        // Then the cycle limit check fires and moves to "blocked" (overriding it).
-        // Final state should be "blocked".
+        // Then the cycle limit check fires and moves to "backlog" (from reviewer config's
+        // blocked transition) — RIG-280: no longer hardcodes "blocked".
         let moves: Vec<String> = linear
             .calls
             .borrow()
@@ -425,15 +425,15 @@ mod tests {
             .collect();
 
         assert!(
-            moves.contains(&"blocked".to_string()),
-            "review cycle limit should escalate to blocked, got moves: {moves:?}"
+            moves.contains(&"backlog".to_string()),
+            "review cycle limit should escalate to backlog (from config), got moves: {moves:?}"
         );
 
-        // Final issue status should be "blocked"
+        // Final issue status should be "backlog"
         assert_eq!(
             linear.issue_status("RIG-231c"),
-            Some("blocked".to_string()),
-            "issue should end up in blocked state"
+            Some("backlog".to_string()),
+            "issue should end up in backlog state"
         );
 
         // No new engineer task should be created (cycle limit was reached)

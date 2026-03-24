@@ -247,6 +247,27 @@ mod tests {
             }
         }
 
+        fn list_recent_tasks(
+            &self,
+            status: crate::models::Status,
+            limit: usize,
+        ) -> anyhow::Result<Vec<crate::models::Task>> {
+            let tasks = self.tasks.borrow();
+            let mut matching: Vec<_> = tasks.values().filter(|t| t.status == status).collect();
+            matching.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
+            Ok(matching.into_iter().take(limit).cloned().collect())
+        }
+
+        fn list_all_tasks_by_finished(
+            &self,
+            status: crate::models::Status,
+        ) -> anyhow::Result<Vec<crate::models::Task>> {
+            let tasks = self.tasks.borrow();
+            let mut matching: Vec<_> = tasks.values().filter(|t| t.status == status).collect();
+            matching.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
+            Ok(matching.into_iter().cloned().collect())
+        }
+
         fn set_task_status(&self, id: &str, status: crate::models::Status) -> anyhow::Result<()> {
             if let Some(task) = self.tasks.borrow_mut().get_mut(id) {
                 task.status = status;

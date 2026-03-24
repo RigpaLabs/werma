@@ -652,7 +652,7 @@ impl LinearClient {
     pub fn get_issue(&self, issue_id: &str) -> Result<(String, String)> {
         let uuid = self.resolve_uuid(issue_id)?;
         let data = self.query(
-            r#"query($id: ID!) {
+            r#"query($id: String!) {
                 issue(id: $id) { title description }
             }"#,
             &json!({"id": uuid}),
@@ -669,7 +669,7 @@ impl LinearClient {
     pub fn get_issue_status(&self, issue_id: &str) -> Result<String> {
         let uuid = self.resolve_uuid(issue_id)?;
         let data = self.query(
-            r#"query($id: ID!) {
+            r#"query($id: String!) {
                 issue(id: $id) { state { name } }
             }"#,
             &json!({"id": uuid}),
@@ -853,7 +853,7 @@ impl LinearClient {
 
         // First, get the issue's current labels to find the label ID
         let data = self.query(
-            r#"query($id: ID!) {
+            r#"query($id: String!) {
                 issue(id: $id) {
                     labels { nodes { id name } }
                 }

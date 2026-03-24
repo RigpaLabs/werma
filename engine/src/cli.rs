@@ -90,6 +90,10 @@ pub enum Commands {
         /// Refresh interval in seconds (default: 3, minimum: 1)
         #[arg(short, long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..))]
         interval: u64,
+
+        /// Show all completed/failed/canceled tasks (default: last 10)
+        #[arg(short, long)]
+        all: bool,
     },
 
     /// Show task details + output
