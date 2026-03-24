@@ -138,6 +138,13 @@ pub fn callback(
         return Ok(());
     }
 
+    let stage_cfg = if let Some(s) = config.stage(stage) {
+        s
+    } else {
+        eprintln!("unknown pipeline stage: {stage}");
+        return Ok(());
+    };
+
     // Post any comment blocks from agent output (non-critical)
     let comments = parse_comments(result);
     for comment_body in &comments {
@@ -160,13 +167,6 @@ pub fn callback(
             }
         }
     }
-
-    let stage_cfg = if let Some(s) = config.stage(stage) {
-        s
-    } else {
-        eprintln!("unknown pipeline stage: {stage}");
-        return Ok(());
-    };
 
     let verdict = parse_verdict(result);
 
@@ -1512,19 +1512,20 @@ stages:
         .unwrap();
 
         let comments = linear.comment_calls.borrow();
-        // Should have at least 2 comments: fallback spec + status line
-        assert!(
-            comments.len() >= 2,
+        // Exactly 2 comments: fallback spec + status line
+        assert_eq!(
+            comments.len(),
+            2,
             "expected fallback spec + status comment, got {}: {comments:?}",
             comments.len()
         );
 
-        // First comment should be the fallback spec with substantive content
-        let spec_comment = &comments[0].1;
-        assert!(
-            spec_comment.contains("## Spec"),
-            "fallback comment should contain spec, got: {spec_comment}"
-        );
+        // Find the fallback spec comment by content (not positional)
+        let spec_comment = comments
+            .iter()
+            .find(|(_, body)| body.contains("## Spec"))
+            .map(|(_, body)| body.as_str())
+            .expect("expected a fallback spec comment");
         assert!(
             spec_comment.contains("Implement feature X."),
             "fallback comment should contain spec body, got: {spec_comment}"
