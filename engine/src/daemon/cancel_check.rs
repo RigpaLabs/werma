@@ -20,12 +20,15 @@ const STUCK_THRESHOLD_SECS: i64 = 7200; // 2 hours
 ///    to this pipeline instance).
 ///
 /// Also flags tasks stuck running for more than `STUCK_THRESHOLD_SECS`.
+///
+/// `expected_team_keys`: all configured team keys. If the issue's team is not in this set,
+/// the task is canceled (moved to an unmanaged team).
 pub fn check_canceled_and_stuck(
     db: &Db,
     werma_dir: &Path,
     linear: &dyn LinearApi,
     notifier: &dyn Notifier,
-    expected_team_key: &str,
+    expected_team_keys: &[String],
 ) -> Result<()> {
     let log_path = werma_dir.join("logs/daemon.log");
 
@@ -81,15 +84,20 @@ pub fn check_canceled_and_stuck(
             continue;
         }
 
-        // Condition 2: Issue moved to a different team.
-        if !expected_team_key.is_empty() && !team_key.is_empty() && team_key != expected_team_key {
+        // Condition 2: Issue moved to an unmanaged team.
+        if !expected_team_keys.is_empty()
+            && !team_key.is_empty()
+            && !expected_team_keys.iter().any(|k| k == &team_key)
+        {
             cancel_task(
                 db,
                 &log_path,
                 task,
                 &format!(
-                    "Linear issue {} moved to team {} (expected {})",
-                    task.linear_issue_id, team_key, expected_team_key
+                    "Linear issue {} moved to team {} (expected one of: {})",
+                    task.linear_issue_id,
+                    team_key,
+                    expected_team_keys.join(", ")
                 ),
                 notifier,
             );
@@ -183,6 +191,10 @@ mod tests {
     use crate::models::Task;
     use crate::traits::fakes::{FakeLinearApi, FakeNotifier};
 
+    fn rig_keys() -> Vec<String> {
+        vec!["RIG".to_string()]
+    }
+
     fn make_pipeline_task(id: &str, issue_id: &str, status: Status) -> Task {
         let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
         Task {
@@ -226,8 +238,14 @@ mod tests {
         let linear = FakeLinearApi::new();
         linear.set_issue_status("RIG-270", "canceled");
 
-        check_canceled_and_stuck(&db, werma_dir.path(), &linear, &FakeNotifier::new(), "RIG")
-            .unwrap();
+        check_canceled_and_stuck(
+            &db,
+            werma_dir.path(),
+            &linear,
+            &FakeNotifier::new(),
+            &rig_keys(),
+        )
+        .unwrap();
 
         let updated = db.task("20260324-001").unwrap().unwrap();
         assert_eq!(updated.status, Status::Canceled);
@@ -235,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn cancels_task_when_issue_moved_to_different_team() {
+    fn cancels_task_when_issue_moved_to_unmanaged_team() {
         let db = Db::open_in_memory().unwrap();
         let werma_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
@@ -244,15 +262,48 @@ mod tests {
         db.insert_task(&task).unwrap();
 
         let linear = FakeLinearApi::new();
-        // Issue moved to FAT team — state is active but team differs from expected "RIG".
-        linear.set_issue_state_and_team("RIG-270", "started", "FAT");
+        // Issue moved to UNKNOWN team — not in expected_team_keys.
+        linear.set_issue_state_and_team("RIG-270", "started", "UNKNOWN");
 
-        check_canceled_and_stuck(&db, werma_dir.path(), &linear, &FakeNotifier::new(), "RIG")
-            .unwrap();
+        check_canceled_and_stuck(
+            &db,
+            werma_dir.path(),
+            &linear,
+            &FakeNotifier::new(),
+            &rig_keys(),
+        )
+        .unwrap();
 
         let updated = db.task("20260324-002").unwrap().unwrap();
         assert_eq!(updated.status, Status::Canceled);
         assert!(updated.finished_at.is_some());
+    }
+
+    #[test]
+    fn keeps_task_alive_when_issue_moved_to_managed_team() {
+        // Multi-team: moving between configured teams should NOT cancel
+        let db = Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_pipeline_task("20260324-002b", "RIG-270", Status::Running);
+        db.insert_task(&task).unwrap();
+
+        let linear = FakeLinearApi::new();
+        linear.set_issue_state_and_team("RIG-270", "started", "FAT");
+
+        let multi_keys = vec!["RIG".to_string(), "FAT".to_string()];
+        check_canceled_and_stuck(
+            &db,
+            werma_dir.path(),
+            &linear,
+            &FakeNotifier::new(),
+            &multi_keys,
+        )
+        .unwrap();
+
+        let updated = db.task("20260324-002b").unwrap().unwrap();
+        assert_eq!(updated.status, Status::Running);
     }
 
     #[test]
@@ -268,8 +319,14 @@ mod tests {
         let linear = FakeLinearApi::new();
         linear.set_issue_status("RIG-271", "canceled");
 
-        check_canceled_and_stuck(&db, werma_dir.path(), &linear, &FakeNotifier::new(), "RIG")
-            .unwrap();
+        check_canceled_and_stuck(
+            &db,
+            werma_dir.path(),
+            &linear,
+            &FakeNotifier::new(),
+            &rig_keys(),
+        )
+        .unwrap();
 
         // Should NOT be canceled because it's not a pipeline task
         let updated = db.task("20260324-003").unwrap().unwrap();
@@ -288,8 +345,14 @@ mod tests {
         let linear = FakeLinearApi::new();
         linear.set_issue_status("RIG-272", "canceled");
 
-        check_canceled_and_stuck(&db, werma_dir.path(), &linear, &FakeNotifier::new(), "RIG")
-            .unwrap();
+        check_canceled_and_stuck(
+            &db,
+            werma_dir.path(),
+            &linear,
+            &FakeNotifier::new(),
+            &rig_keys(),
+        )
+        .unwrap();
 
         let updated = db.task("20260324-004").unwrap().unwrap();
         assert_eq!(updated.status, Status::Canceled);
@@ -303,8 +366,14 @@ mod tests {
 
         let linear = FakeLinearApi::new();
 
-        check_canceled_and_stuck(&db, werma_dir.path(), &linear, &FakeNotifier::new(), "RIG")
-            .unwrap();
+        check_canceled_and_stuck(
+            &db,
+            werma_dir.path(),
+            &linear,
+            &FakeNotifier::new(),
+            &rig_keys(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -320,8 +389,14 @@ mod tests {
         // Issue is still in progress, same team
         linear.set_issue_status("RIG-273", "in_progress");
 
-        check_canceled_and_stuck(&db, werma_dir.path(), &linear, &FakeNotifier::new(), "RIG")
-            .unwrap();
+        check_canceled_and_stuck(
+            &db,
+            werma_dir.path(),
+            &linear,
+            &FakeNotifier::new(),
+            &rig_keys(),
+        )
+        .unwrap();
 
         let updated = db.task("20260324-005").unwrap().unwrap();
         assert_eq!(updated.status, Status::Running);
@@ -342,8 +417,14 @@ mod tests {
         let linear = FakeLinearApi::new();
         linear.set_issue_status("RIG-275", "canceled");
 
-        check_canceled_and_stuck(&db, werma_dir.path(), &linear, &FakeNotifier::new(), "RIG")
-            .unwrap();
+        check_canceled_and_stuck(
+            &db,
+            werma_dir.path(),
+            &linear,
+            &FakeNotifier::new(),
+            &rig_keys(),
+        )
+        .unwrap();
 
         // Both tasks should be canceled — the cache must apply the result to both.
         let updated1 = db.task("20260324-010").unwrap().unwrap();
@@ -366,7 +447,7 @@ mod tests {
 
         let notifier = FakeNotifier::new();
 
-        check_canceled_and_stuck(&db, werma_dir.path(), &linear, &notifier, "RIG").unwrap();
+        check_canceled_and_stuck(&db, werma_dir.path(), &linear, &notifier, &rig_keys()).unwrap();
 
         assert_eq!(notifier.macos_calls.borrow().len(), 1);
         assert_eq!(notifier.slack_calls.borrow().len(), 1);
