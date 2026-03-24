@@ -12,7 +12,7 @@ stages:
     agent: pipeline-analyst
     model: opus
     fallback: sonnet
-    max_turns: 20
+    max_turns: 25
     manual: skip
     prompt: prompts/analyst.md
     transitions:
@@ -30,7 +30,7 @@ stages:
     fallback: sonnet
     light_model: opus
     light_threshold: 2
-    max_turns: 40
+    max_turns: 100
     manual: skip
     prompt: prompts/engineer.md
     transitions:
@@ -45,7 +45,7 @@ stages:
     fallback: sonnet
     recheck_model: sonnet
     max_review_rounds: 3
-    max_turns: 15
+    max_turns: 50
     manual: process
     prompt: prompts/reviewer.md
     transitions:
@@ -61,7 +61,7 @@ stages:
     linear_status: deploy
     agent: pipeline-deployer
     model: sonnet
-    max_turns: 25
+    max_turns: 50
     manual: skip
     prompt: prompts/deployer.md
     transitions:

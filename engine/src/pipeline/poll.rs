@@ -161,11 +161,16 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     None => continue,
                 };
 
-                // Skip if any non-failed task exists for this issue + stage.
-                // This covers active (pending/running), completed-but-unpushed (callback
-                // pending), AND completed-and-pushed tasks where the Linear status didn't
-                // actually move (RIG-209). Failed tasks don't block — poll can retry those.
+                // Skip if an active or callback-pending task exists for this issue + stage.
+                // Active (pending/running) tasks block to prevent duplicates.
+                // Completed-but-unpushed tasks block until callback fires (RIG-209).
+                // Completed+pushed tasks do NOT block — allows re-spawn after rejection
+                // cycles where reviewer sends issue back to In Progress (RIG-277).
                 if db.has_any_nonfailed_task_for_issue_stage(identifier, stage_name)? {
+                    eprintln!(
+                        "  ~ skipping {identifier} stage={stage_name}: \
+                         active or callback-pending task exists"
+                    );
                     total_skipped += 1;
                     continue;
                 }
@@ -314,8 +319,12 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
-            // Skip if any non-failed task exists for this issue + stage (RIG-209).
+            // Skip if active or callback-pending task exists (RIG-209, RIG-277).
             if db.has_any_nonfailed_task_for_issue_stage(identifier, stage_name)? {
+                eprintln!(
+                    "  ~ skipping {identifier} stage={stage_name}: \
+                     active or callback-pending task exists (label path)"
+                );
                 total_skipped += 1;
                 continue;
             }
