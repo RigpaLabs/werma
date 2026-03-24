@@ -25,7 +25,7 @@ pub fn tools_for_type(task_type: &str, has_output: bool) -> String {
         "review" | "analyze" => "Read,Grep,Glob".to_string(),
         "code" | "refactor" => "Read,Edit,Write,Bash,Glob,Grep".to_string(),
         "full" => format!("Read,Edit,Write,Bash,Glob,Grep,{SLACK_READ},{SLACK_WRITE}"),
-        "pipeline-analyst" => "Read,Grep,Glob,Bash,WebSearch,WebFetch".to_string(),
+        "pipeline-analyst" => "Read,Grep,Glob,WebSearch,WebFetch".to_string(),
         "pipeline-engineer" => "Read,Edit,Write,Bash,Glob,Grep,Skill".to_string(),
         "pipeline-reviewer" | "pipeline-qa" | "pipeline-devops" | "pipeline-deployer" => {
             "Read,Glob,Grep,Bash,Skill".to_string()
@@ -597,6 +597,18 @@ mod tests {
         assert!(
             !analyst.contains("linear"),
             "pipeline agents must not have Linear tools"
+        );
+        assert!(
+            !analyst.contains("Bash"),
+            "analyst is read-only — must not have Bash (can bypass Write restriction)"
+        );
+        assert!(
+            !analyst.contains("Write"),
+            "analyst is read-only — must not have Write"
+        );
+        assert!(
+            !analyst.contains("Edit"),
+            "analyst is read-only — must not have Edit"
         );
 
         let engineer = tools_for_type("pipeline-engineer", false);
