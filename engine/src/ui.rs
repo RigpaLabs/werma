@@ -6,6 +6,15 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::dashboard::truncate_line;
 use crate::models::{Status, Task};
 
+/// Task lists grouped by status, used by the rendering functions.
+pub struct StatusBuckets<'a> {
+    pub running: &'a [Task],
+    pub pending: &'a [Task],
+    pub completed: &'a [Task],
+    pub failed: &'a [Task],
+    pub canceled: &'a [Task],
+}
+
 // ─── ANSI color helpers (for String buffers) ─────────────────────────────────
 
 fn green_bold(s: &str) -> String {
@@ -216,15 +225,19 @@ pub fn braille_frame() -> &'static str {
 
 /// Render full status view into a buffer string (for watch mode).
 pub fn render_status_buf(
-    running: &[Task],
-    pending: &[Task],
-    completed: &[Task],
-    failed: &[Task],
+    buckets: &StatusBuckets<'_>,
     interval: Option<u64>,
     term_width: usize,
     tick: u64,
 ) -> String {
     use std::fmt::Write;
+    let StatusBuckets {
+        running,
+        pending,
+        completed,
+        failed,
+        canceled,
+    } = buckets;
     let mut buf = String::new();
 
     // Pixel art mascot header (skipped in compact mode and narrow terminals)
@@ -243,7 +256,7 @@ pub fn render_status_buf(
         green_bold(spinner),
         green_bold(&format!("running ({})", running.len())),
     );
-    for task in running {
+    for task in *running {
         let elapsed = task
             .started_at
             .as_deref()
@@ -271,18 +284,21 @@ pub fn render_status_buf(
         );
     }
 
-    // Completed + Failed
+    // Completed + Failed + Canceled
     let _ = writeln!(
         buf,
-        " {} {}     {} {}",
+        " {} {}     {} {}     {} {}",
         dimmed("✓"),
         dimmed(&format!("completed ({})", completed.len())),
         red("✗"),
         red(&format!("failed ({})", failed.len())),
+        dimmed("⊘"),
+        dimmed(&format!("canceled ({})", canceled.len())),
     );
 
     let recent: Vec<&Task> = completed.iter().rev().take(10).collect();
     let failed_recent: Vec<&Task> = failed.iter().rev().take(5).collect();
+    let canceled_recent: Vec<&Task> = canceled.iter().rev().take(5).collect();
 
     for task in &recent {
         let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
@@ -293,6 +309,14 @@ pub fn render_status_buf(
     }
 
     for task in &failed_recent {
+        let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
+            (Some(s), Some(e)) => crate::format_duration_between(s, e),
+            _ => String::new(),
+        };
+        write_task_line(&mut buf, task, &dur, 45);
+    }
+
+    for task in &canceled_recent {
         let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
@@ -312,15 +336,19 @@ pub fn render_status_buf(
 
 /// Render compact status view into a buffer string (for watch mode).
 pub fn render_compact_buf(
-    running: &[Task],
-    pending: &[Task],
-    completed: &[Task],
-    failed: &[Task],
+    buckets: &StatusBuckets<'_>,
     interval: Option<u64>,
     term_width: usize,
     tick: u64,
 ) -> String {
     use std::fmt::Write;
+    let StatusBuckets {
+        running,
+        pending,
+        completed,
+        failed,
+        canceled,
+    } = buckets;
     let mut buf = String::new();
 
     // Pixel art mascot header
@@ -342,7 +370,7 @@ pub fn render_compact_buf(
     );
     let _ = writeln!(buf, " {sep}");
 
-    for task in running {
+    for task in *running {
         let elapsed = task
             .started_at
             .as_deref()
@@ -420,6 +448,24 @@ pub fn render_compact_buf(
         );
     }
 
+    let canceled_recent: Vec<&Task> = canceled.iter().rev().take(5).collect();
+    for task in &canceled_recent {
+        let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
+            (Some(s), Some(e)) => crate::format_duration_between(s, e),
+            _ => String::new(),
+        };
+        let linear = compact_linear_label_dimmed(&task.linear_issue_id);
+        let _ = writeln!(
+            buf,
+            " {} {} {}{} {}",
+            dimmed("⊘"),
+            compact_task_id(&task.id),
+            compact_task_type(&task.task_type),
+            linear,
+            dimmed(&dur),
+        );
+    }
+
     let _ = writeln!(buf, " {sep}");
 
     let refresh_str = if let Some(secs) = interval {
@@ -429,9 +475,10 @@ pub fn render_compact_buf(
     };
     let _ = writeln!(
         buf,
-        " {} done  {} fail{}",
+        " {} done  {} fail  {} canceled{}",
         dimmed(&completed.len().to_string()),
         red(&failed.len().to_string()),
+        dimmed(&canceled.len().to_string()),
         dimmed(&refresh_str),
     );
 
@@ -531,7 +578,14 @@ mod tests {
 
     #[test]
     fn status_buf_renders() {
-        let buf = render_status_buf(&[], &[], &[], &[], Some(3), 80, 0);
+        let buckets = StatusBuckets {
+            running: &[],
+            pending: &[],
+            completed: &[],
+            failed: &[],
+            canceled: &[],
+        };
+        let buf = render_status_buf(&buckets, Some(3), 80, 0);
         assert!(buf.contains("running (0)"));
         assert!(buf.contains("pending (0)"));
         assert!(buf.contains("↻ 3s"));
@@ -541,7 +595,14 @@ mod tests {
 
     #[test]
     fn compact_buf_renders() {
-        let buf = render_compact_buf(&[], &[], &[], &[], Some(5), 80, 0);
+        let buckets = StatusBuckets {
+            running: &[],
+            pending: &[],
+            completed: &[],
+            failed: &[],
+            canceled: &[],
+        };
+        let buf = render_compact_buf(&buckets, Some(5), 80, 0);
         // ANSI codes wrap the numbers, so check for the text without exact formatting
         assert!(buf.contains("running"));
         assert!(buf.contains("pending"));
