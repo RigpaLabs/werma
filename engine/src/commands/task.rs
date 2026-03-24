@@ -116,8 +116,17 @@ pub fn cmd_list(db: &Db, status_filter: Option<&str>) -> Result<()> {
 pub fn cmd_status(db: &Db, watch: bool, compact: bool, plain: bool, interval: u64) -> Result<()> {
     // Plain mode: explicit flag or auto-detect non-TTY (piped output)
     let use_plain = plain || !std::io::stdout().is_terminal();
-    if use_plain {
+
+    if use_plain && !watch {
         return render_plain(db);
+    }
+
+    if use_plain && watch {
+        // Plain watch: print tab-separated output, sleep, repeat
+        loop {
+            render_plain(db)?;
+            std::thread::sleep(std::time::Duration::from_secs(interval));
+        }
     }
 
     let term_width = terminal_size::terminal_size()
@@ -420,6 +429,7 @@ fn render_plain(db: &Db) -> Result<()> {
         Status::Pending,
         Status::Completed,
         Status::Failed,
+        Status::Canceled,
     ];
     for status in all_statuses {
         let tasks = db.list_tasks(Some(status))?;
