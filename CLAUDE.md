@@ -91,12 +91,16 @@ Write tasks (code, full, refactor, pipeline-engineer, pipeline-devops) run in is
 
 ## PR Merging
 
+**Merge Queue is enabled.** PRs targeting `main` are batched via GitHub Merge Queue — no manual `gh pr update-branch` needed.
+
 **Always use `--auto`, NEVER `--admin`:**
 ```bash
-gh pr merge N --squash --delete-branch --auto   # correct — waits for CI
-gh pr merge N --squash --delete-branch --admin   # WRONG — bypasses CI
+gh pr merge N --squash --delete-branch --auto   # correct — enters merge queue, waits for CI
+gh pr merge N --squash --delete-branch --admin   # WRONG — bypasses CI and merge queue
 ```
-`--admin` bypasses required status checks (CI fmt/lint/test). This has caused main to break multiple times.
+- `--auto` adds the PR to the merge queue. The queue rebases, runs CI on the merge result, and merges automatically.
+- `--admin` bypasses required status checks (CI fmt/lint/test) and the merge queue. This has caused main to break multiple times.
+- Branch protection `strict` mode is OFF — the merge queue handles freshness checks instead.
 
 ## Versioning (CI-driven, DO NOT do manually)
 
