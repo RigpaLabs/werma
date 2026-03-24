@@ -117,7 +117,16 @@ impl super::Db {
         Ok(count > 0)
     }
 
-    /// Check if any non-failed task exists for a given issue + stage.
+    /// Check if a task exists that should block spawning a new one for this issue + stage.
+    ///
+    /// Blocks on:
+    /// - Active tasks (pending/running) — work in progress
+    /// - Completed but unpushed tasks (callback pending) — prevents RIG-209 duplicates
+    ///
+    /// Does NOT block on:
+    /// - Completed + pushed tasks — cycle finished (e.g. reviewer rejected, issue back
+    ///   to In Progress). Allows re-spawn for new pipeline cycles (RIG-277).
+    /// - Failed tasks — poll can retry those.
     pub fn has_any_nonfailed_task_for_issue_stage(
         &self,
         issue_id: &str,
@@ -127,7 +136,10 @@ impl super::Db {
             "SELECT COUNT(*) FROM tasks
              WHERE linear_issue_id = ?1
                AND pipeline_stage = ?2
-               AND status IN ('pending', 'running', 'completed')",
+               AND (
+                   status IN ('pending', 'running')
+                   OR (status = 'completed' AND linear_pushed = 0)
+               )",
             params![issue_id, stage],
             |row| row.get(0),
         )?;
@@ -277,22 +289,26 @@ mod tests {
     fn has_any_nonfailed_task_for_issue_stage() {
         let db = Db::open_in_memory().unwrap();
 
+        // No tasks → not blocked
         assert!(
             !db.has_any_nonfailed_task_for_issue_stage("RIG-209", "analyst")
                 .unwrap()
         );
 
+        // Completed + unpushed (callback pending) → blocked (RIG-209 protection)
         let mut task = make_test_task("20260313-001");
         task.status = Status::Completed;
         task.linear_issue_id = "RIG-209".to_string();
         task.pipeline_stage = "analyst".to_string();
-        task.linear_pushed = true;
+        task.linear_pushed = false;
         db.insert_task(&task).unwrap();
 
         assert!(
             db.has_any_nonfailed_task_for_issue_stage("RIG-209", "analyst")
                 .unwrap()
         );
+
+        // Different issue / different stage → not blocked
         assert!(
             !db.has_any_nonfailed_task_for_issue_stage("RIG-999", "analyst")
                 .unwrap()
@@ -302,6 +318,14 @@ mod tests {
                 .unwrap()
         );
 
+        // Completed + pushed (cycle finished) → NOT blocked (RIG-277 fix)
+        db.set_linear_pushed("20260313-001", true).unwrap();
+        assert!(
+            !db.has_any_nonfailed_task_for_issue_stage("RIG-209", "analyst")
+                .unwrap()
+        );
+
+        // Failed task → not blocked
         let mut failed_task = make_test_task("20260313-002");
         failed_task.status = Status::Failed;
         failed_task.linear_issue_id = "RIG-210".to_string();
@@ -313,6 +337,7 @@ mod tests {
                 .unwrap()
         );
 
+        // Pending task → blocked
         let mut pending_task = make_test_task("20260313-003");
         pending_task.status = Status::Pending;
         pending_task.linear_issue_id = "RIG-211".to_string();
@@ -322,6 +347,63 @@ mod tests {
         assert!(
             db.has_any_nonfailed_task_for_issue_stage("RIG-211", "engineer")
                 .unwrap()
+        );
+
+        // Running task → blocked
+        db.set_task_status("20260313-003", Status::Running).unwrap();
+        assert!(
+            db.has_any_nonfailed_task_for_issue_stage("RIG-211", "engineer")
+                .unwrap()
+        );
+    }
+
+    /// RIG-277: Full rejection cycle — engineer completes, reviewer rejects,
+    /// issue returns to In Progress, poller should allow new engineer spawn.
+    #[test]
+    fn rejection_cycle_allows_respawn() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Engineer #1 completes and callback processes it (pushed=true)
+        let mut eng1 = make_test_task("20260324-001");
+        eng1.status = Status::Completed;
+        eng1.linear_issue_id = "RIG-272".to_string();
+        eng1.pipeline_stage = "engineer".to_string();
+        eng1.linear_pushed = true;
+        db.insert_task(&eng1).unwrap();
+
+        // Reviewer completes and callback processes it (pushed=true)
+        let mut rev1 = make_test_task("20260324-002");
+        rev1.status = Status::Completed;
+        rev1.linear_issue_id = "RIG-272".to_string();
+        rev1.pipeline_stage = "reviewer".to_string();
+        rev1.linear_pushed = true;
+        db.insert_task(&rev1).unwrap();
+
+        // Issue is back at In Progress after rejection — poller should allow new engineer
+        assert!(
+            !db.has_any_nonfailed_task_for_issue_stage("RIG-272", "engineer")
+                .unwrap(),
+            "completed+pushed engineer should not block re-spawn after rejection"
+        );
+
+        // Reviewer stage also unblocked for future re-review
+        assert!(
+            !db.has_any_nonfailed_task_for_issue_stage("RIG-272", "reviewer")
+                .unwrap(),
+            "completed+pushed reviewer should not block re-spawn"
+        );
+
+        // Engineer #2 spawned by poller (pending) — now blocks
+        let mut eng2 = make_test_task("20260324-003");
+        eng2.status = Status::Pending;
+        eng2.linear_issue_id = "RIG-272".to_string();
+        eng2.pipeline_stage = "engineer".to_string();
+        db.insert_task(&eng2).unwrap();
+
+        assert!(
+            db.has_any_nonfailed_task_for_issue_stage("RIG-272", "engineer")
+                .unwrap(),
+            "pending engineer #2 should block duplicate spawn"
         );
     }
 
