@@ -153,10 +153,17 @@ pub fn callback(
         }
     }
 
+    let verdict = parse_verdict(result);
+
     // RIG-227: Fallback spec posting for analyst stage.
     // If the agent didn't use ---COMMENT--- blocks, the spec would be lost.
     // Post the substantive output as a comment so the spec always reaches Linear.
-    if stage == "analyst" && comments.is_empty() {
+    // Only fire for DONE/ALREADY_DONE — a BLOCKED analyst shouldn't post a partial spec.
+    let verdict_lower = verdict.as_deref().unwrap_or("").to_lowercase();
+    if stage == "analyst"
+        && comments.is_empty()
+        && (verdict_lower == "done" || verdict_lower == "already_done")
+    {
         let spec_body = extract_spec_from_output(result);
         if !spec_body.is_empty() {
             let truncated = truncate_lines(&spec_body, 200);
@@ -167,8 +174,6 @@ pub fn callback(
             }
         }
     }
-
-    let verdict = parse_verdict(result);
 
     // For stages that require a verdict (reviewer, qa, devops), warn if missing.
     let has_explicit_transitions = !stage_cfg.transitions.is_empty();
@@ -459,13 +464,15 @@ pub(crate) fn format_callback_comment(
 pub(crate) fn extract_spec_from_output(output: &str) -> String {
     let mut lines = Vec::new();
     let mut in_comment_block = false;
+    let mut unclosed_block_start = 0;
 
-    for line in output.lines() {
+    for (idx, line) in output.lines().enumerate() {
         let trimmed = line.trim();
 
         // Skip ---COMMENT---/---END COMMENT--- blocks (already posted)
         if trimmed == "---COMMENT---" {
             in_comment_block = true;
+            unclosed_block_start = idx;
             continue;
         }
         if trimmed == "---END COMMENT---" {
@@ -483,6 +490,33 @@ pub(crate) fn extract_spec_from_output(output: &str) -> String {
         }
 
         lines.push(line);
+    }
+
+    // If a ---COMMENT--- was never closed, treat it as plain text.
+    // This handles non-conforming agent output where markers are malformed.
+    if in_comment_block {
+        lines.clear();
+        for (idx, line) in output.lines().enumerate() {
+            if idx < unclosed_block_start {
+                let trimmed = line.trim();
+                let upper = trimmed.to_uppercase();
+                if upper.starts_with("VERDICT=") || upper.starts_with("ESTIMATE=") {
+                    continue;
+                }
+                lines.push(line);
+            } else {
+                // Include unclosed block content as-is (skip the marker line itself)
+                if idx == unclosed_block_start {
+                    continue;
+                }
+                let trimmed = line.trim();
+                let upper = trimmed.to_uppercase();
+                if upper.starts_with("VERDICT=") || upper.starts_with("ESTIMATE=") {
+                    continue;
+                }
+                lines.push(line);
+            }
+        }
     }
 
     // Trim leading/trailing blank lines
@@ -1628,6 +1662,87 @@ stages:
         assert!(
             fallback_comments.is_empty(),
             "engineer stage should not have fallback spec posting: {comments:?}"
+        );
+    }
+
+    // ── Blocker 1: fallback must NOT fire for BLOCKED verdict ────────────
+
+    #[test]
+    fn callback_analyst_blocked_does_not_post_fallback_spec() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-BLOCK", "todo");
+
+        let mut task = crate::db::make_test_task("20260324-block");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-BLOCK".to_string();
+        task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&task).unwrap();
+
+        // BLOCKED analyst output without COMMENT blocks — fallback must NOT fire
+        let result = "Cannot proceed — dependency not met.\nVERDICT=BLOCKED";
+
+        callback(
+            &db,
+            "20260324-block",
+            "analyst",
+            result,
+            "RIG-BLOCK",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        let comments = linear.comment_calls.borrow();
+        let fallback = comments
+            .iter()
+            .find(|(_, body)| body.contains("Cannot proceed"));
+        assert!(
+            fallback.is_none(),
+            "BLOCKED analyst should NOT trigger fallback spec posting: {comments:?}"
+        );
+    }
+
+    // ── Blocker 2: unclosed ---COMMENT--- must not drop output ──────────
+
+    #[test]
+    fn extract_spec_unclosed_comment_block_preserves_output() {
+        // A stray ---COMMENT--- with no closing marker should not discard all
+        // subsequent lines. The fallback path handles non-conforming output,
+        // so malformed markers are expected.
+        let output = "## Spec\nDo thing A.\n---COMMENT---\nMore content.\nVERDICT=DONE";
+        let spec = extract_spec_from_output(output);
+        assert!(
+            spec.contains("## Spec"),
+            "preamble should be preserved: {spec}"
+        );
+        assert!(
+            spec.contains("More content."),
+            "content after unclosed marker should be preserved: {spec}"
+        );
+        assert!(
+            !spec.contains("VERDICT="),
+            "VERDICT line should still be stripped: {spec}"
+        );
+        assert!(
+            !spec.contains("---COMMENT---"),
+            "marker itself should be stripped: {spec}"
+        );
+    }
+
+    #[test]
+    fn extract_spec_unclosed_comment_block_at_end() {
+        // Edge case: ---COMMENT--- is the last line
+        let output = "## Spec\nDo thing.\n---COMMENT---";
+        let spec = extract_spec_from_output(output);
+        assert!(
+            spec.contains("## Spec"),
+            "content before marker should be preserved: {spec}"
         );
     }
 }
