@@ -24,11 +24,13 @@ pub fn show_dashboard(db: &Db) -> Result<()> {
 }
 
 fn show_agents(db: &Db) -> Result<()> {
-    let (p, r, c, f) = db.task_counts()?;
+    let (p, r, c, f, x) = db.task_counts()?;
 
     println!();
     println!(" \u{2500}\u{2500} Agents \u{2500}\u{2500}");
-    println!(" \u{25cb} {p} pending  \u{25c9} {r} running  \u{2713} {c} done  \u{2717} {f} failed");
+    println!(
+        " \u{25cb} {p} pending  \u{25c9} {r} running  \u{2713} {c} done  \u{2717} {f} failed  \u{2298} {x} canceled"
+    );
 
     // Show tmux sessions
     let output = std::process::Command::new("tmux").args(["ls"]).output();

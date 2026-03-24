@@ -184,7 +184,7 @@ pub fn run_all(db: &Db, werma_dir: &Path) -> Result<()> {
         let launchable = db.find_all_launchable()?;
         if launchable.is_empty() {
             // Check if there are still running tasks we should wait for
-            let (_, running, _, _) = db.task_counts()?;
+            let (_, running, _, _, _) = db.task_counts()?;
             if running > 0 {
                 wait_for_running(db)?;
                 continue;
@@ -208,8 +208,10 @@ pub fn run_all(db: &Db, werma_dir: &Path) -> Result<()> {
         wait_for_running(db)?;
     }
 
-    let (p, r, c, f) = db.task_counts()?;
-    println!("\nrun-all complete: {p} pending, {r} running, {c} completed, {f} failed");
+    let (p, r, c, f, x) = db.task_counts()?;
+    println!(
+        "\nrun-all complete: {p} pending, {r} running, {c} completed, {f} failed, {x} canceled"
+    );
     Ok(())
 }
 

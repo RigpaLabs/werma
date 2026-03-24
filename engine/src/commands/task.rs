@@ -114,14 +114,14 @@ pub fn cmd_list(db: &Db, status_filter: Option<&str>) -> Result<()> {
 }
 
 pub fn cmd_status(db: &Db, watch: bool, compact: bool, plain: bool, interval: u64) -> Result<()> {
-    // --plain and --watch are mutually exclusive: plain is for scripting (single snapshot),
-    // watch is an interactive TUI loop. Combining them makes no sense.
-    if plain && watch {
-        bail!("--plain and --watch are mutually exclusive");
-    }
-
     // Plain mode: explicit flag or auto-detect non-TTY (piped output)
     let use_plain = plain || !std::io::stdout().is_terminal();
+
+    // Guard: --watch requires a TTY — piped or --plain output can't do cursor control.
+    // Check use_plain (not just the flag) so `werma st --watch | tee` also errors.
+    if use_plain && watch {
+        bail!("--plain and --watch are mutually exclusive (watch requires a terminal)");
+    }
 
     if use_plain {
         return render_plain(db);

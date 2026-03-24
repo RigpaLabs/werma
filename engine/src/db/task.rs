@@ -166,8 +166,8 @@ impl super::Db {
         Ok(tasks)
     }
 
-    /// Count tasks by status: (pending, running, completed, failed).
-    pub fn task_counts(&self) -> Result<(i64, i64, i64, i64)> {
+    /// Count tasks by status: (pending, running, completed, failed, canceled).
+    pub fn task_counts(&self) -> Result<(i64, i64, i64, i64, i64)> {
         let count = |status: &str| -> Result<i64> {
             Ok(self.conn.query_row(
                 "SELECT COUNT(*) FROM tasks WHERE status = ?1",
@@ -180,6 +180,7 @@ impl super::Db {
             count("running")?,
             count("completed")?,
             count("failed")?,
+            count("canceled")?,
         ))
     }
 
@@ -393,7 +394,7 @@ mod tests {
         db.insert_task(&t3).unwrap();
 
         let counts = db.task_counts().unwrap();
-        assert_eq!(counts, (1, 1, 1, 0));
+        assert_eq!(counts, (1, 1, 1, 0, 0));
     }
 
     #[test]
@@ -568,11 +569,16 @@ mod tests {
         db.insert_task(&make_test_task("20260313-005")).unwrap();
         db.set_task_status("20260313-005", Status::Failed).unwrap();
 
-        let (p, r, c, f) = db.task_counts().unwrap();
+        db.insert_task(&make_test_task("20260313-006")).unwrap();
+        db.set_task_status("20260313-006", Status::Canceled)
+            .unwrap();
+
+        let (p, r, c, f, x) = db.task_counts().unwrap();
         assert_eq!(p, 2);
         assert_eq!(r, 1);
         assert_eq!(c, 1);
         assert_eq!(f, 1);
+        assert_eq!(x, 1);
     }
 
     // ─── claim_next_pending ─────────────────────────────────────────────────

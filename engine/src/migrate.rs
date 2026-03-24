@@ -104,8 +104,10 @@ pub fn migrate(db: &Db) -> Result<()> {
     }
 
     // Verify
-    let (p, r, c, f) = db.task_counts()?;
-    println!("\nVerification — tasks in db: {p} pending, {r} running, {c} completed, {f} failed");
+    let (p, r, c, f, x) = db.task_counts()?;
+    println!(
+        "\nVerification — tasks in db: {p} pending, {r} running, {c} completed, {f} failed, {x} canceled"
+    );
 
     Ok(())
 }

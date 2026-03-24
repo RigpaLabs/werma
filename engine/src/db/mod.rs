@@ -174,7 +174,7 @@ mod tests {
     fn open_and_migrate() {
         let db = Db::open_in_memory().unwrap();
         let counts = db.task_counts().unwrap();
-        assert_eq!(counts, (0, 0, 0, 0));
+        assert_eq!(counts, (0, 0, 0, 0, 0));
     }
 
     #[test]
@@ -182,7 +182,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         db.migrate().unwrap();
         let counts = db.task_counts().unwrap();
-        assert_eq!(counts, (0, 0, 0, 0));
+        assert_eq!(counts, (0, 0, 0, 0, 0));
     }
 
     #[test]
@@ -191,7 +191,7 @@ mod tests {
         let db_path = dir.path().join("subdir/werma.db");
         let db = Db::open(&db_path).unwrap();
         let counts = db.task_counts().unwrap();
-        assert_eq!(counts, (0, 0, 0, 0));
+        assert_eq!(counts, (0, 0, 0, 0, 0));
     }
 
     #[test]
