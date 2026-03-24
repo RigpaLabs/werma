@@ -3,9 +3,14 @@ use serde::{Deserialize, Serialize};
 
 /// Default global max concurrent pipeline tasks.
 pub const DEFAULT_GLOBAL_MAX_CONCURRENT: u32 = 5;
+pub const DEFAULT_LAUNCH_STAGGER_SECS: u32 = 4;
 
 fn default_global_max_concurrent() -> u32 {
     DEFAULT_GLOBAL_MAX_CONCURRENT
+}
+
+fn default_launch_stagger_secs() -> u32 {
+    DEFAULT_LAUNCH_STAGGER_SECS
 }
 
 /// Top-level pipeline configuration.
@@ -17,6 +22,10 @@ pub struct PipelineConfig {
     /// Global limit on total concurrent pipeline tasks (across all stages).
     #[serde(default = "default_global_max_concurrent")]
     pub max_concurrent: u32,
+    /// Seconds to wait between launching each new task in a batch.
+    /// Prevents simultaneous claude process crashes from API rate limits.
+    #[serde(default = "default_launch_stagger_secs")]
+    pub launch_stagger_secs: u32,
     /// Reusable template snippets available as `{key}` in all prompts.
     #[serde(default)]
     pub templates: IndexMap<String, String>,
@@ -393,6 +402,47 @@ stages:
 "#;
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.max_concurrent, DEFAULT_GLOBAL_MAX_CONCURRENT);
+    }
+
+    #[test]
+    fn launch_stagger_defaults_when_absent() {
+        let yaml = r#"
+pipeline: minimal
+stages:
+  test:
+    agent: pipeline-test
+    model: sonnet
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.launch_stagger_secs, DEFAULT_LAUNCH_STAGGER_SECS);
+    }
+
+    #[test]
+    fn launch_stagger_explicit_value() {
+        let yaml = r#"
+pipeline: custom
+launch_stagger_secs: 7
+stages:
+  test:
+    agent: pipeline-test
+    model: sonnet
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.launch_stagger_secs, 7);
+    }
+
+    #[test]
+    fn launch_stagger_zero_disables() {
+        let yaml = r#"
+pipeline: custom
+launch_stagger_secs: 0
+stages:
+  test:
+    agent: pipeline-test
+    model: sonnet
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.launch_stagger_secs, 0);
     }
 
     #[test]

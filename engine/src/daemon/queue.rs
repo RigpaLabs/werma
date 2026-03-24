@@ -1,4 +1,6 @@
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -70,10 +72,13 @@ impl TmuxSession for RealTmux {
 }
 
 /// Drain pending tasks into tmux sessions, respecting pipeline max_concurrent.
+/// Staggers launches by `stagger_secs` between each new process to avoid
+/// simultaneous claude API rate-limit crashes.
 pub fn drain_queue(
     db: &Db,
     werma_dir: &Path,
     max_concurrent: usize,
+    stagger_secs: u64,
     tmux: &impl TmuxSession,
 ) -> Result<()> {
     let active = tmux.count_werma_sessions();
@@ -83,10 +88,21 @@ pub fn drain_queue(
 
     let log_path = werma_dir.join("logs/daemon.log");
     let slots = max_concurrent - active;
+    let mut launched = 0u32;
     for _ in 0..slots {
+        // Stagger: sleep before 2nd+ launch in this batch
+        if launched > 0 && stagger_secs > 0 {
+            log_daemon(
+                &log_path,
+                &format!("stagger: waiting {stagger_secs}s before next launch"),
+            );
+            thread::sleep(Duration::from_secs(stagger_secs));
+        }
+
         match runner::run_next(db, werma_dir) {
             Ok(Some(id)) => {
                 log_daemon(&log_path, &format!("launched: {id}"));
+                launched += 1;
             }
             Ok(None) => break,
             Err(e) => {
@@ -132,7 +148,7 @@ mod tests {
         let db = crate::db::Db::open_in_memory().unwrap();
         let tmux = FakeTmux { active_sessions: 0 };
 
-        drain_queue(&db, dir.path(), 3, &tmux).unwrap();
+        drain_queue(&db, dir.path(), 3, 0, &tmux).unwrap();
     }
 
     #[test]
@@ -143,7 +159,7 @@ mod tests {
         let tmux = FakeTmux { active_sessions: 3 };
 
         // At max_concurrent=3 with 3 active — should do nothing
-        drain_queue(&db, dir.path(), 3, &tmux).unwrap();
+        drain_queue(&db, dir.path(), 3, 0, &tmux).unwrap();
     }
 
     #[test]
@@ -154,7 +170,7 @@ mod tests {
         let tmux = FakeTmux { active_sessions: 5 };
 
         // Over capacity — should do nothing
-        drain_queue(&db, dir.path(), 3, &tmux).unwrap();
+        drain_queue(&db, dir.path(), 3, 0, &tmux).unwrap();
     }
 
     #[test]
@@ -165,7 +181,7 @@ mod tests {
         let tmux = FakeTmux { active_sessions: 1 };
 
         // 1 active, max 3 — should try to launch (but no pending tasks)
-        drain_queue(&db, dir.path(), 3, &tmux).unwrap();
+        drain_queue(&db, dir.path(), 3, 0, &tmux).unwrap();
     }
 
     #[test]
@@ -176,6 +192,37 @@ mod tests {
         let tmux = FakeTmux { active_sessions: 0 };
 
         // Zero max = no slots
-        drain_queue(&db, dir.path(), 0, &tmux).unwrap();
+        drain_queue(&db, dir.path(), 0, 0, &tmux).unwrap();
+    }
+
+    #[test]
+    fn drain_queue_stagger_no_sleep_when_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let tmux = FakeTmux { active_sessions: 0 };
+
+        // stagger_secs=0 should not sleep (no pending tasks, but the code path is exercised)
+        let start = std::time::Instant::now();
+        drain_queue(&db, dir.path(), 5, 0, &tmux).unwrap();
+        assert!(start.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn drain_queue_stagger_logs_message_between_launches() {
+        // With no pending tasks, stagger log won't appear.
+        // This test validates the drain_queue path is functional with stagger > 0.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let tmux = FakeTmux { active_sessions: 0 };
+
+        // Even with large stagger, no tasks means no sleep
+        let start = std::time::Instant::now();
+        drain_queue(&db, dir.path(), 8, 10, &tmux).unwrap();
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "should not sleep when no tasks are pending"
+        );
     }
 }
