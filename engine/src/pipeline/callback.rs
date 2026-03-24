@@ -146,6 +146,21 @@ pub fn callback(
         }
     }
 
+    // RIG-227: Fallback spec posting for analyst stage.
+    // If the agent didn't use ---COMMENT--- blocks, the spec would be lost.
+    // Post the substantive output as a comment so the spec always reaches Linear.
+    if stage == "analyst" && comments.is_empty() {
+        let spec_body = extract_spec_from_output(result);
+        if !spec_body.is_empty() {
+            let truncated = truncate_lines(&spec_body, 200);
+            if let Err(e) = linear.comment(linear_issue_id, &truncated) {
+                eprintln!(
+                    "[CALLBACK] {linear_issue_id}: failed to post fallback spec comment: {e}"
+                );
+            }
+        }
+    }
+
     let stage_cfg = if let Some(s) = config.stage(stage) {
         s
     } else {
@@ -435,6 +450,44 @@ pub(crate) fn format_callback_comment(
             )
         }
     }
+}
+
+/// Extract substantive spec content from analyst output, stripping metadata lines
+/// (VERDICT, ESTIMATE) and ---COMMENT--- blocks that were already posted separately.
+///
+/// Used as a fallback when the agent doesn't wrap its spec in ---COMMENT--- markers.
+pub(crate) fn extract_spec_from_output(output: &str) -> String {
+    let mut lines = Vec::new();
+    let mut in_comment_block = false;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+
+        // Skip ---COMMENT---/---END COMMENT--- blocks (already posted)
+        if trimmed == "---COMMENT---" {
+            in_comment_block = true;
+            continue;
+        }
+        if trimmed == "---END COMMENT---" {
+            in_comment_block = false;
+            continue;
+        }
+        if in_comment_block {
+            continue;
+        }
+
+        // Skip verdict and estimate metadata lines
+        let upper = trimmed.to_uppercase();
+        if upper.starts_with("VERDICT=") || upper.starts_with("ESTIMATE=") {
+            continue;
+        }
+
+        lines.push(line);
+    }
+
+    // Trim leading/trailing blank lines
+    let result = lines.join("\n");
+    result.trim().to_string()
 }
 
 /// Parameters for creating the next pipeline stage task.
@@ -1389,6 +1442,191 @@ stages:
                 .iter()
                 .any(|(id, label)| id == "RIG-274b" && label == "spec:done"),
             "BLOCKED should NOT add 'spec:done' label, got: {adds:?}"
+        );
+    }
+
+    // ── RIG-227: analyst fallback spec posting ──────────────────────────
+
+    #[test]
+    fn extract_spec_strips_verdict_and_estimate() {
+        let output = "## Spec\nDo thing A.\n## Requirements\n- Req 1\nESTIMATE=3\nVERDICT=DONE";
+        let spec = extract_spec_from_output(output);
+        assert!(spec.contains("## Spec"));
+        assert!(spec.contains("Do thing A."));
+        assert!(spec.contains("- Req 1"));
+        assert!(!spec.contains("VERDICT="));
+        assert!(!spec.contains("ESTIMATE="));
+    }
+
+    #[test]
+    fn extract_spec_strips_comment_blocks() {
+        let output = "Preamble.\n---COMMENT---\nPosted separately.\n---END COMMENT---\n\
+                       ## Extra output\nVERDICT=DONE";
+        let spec = extract_spec_from_output(output);
+        assert!(spec.contains("Preamble."));
+        assert!(spec.contains("## Extra output"));
+        assert!(!spec.contains("Posted separately."));
+        assert!(!spec.contains("---COMMENT---"));
+        assert!(!spec.contains("VERDICT="));
+    }
+
+    #[test]
+    fn extract_spec_empty_when_only_verdict() {
+        let output = "VERDICT=DONE";
+        let spec = extract_spec_from_output(output);
+        assert!(spec.is_empty());
+    }
+
+    #[test]
+    fn callback_analyst_posts_fallback_spec_when_no_comment_blocks() {
+        // RIG-227: when analyst output has no ---COMMENT--- blocks,
+        // the callback should post the substantive output as a fallback comment.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-227", "todo");
+
+        let mut task = crate::db::make_test_task("20260324-227");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-227".to_string();
+        task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Agent output WITHOUT ---COMMENT--- blocks — just raw spec + verdict
+        let result = "## Spec\nImplement feature X.\n## Requirements\n- Do A\n- Do B\n\
+                       ESTIMATE=3\nVERDICT=DONE";
+
+        callback(
+            &db,
+            "20260324-227",
+            "analyst",
+            result,
+            "RIG-227",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        let comments = linear.comment_calls.borrow();
+        // Should have at least 2 comments: fallback spec + status line
+        assert!(
+            comments.len() >= 2,
+            "expected fallback spec + status comment, got {}: {comments:?}",
+            comments.len()
+        );
+
+        // First comment should be the fallback spec with substantive content
+        let spec_comment = &comments[0].1;
+        assert!(
+            spec_comment.contains("## Spec"),
+            "fallback comment should contain spec, got: {spec_comment}"
+        );
+        assert!(
+            spec_comment.contains("Implement feature X."),
+            "fallback comment should contain spec body, got: {spec_comment}"
+        );
+        assert!(
+            !spec_comment.contains("VERDICT="),
+            "fallback comment should not contain VERDICT line"
+        );
+    }
+
+    #[test]
+    fn callback_analyst_skips_fallback_when_comment_blocks_present() {
+        // RIG-227: when analyst output has proper ---COMMENT--- blocks,
+        // the fallback should NOT fire (comments already posted via parse_comments).
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-227b", "todo");
+
+        let mut task = crate::db::make_test_task("20260324-228");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-227b".to_string();
+        task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Agent output WITH proper ---COMMENT--- blocks
+        let result = "---COMMENT---\n## Spec\nImplement feature X.\n---END COMMENT---\n\
+                       ESTIMATE=3\nVERDICT=DONE";
+
+        callback(
+            &db,
+            "20260324-228",
+            "analyst",
+            result,
+            "RIG-227b",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        let comments = linear.comment_calls.borrow();
+        // Should have exactly 2 comments: the ---COMMENT--- block + status line
+        // (no fallback because ---COMMENT--- block was found)
+        let spec_comments: Vec<_> = comments
+            .iter()
+            .filter(|(_, body)| body.contains("## Spec"))
+            .collect();
+        assert_eq!(
+            spec_comments.len(),
+            1,
+            "spec should be posted exactly once (from COMMENT block, not fallback): {comments:?}"
+        );
+    }
+
+    #[test]
+    fn callback_engineer_does_not_post_fallback_spec() {
+        // RIG-227: fallback spec posting is analyst-only — engineer stage should not trigger it.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-227c", "review");
+
+        let mut task = crate::db::make_test_task("20260324-229");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-227c".to_string();
+        task.pipeline_stage = "engineer".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Engineer output without COMMENT blocks
+        let result = "Implementation complete.\nAll tests pass.\nVERDICT=DONE";
+
+        // Engineer DONE checks for PR via `has_open_pr_for_issue` → needs cmd response
+        cmd.push_success("[]"); // no open PRs
+
+        callback(
+            &db,
+            "20260324-229",
+            "engineer",
+            result,
+            "RIG-227c",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        let comments = linear.comment_calls.borrow();
+        // No comment should contain the raw "Implementation complete" text as a fallback
+        let fallback_comments: Vec<_> = comments
+            .iter()
+            .filter(|(_, body)| body.contains("Implementation complete"))
+            .collect();
+        assert!(
+            fallback_comments.is_empty(),
+            "engineer stage should not have fallback spec posting: {comments:?}"
         );
     }
 }
