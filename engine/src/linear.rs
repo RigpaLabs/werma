@@ -933,6 +933,7 @@ fn repo_label_to_dir(repo: &str) -> Option<&'static str> {
         "sui-bots" => Some("~/projects/rigpa/sui-bots"),
         "ar-quant" => Some("~/projects/rigpa/ar-quant"),
         "ar-quant-alpha" => Some("~/projects/rigpa/ar-quant-alpha"),
+        "sigil" => Some("~/projects/rigpa/sigil"),
         _ => None,
     }
 }
@@ -980,6 +981,7 @@ pub fn infer_working_dir(title: &str, labels: &[&str]) -> String {
         ("werma", "~/projects/rigpa/werma"),
         ("pipeline", "~/projects/rigpa/werma"),
         ("fathom", "~/projects/rigpa/fathom"),
+        ("sigil", "~/projects/rigpa/sigil"),
         ("sui", "~/projects/rigpa/sui-bots"),
         ("hyper", "~/projects/rigpa/hyper-liq"),
         ("ar-quant-alpha", "~/projects/rigpa/ar-quant-alpha"),
@@ -1290,7 +1292,64 @@ mod tests {
             repo_label_to_dir("ar-quant-alpha"),
             Some("~/projects/rigpa/ar-quant-alpha")
         );
+        assert_eq!(repo_label_to_dir("sigil"), Some("~/projects/rigpa/sigil"));
         assert_eq!(repo_label_to_dir("unknown-repo"), None);
+    }
+
+    #[test]
+    fn infer_working_dir_repo_label_overrides_keyword() {
+        // repo: label should take priority over title keyword matching
+        assert_eq!(
+            infer_working_dir("Fix fathom collector", &["repo:werma"]),
+            "~/projects/rigpa/werma"
+        );
+    }
+
+    #[test]
+    fn infer_working_dir_all_repo_labels() {
+        let cases = [
+            ("repo:werma", "~/projects/rigpa/werma"),
+            ("repo:forge", "~/projects/rigpa/werma"),
+            ("repo:fathom", "~/projects/rigpa/fathom"),
+            ("repo:hyper-liq", "~/projects/rigpa/hyper-liq"),
+            ("repo:sui-bots", "~/projects/rigpa/sui-bots"),
+            ("repo:ar-quant", "~/projects/rigpa/ar-quant"),
+            ("repo:ar-quant-alpha", "~/projects/rigpa/ar-quant-alpha"),
+            ("repo:sigil", "~/projects/rigpa/sigil"),
+        ];
+        for (label, expected) in cases {
+            assert_eq!(
+                infer_working_dir("Some task", &[label]),
+                expected,
+                "failed for label: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn infer_working_dir_unknown_repo_falls_back_to_keyword() {
+        // Unknown repo label should fall through to keyword inference
+        assert_eq!(
+            infer_working_dir("Fix fathom bug", &["repo:nonexistent"]),
+            "~/projects/rigpa/fathom"
+        );
+    }
+
+    #[test]
+    fn infer_working_dir_unknown_repo_no_keyword_defaults_to_werma() {
+        // Unknown repo label + no keyword match → default werma
+        assert_eq!(
+            infer_working_dir("Some generic task", &["repo:nonexistent"]),
+            "~/projects/rigpa/werma"
+        );
+    }
+
+    #[test]
+    fn infer_working_dir_sigil_keyword() {
+        assert_eq!(
+            infer_working_dir("Build sigil signal engine", &[]),
+            "~/projects/rigpa/sigil"
+        );
     }
 
     #[test]
