@@ -143,7 +143,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
 
             // Skip issues whose state type is completed or canceled — they're done.
             let state_type = issue["state"]["type"].as_str().unwrap_or("");
-            if state_type == "completed" || state_type == "canceled" {
+            if state_type == "completed" || state_type == "canceled" || state_type == "cancelled" {
                 total_skipped += 1;
                 continue;
             }
@@ -720,5 +720,53 @@ stages:
             .tasks_by_linear_issue("RIG-276", Some("analyst"), false)
             .unwrap();
         assert_eq!(tasks.len(), 1, "should not create duplicate analyst task");
+    }
+
+    #[test]
+    fn poll_skips_completed_and_canceled_issues() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Issue with state type "completed" (Done in Linear)
+        let mut done_issue = fake_issue("uuid-done", "RIG-300", "Done issue", &["repo:werma"]);
+        done_issue["state"]["type"] = serde_json::json!("completed");
+
+        // Issue with state type "canceled"
+        let mut canceled_issue =
+            fake_issue("uuid-cancel", "RIG-301", "Canceled issue", &["repo:werma"]);
+        canceled_issue["state"]["type"] = serde_json::json!("canceled");
+
+        // Issue with state type "cancelled" (British spelling)
+        let mut cancelled_issue = fake_issue(
+            "uuid-cancel2",
+            "RIG-302",
+            "Cancelled issue",
+            &["repo:werma"],
+        );
+        cancelled_issue["state"]["type"] = serde_json::json!("cancelled");
+
+        // Normal active issue
+        let active_issue = fake_issue("uuid-active", "RIG-303", "Active issue", &["repo:werma"]);
+
+        linear.set_issues_for_status(
+            "in_progress",
+            vec![done_issue, canceled_issue, cancelled_issue, active_issue],
+        );
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // Only the active issue should spawn a task
+        let all_tasks = db.list_tasks(None).unwrap();
+        let engineer_tasks: Vec<_> = all_tasks
+            .iter()
+            .filter(|t| t.pipeline_stage == "engineer")
+            .collect();
+        assert_eq!(
+            engineer_tasks.len(),
+            1,
+            "only active issue should spawn engineer task"
+        );
+        assert_eq!(engineer_tasks[0].linear_issue_id, "RIG-303");
     }
 }
