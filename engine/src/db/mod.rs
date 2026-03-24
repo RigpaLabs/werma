@@ -78,14 +78,21 @@ impl Db {
                 return Err(e).context("migration 005_callback_fired_at");
             }
         }
-        // 006: add 'canceled' to status CHECK constraint (idempotent — recreates table)
-        // Only needed for existing DBs; fresh DBs already have 'canceled' in 001_init.sql.
-        // Check if migration is needed by attempting to set a dummy value.
+        // 006: add 'canceled' to status CHECK constraint (idempotent — recreates table).
+        // Detect whether the current tasks table allows 'canceled' by inspecting the
+        // schema stored in sqlite_master. The WHERE 0 trick does not work because SQLite
+        // skips CHECK evaluation when no rows are modified, so execute() always succeeds
+        // regardless of what the constraint says.
         let needs_006: bool = {
-            let check = self
+            let schema: String = self
                 .conn
-                .execute("UPDATE tasks SET status = 'canceled' WHERE 0", []);
-            check.is_err()
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tasks'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or_default();
+            !schema.contains("'canceled'")
         };
         if needs_006 {
             self.conn
@@ -451,5 +458,106 @@ mod tests {
 
         let all = repo.list_schedules().unwrap();
         assert_eq!(all.len(), 1);
+    }
+
+    /// Simulate an old DB whose tasks table lacks 'canceled' in its CHECK constraint.
+    /// Migration 006 must be applied so that Status::Canceled rows can be inserted.
+    #[test]
+    fn migration_006_applied_on_old_db_without_canceled() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+
+        // Create the tasks table without 'canceled' — this is the pre-006 schema.
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE tasks (
+                 id              TEXT PRIMARY KEY,
+                 status          TEXT NOT NULL DEFAULT 'pending'
+                                 CHECK(status IN ('pending','running','completed','failed')),
+                 priority        INTEGER NOT NULL DEFAULT 2,
+                 created_at      TEXT NOT NULL,
+                 started_at      TEXT,
+                 finished_at     TEXT,
+                 type            TEXT NOT NULL DEFAULT 'custom',
+                 prompt          TEXT NOT NULL,
+                 output_path     TEXT DEFAULT '',
+                 working_dir     TEXT NOT NULL,
+                 model           TEXT NOT NULL DEFAULT 'sonnet',
+                 max_turns       INTEGER NOT NULL DEFAULT 15,
+                 allowed_tools   TEXT DEFAULT '',
+                 session_id      TEXT DEFAULT '',
+                 linear_issue_id TEXT DEFAULT '',
+                 linear_pushed   INTEGER DEFAULT 0,
+                 pipeline_stage  TEXT DEFAULT '',
+                 depends_on      TEXT DEFAULT '[]',
+                 context_files   TEXT DEFAULT '[]',
+                 repo_hash       TEXT DEFAULT '',
+                 estimate        INTEGER DEFAULT 0,
+                 callback_fired_at TEXT
+             );
+             CREATE TABLE schedules (
+                 id TEXT PRIMARY KEY,
+                 cron_expr TEXT NOT NULL,
+                 prompt TEXT NOT NULL,
+                 type TEXT NOT NULL DEFAULT 'research',
+                 model TEXT NOT NULL DEFAULT 'opus',
+                 output_path TEXT DEFAULT '',
+                 working_dir TEXT NOT NULL,
+                 max_turns INTEGER DEFAULT 0,
+                 enabled INTEGER DEFAULT 1,
+                 context_files TEXT DEFAULT '[]',
+                 last_enqueued TEXT DEFAULT ''
+             );
+             CREATE TABLE IF NOT EXISTS pr_reviewed (pr_key TEXT PRIMARY KEY, updated_at TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS daily_usage (date TEXT PRIMARY KEY, opus_calls INTEGER DEFAULT 0, sonnet_calls INTEGER DEFAULT 0, haiku_calls INTEGER DEFAULT 0);",
+        )
+        .unwrap();
+
+        // Verify the old schema actually rejects 'canceled' (confirms test setup is correct).
+        let pre_check = conn.execute(
+            "INSERT INTO tasks (id, status, created_at, prompt, working_dir) VALUES ('pre-check', 'canceled', '2026-01-01', 'p', '/tmp')",
+            [],
+        );
+        assert!(
+            pre_check.is_err(),
+            "old schema should reject 'canceled' status"
+        );
+
+        // Now wrap in Db and run migrate — migration 006 must detect and fix it.
+        let db = Db { conn };
+        db.migrate().unwrap();
+
+        // After migration, inserting a 'canceled' task must succeed.
+        let mut task = make_test_task("mig006-001");
+        task.status = crate::models::Status::Canceled;
+        db.insert_task(&task).unwrap();
+
+        let fetched = db.task("mig006-001").unwrap().unwrap();
+        assert_eq!(fetched.status, crate::models::Status::Canceled);
+    }
+
+    /// Fresh DB (open_in_memory) must also support Status::Canceled after migrate.
+    /// This covers the path where 001_init.sql does NOT include 'canceled' and
+    /// migration 006 must be applied unconditionally for fresh DBs too.
+    #[test]
+    fn fresh_db_supports_canceled_status() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut task = make_test_task("fresh-canceled-001");
+        task.status = crate::models::Status::Canceled;
+        db.insert_task(&task).unwrap();
+
+        let fetched = db.task("fresh-canceled-001").unwrap().unwrap();
+        assert_eq!(fetched.status, crate::models::Status::Canceled);
+    }
+
+    /// 001_init.sql must be in its original form (without 'canceled' in CHECK).
+    /// The 'canceled' status is handled exclusively by migration 006.
+    #[test]
+    fn init_sql_does_not_contain_canceled_in_check() {
+        assert!(
+            !MIGRATION_SQL.contains("'canceled'"),
+            "001_init.sql must not include 'canceled' in the CHECK constraint — \
+             that belongs to migration 006 only"
+        );
     }
 }

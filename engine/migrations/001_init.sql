@@ -4,7 +4,7 @@ PRAGMA busy_timeout=5000;
 CREATE TABLE IF NOT EXISTS tasks (
     id              TEXT PRIMARY KEY,
     status          TEXT NOT NULL DEFAULT 'pending'
-                    CHECK(status IN ('pending','running','completed','failed','canceled')),
+                    CHECK(status IN ('pending','running','completed','failed')),
     priority        INTEGER NOT NULL DEFAULT 2,
     created_at      TEXT NOT NULL,
     started_at      TEXT,
