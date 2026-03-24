@@ -136,6 +136,7 @@ mod tests {
         assert_eq!(status_icon(Status::Running), "◉");
         assert_eq!(status_icon(Status::Completed), "✓");
         assert_eq!(status_icon(Status::Failed), "✗");
+        assert_eq!(status_icon(Status::Canceled), "⊘");
     }
 
     #[test]
