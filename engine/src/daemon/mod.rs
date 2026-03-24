@@ -166,7 +166,10 @@ pub fn run(werma_dir: &Path) -> Result<()> {
             ) {
                 Ok(true) => last_launch = Some(Instant::now()),
                 Ok(false) => {}
-                Err(e) => log_daemon(&log_path, &format!("queue launch error: {e}")),
+                Err(e) => {
+                    last_launch = Some(Instant::now());
+                    log_daemon(&log_path, &format!("queue launch error: {e}"));
+                }
             }
 
             if let Err(e) = cleanup::rotate_logs(werma_dir) {
