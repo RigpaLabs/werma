@@ -141,6 +141,14 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
+            // RIG-272: Skip canceled/completed issues (defensive — the Linear query
+            // filters by status, but state_type can be stale or change mid-poll).
+            let state_type = issue["state"]["type"].as_str().unwrap_or("");
+            if state_type == "canceled" || state_type == "completed" {
+                total_skipped += 1;
+                continue;
+            }
+
             let labels: Vec<&str> = issue["labels"]["nodes"]
                 .as_array()
                 .map(|arr| {
@@ -682,6 +690,106 @@ stages:
             tasks.is_empty(),
             "should not create analyst task when engineer already ran"
         );
+    }
+
+    /// Helper: build a fake issue with a specific state type (for status-based polling).
+    fn fake_issue_with_state(
+        id: &str,
+        identifier: &str,
+        title: &str,
+        labels: &[&str],
+        state_type: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "identifier": identifier,
+            "title": title,
+            "description": "Test description",
+            "state": {"type": state_type},
+            "estimate": 3,
+            "labels": {
+                "nodes": labels.iter().map(|l| serde_json::json!({"name": l})).collect::<Vec<_>>()
+            }
+        })
+    }
+
+    #[test]
+    fn poll_skips_canceled_issues_in_status_path() {
+        // RIG-272: issues with canceled state_type should not spawn tasks
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Issue appears in "in_progress" results but has canceled state_type (race condition)
+        let issue = fake_issue_with_state(
+            "uuid-cancel-1",
+            "RIG-290",
+            "Canceled werma issue",
+            &["repo:werma"],
+            "canceled",
+        );
+        linear.set_issues_for_status("in_progress", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        let tasks = db
+            .tasks_by_linear_issue("RIG-290", Some("engineer"), false)
+            .unwrap();
+        assert!(
+            tasks.is_empty(),
+            "should not create task for canceled issue"
+        );
+    }
+
+    #[test]
+    fn poll_skips_completed_issues_in_status_path() {
+        // RIG-272: issues with completed state_type should not spawn tasks
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        let issue = fake_issue_with_state(
+            "uuid-done-1",
+            "RIG-291",
+            "Done werma issue",
+            &["repo:werma"],
+            "completed",
+        );
+        linear.set_issues_for_status("in_progress", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        let tasks = db
+            .tasks_by_linear_issue("RIG-291", Some("engineer"), false)
+            .unwrap();
+        assert!(
+            tasks.is_empty(),
+            "should not create task for completed issue"
+        );
+    }
+
+    #[test]
+    fn poll_processes_active_issues_in_status_path() {
+        // Sanity check: active (started) issues should be processed normally
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        let issue = fake_issue_with_state(
+            "uuid-active-1",
+            "RIG-292",
+            "Active werma issue",
+            &["repo:werma"],
+            "started",
+        );
+        linear.set_issues_for_status("in_progress", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        let tasks = db
+            .tasks_by_linear_issue("RIG-292", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(tasks.len(), 1, "should create task for active issue");
     }
 
     #[test]
