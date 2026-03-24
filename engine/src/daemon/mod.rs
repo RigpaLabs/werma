@@ -92,6 +92,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     }
 
     let mut max_concurrent = crate::pipeline::load_max_concurrent();
+    let mut launch_stagger_secs = crate::pipeline::load_launch_stagger_secs();
 
     // Trigger pipeline poll immediately on first tick.
     let mut last_pipeline_poll = Instant::now() - Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS);
@@ -110,6 +111,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     let mut last_cancel_check = Instant::now() - Duration::from_secs(CANCEL_CHECK_INTERVAL_SECS);
     let mut last_cleanliness_check =
         Instant::now() - Duration::from_secs(CLEANLINESS_CHECK_INTERVAL_SECS);
+    let mut last_launch_at: Option<Instant> = None;
 
     let tmux = queue::RealTmux;
     let github = merge::RealGitHub;
@@ -154,7 +156,14 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 last_cancel_check = Instant::now();
             }
 
-            if let Err(e) = queue::drain_queue(&db, werma_dir, max_concurrent, &tmux) {
+            if let Err(e) = queue::drain_queue_with_stagger(
+                &db,
+                werma_dir,
+                max_concurrent,
+                &tmux,
+                launch_stagger_secs,
+                &mut last_launch_at,
+            ) {
                 log_daemon(&log_path, &format!("queue drain error: {e}"));
             }
 
@@ -178,6 +187,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
             if last_pipeline_poll.elapsed() >= Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS) {
                 max_concurrent = crate::pipeline::load_max_concurrent();
+                launch_stagger_secs = crate::pipeline::load_launch_stagger_secs();
                 if let Some(ref lp) = linear_poll {
                     if let Err(e) = crate::pipeline::poll(&db, lp, &cmd_runner) {
                         log_daemon(&log_path, &format!("pipeline poll error: {e}"));

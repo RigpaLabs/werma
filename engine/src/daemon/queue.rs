@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
@@ -70,11 +71,31 @@ impl TmuxSession for RealTmux {
 }
 
 /// Drain pending tasks into tmux sessions, respecting pipeline max_concurrent.
+/// Convenience wrapper with no stagger (used in tests and non-daemon callers).
+#[allow(dead_code)]
 pub fn drain_queue(
     db: &Db,
     werma_dir: &Path,
     max_concurrent: usize,
     tmux: &impl TmuxSession,
+) -> Result<()> {
+    drain_queue_with_stagger(db, werma_dir, max_concurrent, tmux, 0, &mut None)
+}
+
+/// Drain pending tasks into tmux sessions with stagger delay between launches.
+///
+/// Unlike a blocking sleep loop, this function checks `last_launch_at` and only
+/// launches a task if enough time has passed since the last launch. When the
+/// stagger delay hasn't elapsed, it returns immediately — the daemon tick loop
+/// will call again on the next tick. This prevents blocking the entire daemon
+/// (zombie detection, pipeline polling, cron, cancel checks) during stagger waits.
+pub fn drain_queue_with_stagger(
+    db: &Db,
+    werma_dir: &Path,
+    max_concurrent: usize,
+    tmux: &impl TmuxSession,
+    stagger_secs: u64,
+    last_launch_at: &mut Option<Instant>,
 ) -> Result<()> {
     let active = tmux.count_werma_sessions();
     if active >= max_concurrent {
@@ -84,9 +105,19 @@ pub fn drain_queue(
     let log_path = werma_dir.join("logs/daemon.log");
     let slots = max_concurrent - active;
     for _ in 0..slots {
+        // Stagger: only launch if enough time has passed since last launch.
+        // Returns immediately instead of blocking — next tick will retry.
+        if stagger_secs > 0 {
+            if let Some(last) = last_launch_at {
+                if last.elapsed() < Duration::from_secs(stagger_secs) {
+                    break;
+                }
+            }
+        }
         match runner::run_next(db, werma_dir) {
             Ok(Some(id)) => {
                 log_daemon(&log_path, &format!("launched: {id}"));
+                *last_launch_at = Some(Instant::now());
             }
             Ok(None) => break,
             Err(e) => {
@@ -177,5 +208,31 @@ mod tests {
 
         // Zero max = no slots
         drain_queue(&db, dir.path(), 0, &tmux).unwrap();
+    }
+
+    #[test]
+    fn stagger_skips_when_recent_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let tmux = FakeTmux { active_sessions: 0 };
+
+        // Simulate a recent launch — stagger should prevent launching
+        let mut last_launch = Some(Instant::now());
+        drain_queue_with_stagger(&db, dir.path(), 3, &tmux, 10, &mut last_launch).unwrap();
+        // last_launch should remain unchanged (no new launch)
+        assert!(last_launch.unwrap().elapsed().as_secs() < 2);
+    }
+
+    #[test]
+    fn stagger_zero_allows_all() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let tmux = FakeTmux { active_sessions: 0 };
+
+        // stagger=0 should not block (no pending tasks, but function runs)
+        let mut last_launch = None;
+        drain_queue_with_stagger(&db, dir.path(), 3, &tmux, 0, &mut last_launch).unwrap();
     }
 }

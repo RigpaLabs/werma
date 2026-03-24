@@ -3,9 +3,27 @@ use serde::{Deserialize, Serialize};
 
 /// Default global max concurrent pipeline tasks.
 pub const DEFAULT_GLOBAL_MAX_CONCURRENT: u32 = 5;
+/// Default max auto-retries for failed pipeline tasks.
+pub const DEFAULT_MAX_RETRIES: u32 = 1;
+/// Default delay in seconds before retrying a failed task.
+pub const DEFAULT_RETRY_DELAY_SECS: u64 = 30;
+/// Default delay in seconds between consecutive task launches.
+pub const DEFAULT_LAUNCH_STAGGER_SECS: u64 = 3;
 
 fn default_global_max_concurrent() -> u32 {
     DEFAULT_GLOBAL_MAX_CONCURRENT
+}
+
+fn default_max_retries() -> u32 {
+    DEFAULT_MAX_RETRIES
+}
+
+fn default_retry_delay_secs() -> u64 {
+    DEFAULT_RETRY_DELAY_SECS
+}
+
+fn default_launch_stagger_secs() -> u64 {
+    DEFAULT_LAUNCH_STAGGER_SECS
 }
 
 /// Top-level pipeline configuration.
@@ -17,6 +35,15 @@ pub struct PipelineConfig {
     /// Global limit on total concurrent pipeline tasks (across all stages).
     #[serde(default = "default_global_max_concurrent")]
     pub max_concurrent: u32,
+    /// Global default max auto-retries for failed pipeline tasks.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    /// Global default delay in seconds before retrying a failed task.
+    #[serde(default = "default_retry_delay_secs")]
+    pub retry_delay_secs: u64,
+    /// Seconds to wait between consecutive task launches (stagger).
+    #[serde(default = "default_launch_stagger_secs")]
+    pub launch_stagger_secs: u64,
     /// Reusable template snippets available as `{key}` in all prompts.
     #[serde(default)]
     pub templates: IndexMap<String, String>,
@@ -58,6 +85,14 @@ pub struct StageConfig {
     /// Verdict → transition mapping.
     #[serde(default)]
     pub transitions: IndexMap<String, Transition>,
+
+    // ─── Retry fields (RIG-287) ────────────────────────────────────────
+    /// Per-stage max auto-retries (overrides pipeline-level default).
+    #[serde(default)]
+    pub max_retries: Option<u32>,
+    /// Per-stage retry delay in seconds (overrides pipeline-level default).
+    #[serde(default)]
+    pub retry_delay_secs: Option<u64>,
 
     // ─── Cost optimization fields (RIG-183) ─────────────────────────────
     /// Model for re-review rounds (2+). Uses cheaper model to verify fixes.
@@ -212,6 +247,16 @@ impl StageConfig {
     /// Returns the configured max_review_rounds, or None if unlimited.
     pub fn review_round_limit(&self) -> Option<u32> {
         self.max_review_rounds
+    }
+
+    /// Resolve effective max_retries for this stage, falling back to pipeline default.
+    pub fn effective_max_retries(&self, pipeline_default: u32) -> u32 {
+        self.max_retries.unwrap_or(pipeline_default)
+    }
+
+    /// Resolve effective retry_delay_secs for this stage, falling back to pipeline default.
+    pub fn effective_retry_delay(&self, pipeline_default: u64) -> u64 {
+        self.retry_delay_secs.unwrap_or(pipeline_default)
     }
 }
 

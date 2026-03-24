@@ -3,6 +3,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::db::Db;
+use crate::pipeline::config::{DEFAULT_MAX_RETRIES, DEFAULT_RETRY_DELAY_SECS};
 use crate::traits::Notifier;
 
 use super::TmuxSession;
@@ -80,7 +81,8 @@ pub fn check_zombie_tasks(
     Ok(())
 }
 
-/// Mark a task as zombie (failed) and send notifications.
+/// Mark a task as zombie. If the task is a pipeline task with retries remaining,
+/// enqueue it for auto-retry instead of marking it permanently failed.
 fn mark_zombie(
     db: &Db,
     log_path: &Path,
@@ -93,18 +95,77 @@ fn mark_zombie(
         &format!("ZOMBIE detected: {} — {reason}", task.id),
     );
 
+    let label =
+        crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);
+
+    // Auto-retry for pipeline tasks that haven't exhausted retries
+    if !task.pipeline_stage.is_empty() {
+        let (max_retries, retry_delay) = resolve_retry_config(&task.pipeline_stage);
+        if (task.retry_count as u32) < max_retries {
+            if let Err(e) = db.enqueue_retry(&task.id, retry_delay) {
+                log_daemon(
+                    log_path,
+                    &format!("retry enqueue failed for {}: {e}", task.id),
+                );
+            } else {
+                let attempt = task.retry_count + 1;
+                log_daemon(
+                    log_path,
+                    &format!(
+                        "RETRY {}/{}: {} (delay={}s) — {reason}",
+                        attempt, max_retries, task.id, retry_delay
+                    ),
+                );
+                notifier.notify_slack(
+                    "#werma-alerts",
+                    &format!(
+                        ":recycle: *{label}* auto-retry {attempt}/{max_retries} (delay={retry_delay}s) — {reason}"
+                    ),
+                );
+                return;
+            }
+        }
+    }
+
+    // No retries left (or not a pipeline task) — mark as permanently failed
     let _ = db.set_task_status(&task.id, crate::models::Status::Failed);
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let _ = db.update_task_field(&task.id, "finished_at", &now);
 
-    let label =
-        crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);
     notifier.notify_macos(
         "werma: zombie task detected",
         &format!("{label} — {reason}"),
         "Basso",
     );
-    notifier.notify_slack("#werma-alerts", &format!(":zombie: *{label}* — {reason}"));
+
+    let exhausted = if !task.pipeline_stage.is_empty() && task.retry_count > 0 {
+        " (retries exhausted)"
+    } else {
+        ""
+    };
+    notifier.notify_slack(
+        "#werma-alerts",
+        &format!(":zombie: *{label}* — {reason}{exhausted}"),
+    );
+}
+
+/// Resolve retry config for a pipeline stage from the compiled YAML config.
+/// Falls back to global defaults if stage or config is not found.
+fn resolve_retry_config(stage_name: &str) -> (u32, u64) {
+    match crate::pipeline::loader::load_default() {
+        Ok(config) => {
+            let global_max = config.max_retries;
+            let global_delay = config.retry_delay_secs;
+            match config.stage(stage_name) {
+                Some(stage_cfg) => (
+                    stage_cfg.effective_max_retries(global_max),
+                    stage_cfg.effective_retry_delay(global_delay),
+                ),
+                None => (global_max, global_delay),
+            }
+        }
+        Err(_) => (DEFAULT_MAX_RETRIES, DEFAULT_RETRY_DELAY_SECS),
+    }
 }
 
 /// Truncate a string for log output, replacing newlines with ` | `.
@@ -187,11 +248,13 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         }
     }
 
     #[test]
-    fn marks_dead_sessions_as_failed() {
+    fn zombie_pipeline_task_auto_retries() {
         let db = crate::db::Db::open_in_memory().unwrap();
         let werma_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
@@ -199,12 +262,55 @@ mod tests {
         let task = make_running_task("20260313-999");
         db.insert_task(&task).unwrap();
 
-        // No alive sessions — zombie detected
+        // No alive sessions — zombie detected. Pipeline task should auto-retry.
         let tmux = FakeTmux::new(vec![]);
 
         check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
 
         let updated = db.task("20260313-999").unwrap().unwrap();
+        // Auto-retried: status goes back to Pending, not Failed
+        assert_eq!(updated.status, Status::Pending);
+        assert_eq!(updated.retry_count, 1);
+        assert!(updated.retry_after.is_some());
+    }
+
+    #[test]
+    fn zombie_pipeline_task_exhausted_retries_fails() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        // Task that has already been retried max_retries (1) times
+        let mut task = make_running_task("20260313-998");
+        task.retry_count = 1; // already retried once, at limit
+        db.insert_task(&task).unwrap();
+
+        let tmux = FakeTmux::new(vec![]);
+
+        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+
+        let updated = db.task("20260313-998").unwrap().unwrap();
+        // Retries exhausted: marked as Failed
+        assert_eq!(updated.status, Status::Failed);
+        assert!(updated.finished_at.is_some());
+    }
+
+    #[test]
+    fn zombie_non_pipeline_task_fails_immediately() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        // Non-pipeline task (empty pipeline_stage) should NOT auto-retry
+        let mut task = make_running_task("20260313-997");
+        task.pipeline_stage = String::new();
+        db.insert_task(&task).unwrap();
+
+        let tmux = FakeTmux::new(vec![]);
+
+        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+
+        let updated = db.task("20260313-997").unwrap().unwrap();
         assert_eq!(updated.status, Status::Failed);
         assert!(updated.finished_at.is_some());
     }
@@ -237,6 +343,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
         db.insert_task(&task).unwrap();
 
@@ -273,7 +381,8 @@ mod tests {
         let werma_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
 
-        let task = make_running_task("20260313-995");
+        let mut task = make_running_task("20260313-995");
+        task.retry_count = 1; // exhausted retries — should go to Failed, not retry
         db.insert_task(&task).unwrap();
 
         // Session exists but process inside is dead (the core bug scenario)
@@ -293,7 +402,8 @@ mod tests {
         std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
 
         let alive_task = make_running_task("20260313-001");
-        let dead_task = make_running_task("20260313-002");
+        let mut dead_task = make_running_task("20260313-002");
+        dead_task.retry_count = 1; // exhausted retries
         db.insert_task(&alive_task).unwrap();
         db.insert_task(&dead_task).unwrap();
 
@@ -328,7 +438,8 @@ mod tests {
         let werma_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
 
-        let task = make_running_task("20260313-996");
+        let mut task = make_running_task("20260313-996");
+        task.retry_count = 1; // exhausted retries — should fail with finished_at
         db.insert_task(&task).unwrap();
 
         let tmux = FakeTmux::new(vec![]);
@@ -350,8 +461,10 @@ mod tests {
 
         // 3 tasks: alive, dead process in live session, dead session
         let t1 = make_running_task("20260313-010"); // alive
-        let t2 = make_running_task("20260313-011"); // dead process, live session
-        let t3 = make_running_task("20260313-012"); // dead session
+        let mut t2 = make_running_task("20260313-011"); // dead process, live session
+        t2.retry_count = 1; // exhausted retries
+        let mut t3 = make_running_task("20260313-012"); // dead session
+        t3.retry_count = 1; // exhausted retries
         db.insert_task(&t1).unwrap();
         db.insert_task(&t2).unwrap();
         db.insert_task(&t3).unwrap();
@@ -381,7 +494,8 @@ mod tests {
         let werma_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
 
-        let task = make_running_task("20260313-994");
+        let mut task = make_running_task("20260313-994");
+        task.retry_count = 1; // exhausted retries
         db.insert_task(&task).unwrap();
 
         let tmux = FakeTmux::new(vec![]).with_dead_process(vec!["werma-20260313-994".to_string()]);

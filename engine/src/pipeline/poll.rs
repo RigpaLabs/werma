@@ -103,6 +103,8 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             context_files: vec![],
             repo_hash: crate::runtime_repo_hash(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         db.insert_task(&task)?;
@@ -261,6 +263,8 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     context_files: vec![],
                     repo_hash: crate::runtime_repo_hash(),
                     estimate: issue_estimate,
+                    retry_count: 0,
+                    retry_after: None,
                 };
 
                 db.insert_task(&task)?;
@@ -441,6 +445,8 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 context_files: vec![],
                 repo_hash: crate::runtime_repo_hash(),
                 estimate: issue_estimate,
+                retry_count: 0,
+                retry_after: None,
             };
 
             db.insert_task(&task)?;

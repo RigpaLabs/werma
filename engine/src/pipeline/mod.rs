@@ -21,6 +21,14 @@ pub fn load_max_concurrent() -> usize {
         .unwrap_or(config::DEFAULT_GLOBAL_MAX_CONCURRENT as usize)
 }
 
+/// Load the launch stagger delay from pipeline config.
+/// Falls back to the compiled-in default if config loading fails.
+pub fn load_launch_stagger_secs() -> u64 {
+    loader::load_default()
+        .map(|c| c.launch_stagger_secs)
+        .unwrap_or(config::DEFAULT_LAUNCH_STAGGER_SECS)
+}
+
 // ─── Research pipeline (unchanged from old pipeline.rs) ──────────────────────
 
 use anyhow::Result;
@@ -108,6 +116,8 @@ pub fn handle_research_completion(
             context_files: vec![output_file],
             repo_hash: crate::runtime_repo_hash(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         db.insert_task(&curator_task)?;

@@ -69,6 +69,8 @@ pub fn cmd_add(db: &Db, p: AddParams) -> Result<()> {
         context_files: context_files.clone(),
         repo_hash: crate::runtime_repo_hash(),
         estimate: 0,
+        retry_count: 0,
+        retry_after: None,
     };
 
     db.insert_task(&task)?;
@@ -572,8 +574,9 @@ pub fn cmd_retry(db: &Db, id: &str) -> Result<()> {
     db.set_task_status(id, Status::Pending)?;
     db.update_task_field(id, "started_at", "")?;
     db.update_task_field(id, "finished_at", "")?;
+    db.reset_retry(id)?;
 
-    println!("retry: {id} -> pending");
+    println!("retry: {id} -> pending (retry_count reset)");
     Ok(())
 }
 
@@ -744,6 +747,18 @@ pub fn cmd_fail(db: &Db, id: &str) -> Result<()> {
         return Ok(());
     }
 
+    // Auto-retry for pipeline tasks that haven't exhausted retries
+    if !task.pipeline_stage.is_empty() {
+        if let Some((max_retries, retry_delay)) = resolve_retry_config_for_task(&task) {
+            if (task.retry_count as u32) < max_retries {
+                db.enqueue_retry(id, retry_delay)?;
+                let attempt = task.retry_count + 1;
+                println!("retry {attempt}/{max_retries}: {id} -> pending (delay={retry_delay}s)");
+                return Ok(());
+            }
+        }
+    }
+
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     db.set_task_status(id, Status::Failed)?;
     db.update_task_field(id, "finished_at", &now)?;
@@ -753,10 +768,15 @@ pub fn cmd_fail(db: &Db, id: &str) -> Result<()> {
         && !task.linear_issue_id.is_empty()
         && let Ok(linear) = crate::linear::LinearClient::new()
     {
+        let exhausted = if task.retry_count > 0 {
+            format!(" Retries exhausted ({} attempts).", task.retry_count)
+        } else {
+            String::new()
+        };
         let _ = linear.comment(
             &task.linear_issue_id,
             &format!(
-                "**Task `{id}` FAILED** (stage: {}). Manual intervention needed.",
+                "**Task `{id}` FAILED** (stage: {}).{exhausted} Manual intervention needed.",
                 task.pipeline_stage,
             ),
         );
@@ -769,6 +789,21 @@ pub fn cmd_fail(db: &Db, id: &str) -> Result<()> {
 
     println!("failed: {id}");
     Ok(())
+}
+
+/// Resolve retry config for a pipeline task from the compiled YAML config.
+fn resolve_retry_config_for_task(task: &Task) -> Option<(u32, u64)> {
+    let config = pipeline::loader::load_default().ok()?;
+    let global_max = config.max_retries;
+    let global_delay = config.retry_delay_secs;
+    let stage_cfg = config.stage(&task.pipeline_stage);
+    Some(match stage_cfg {
+        Some(s) => (
+            s.effective_max_retries(global_max),
+            s.effective_retry_delay(global_delay),
+        ),
+        None => (global_max, global_delay),
+    })
 }
 
 pub fn cmd_clean(db: &Db) -> Result<()> {

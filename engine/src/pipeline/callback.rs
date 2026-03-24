@@ -577,6 +577,8 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         context_files: vec![handoff_path.to_string_lossy().to_string()],
         repo_hash: crate::runtime_repo_hash(),
         estimate: p.estimate,
+        retry_count: 0,
+        retry_after: None,
     };
 
     db.insert_task(&task)?;
@@ -788,6 +790,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
         db.insert_task(&analyst_task).unwrap();
 

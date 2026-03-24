@@ -20,6 +20,7 @@ const MIGRATION_003_SQL: &str = include_str!("../../migrations/003_estimate.sql"
 const MIGRATION_004_SQL: &str = include_str!("../../migrations/004_normalize_linear_ids.sql");
 const MIGRATION_005_SQL: &str = include_str!("../../migrations/005_callback_fired_at.sql");
 const MIGRATION_006_SQL: &str = include_str!("../../migrations/006_add_canceled_status.sql");
+const MIGRATION_007_SQL: &str = include_str!("../../migrations/007_retry.sql");
 
 pub struct Db {
     pub(super) conn: Connection,
@@ -99,6 +100,13 @@ impl Db {
                 .execute_batch(MIGRATION_006_SQL)
                 .context("migration 006_add_canceled_status")?;
         }
+        // 007: add retry_count and retry_after columns (idempotent — ignore "duplicate column")
+        if let Err(e) = self.conn.execute_batch(MIGRATION_007_SQL) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(e).context("migration 007_retry");
+            }
+        }
         Ok(())
     }
 }
@@ -135,6 +143,8 @@ pub(super) fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         context_files,
         repo_hash: row.get(19)?,
         estimate: row.get(20).unwrap_or(0),
+        retry_count: row.get(21).unwrap_or(0),
+        retry_after: row.get(22).unwrap_or(None),
     })
 }
 
@@ -163,6 +173,8 @@ pub(crate) fn make_test_task(id: &str) -> Task {
         context_files: vec![],
         repo_hash: String::new(),
         estimate: 0,
+        retry_count: 0,
+        retry_after: None,
     }
 }
 

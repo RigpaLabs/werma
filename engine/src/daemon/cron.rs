@@ -108,6 +108,8 @@ pub fn check_schedules(db: &Db, werma_dir: &Path) -> Result<()> {
             context_files: sched.context_files.clone(),
             repo_hash: crate::runtime_repo_hash(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         db.insert_task(&task)?;
