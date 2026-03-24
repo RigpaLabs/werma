@@ -20,8 +20,6 @@ const MIGRATION_003_SQL: &str = include_str!("../../migrations/003_estimate.sql"
 const MIGRATION_004_SQL: &str = include_str!("../../migrations/004_normalize_linear_ids.sql");
 const MIGRATION_005_SQL: &str = include_str!("../../migrations/005_callback_fired_at.sql");
 const MIGRATION_006_SQL: &str = include_str!("../../migrations/006_add_canceled_status.sql");
-const MIGRATION_007_SQL: &str = include_str!("../../migrations/007_retry.sql");
-
 pub struct Db {
     pub(super) conn: Connection,
 }
@@ -100,11 +98,21 @@ impl Db {
                 .execute_batch(MIGRATION_006_SQL)
                 .context("migration 006_add_canceled_status")?;
         }
-        // 007: add retry_count and retry_after columns (idempotent — ignore "duplicate column")
-        if let Err(e) = self.conn.execute_batch(MIGRATION_007_SQL) {
-            let msg = e.to_string();
-            if !msg.contains("duplicate column") {
-                return Err(e).context("migration 007_retry");
+        // 007: add retry_count and retry_after columns (each idempotent — ignore "duplicate column")
+        if let Err(e) = self
+            .conn
+            .execute_batch("ALTER TABLE tasks ADD COLUMN retry_count INTEGER DEFAULT 0;")
+        {
+            if !e.to_string().contains("duplicate column") {
+                return Err(e).context("migration 007_retry_count");
+            }
+        }
+        if let Err(e) = self
+            .conn
+            .execute_batch("ALTER TABLE tasks ADD COLUMN retry_after TEXT;")
+        {
+            if !e.to_string().contains("duplicate column") {
+                return Err(e).context("migration 007_retry_after");
             }
         }
         Ok(())

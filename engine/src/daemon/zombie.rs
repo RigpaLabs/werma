@@ -98,16 +98,11 @@ fn mark_zombie(
     let label =
         crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);
 
-    // Auto-retry for pipeline tasks that haven't exhausted retries
+    // Auto-retry for pipeline tasks that haven't exhausted retries (CAS guard in SQL)
     if !task.pipeline_stage.is_empty() {
         let (max_retries, retry_delay) = resolve_retry_config(&task.pipeline_stage);
-        if (task.retry_count as u32) < max_retries {
-            if let Err(e) = db.enqueue_retry(&task.id, retry_delay) {
-                log_daemon(
-                    log_path,
-                    &format!("retry enqueue failed for {}: {e}", task.id),
-                );
-            } else {
+        match db.enqueue_retry(&task.id, retry_delay, max_retries) {
+            Ok(true) => {
                 let attempt = task.retry_count + 1;
                 log_daemon(
                     log_path,
@@ -123,6 +118,13 @@ fn mark_zombie(
                     ),
                 );
                 return;
+            }
+            Ok(false) => {} // retries exhausted — fall through to permanent failure
+            Err(e) => {
+                log_daemon(
+                    log_path,
+                    &format!("retry enqueue failed for {}: {e}", task.id),
+                );
             }
         }
     }

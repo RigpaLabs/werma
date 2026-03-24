@@ -336,21 +336,24 @@ impl super::Db {
 
     /// Enqueue a failed task for retry: set status to Pending, increment retry_count,
     /// set retry_after to now + delay_secs, and clear started_at/finished_at.
-    pub fn enqueue_retry(&self, id: &str, delay_secs: u64) -> Result<()> {
+    /// Atomically enqueue a task for retry. Returns `true` if the retry was applied,
+    /// `false` if another caller already incremented past `max_retries` (CAS guard).
+    pub fn enqueue_retry(&self, id: &str, delay_secs: u64, max_retries: u32) -> Result<bool> {
         let retry_after = (chrono::Local::now() + chrono::Duration::seconds(delay_secs as i64))
             .format("%Y-%m-%dT%H:%M:%S")
             .to_string();
 
-        self.conn.execute(
+        let rows = self.conn.execute(
             "UPDATE tasks SET status = 'pending',
                               retry_count = retry_count + 1,
                               retry_after = ?1,
+                              session_id = '',
                               started_at = NULL,
                               finished_at = NULL
-             WHERE id = ?2",
-            params![retry_after, id],
+             WHERE id = ?2 AND retry_count < ?3",
+            params![retry_after, id, max_retries],
         )?;
-        Ok(())
+        Ok(rows > 0)
     }
 
     /// Reset retry_count and retry_after (used by manual `werma retry`).

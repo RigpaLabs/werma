@@ -747,11 +747,10 @@ pub fn cmd_fail(db: &Db, id: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Auto-retry for pipeline tasks that haven't exhausted retries
+    // Auto-retry for pipeline tasks that haven't exhausted retries (CAS guard in SQL)
     if !task.pipeline_stage.is_empty() {
         if let Some((max_retries, retry_delay)) = resolve_retry_config_for_task(&task) {
-            if (task.retry_count as u32) < max_retries {
-                db.enqueue_retry(id, retry_delay)?;
+            if db.enqueue_retry(id, retry_delay, max_retries)? {
                 let attempt = task.retry_count + 1;
                 println!("retry {attempt}/{max_retries}: {id} -> pending (delay={retry_delay}s)");
                 return Ok(());
@@ -769,7 +768,7 @@ pub fn cmd_fail(db: &Db, id: &str) -> Result<()> {
         && let Ok(linear) = crate::linear::LinearClient::new()
     {
         let exhausted = if task.retry_count > 0 {
-            format!(" Retries exhausted ({} attempts).", task.retry_count)
+            format!(" Retries exhausted (after {} retries).", task.retry_count)
         } else {
             String::new()
         };
