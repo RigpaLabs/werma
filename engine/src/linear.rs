@@ -25,6 +25,9 @@ pub trait LinearApi {
     fn add_label(&self, issue_id: &str, label_name: &str) -> Result<()>;
     /// Get the current status name of an issue (for read-after-write reconciliation).
     fn get_issue_status(&self, issue_id: &str) -> Result<String>;
+    /// Get issue state type (e.g. "canceled", "completed") and team key (e.g. "RIG", "FAT").
+    /// Used by cancel detection to identify canceled issues or issues moved to another team.
+    fn get_issue_state_and_team(&self, issue_id: &str) -> Result<(String, String)>;
 }
 
 impl LinearApi for LinearClient {
@@ -73,6 +76,10 @@ impl LinearApi for LinearClient {
 
     fn get_issue_status(&self, issue_id: &str) -> Result<String> {
         self.get_issue_status(issue_id)
+    }
+
+    fn get_issue_state_and_team(&self, issue_id: &str) -> Result<(String, String)> {
+        self.get_issue_state_and_team(issue_id)
     }
 }
 
@@ -593,6 +600,26 @@ impl LinearClient {
         Ok(status)
     }
 
+    /// Fetch issue state type (e.g. "canceled") and team key (e.g. "RIG").
+    pub fn get_issue_state_and_team(&self, issue_id: &str) -> Result<(String, String)> {
+        let uuid = self.resolve_uuid(issue_id)?;
+        let data = self.query(
+            r#"query($id: ID!) {
+                issue(id: $id) { state { type } team { key } }
+            }"#,
+            &json!({"id": uuid}),
+        )?;
+        let state_type = data["issue"]["state"]["type"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let team_key = data["issue"]["team"]["key"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        Ok((state_type, team_key))
+    }
+
     /// Fetch a single issue by identifier (e.g. "RIG-95").
     /// Returns (uuid, identifier, title, description, labels).
     pub fn get_issue_by_identifier(
@@ -812,6 +839,12 @@ impl LinearClient {
 fn config_path() -> Result<std::path::PathBuf> {
     let home = dirs::home_dir().context("no home directory")?;
     Ok(home.join(".werma/linear.json"))
+}
+
+/// Get the configured team key (e.g. "RIG") from ~/.werma/linear.json.
+pub fn configured_team_key() -> Result<String> {
+    let config = load_config()?;
+    Ok(config.team_key)
 }
 
 fn load_config() -> Result<LinearConfig> {
@@ -1096,6 +1129,10 @@ pub mod fakes {
 
         fn get_issue_status(&self, _issue_id: &str) -> Result<String> {
             Ok(String::new())
+        }
+
+        fn get_issue_state_and_team(&self, _issue_id: &str) -> Result<(String, String)> {
+            Ok(("started".to_string(), "RIG".to_string()))
         }
     }
 }

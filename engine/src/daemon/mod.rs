@@ -1,3 +1,4 @@
+pub mod cancel_check;
 pub mod cleanup;
 pub mod cron;
 pub mod merge;
@@ -21,6 +22,7 @@ const PIPELINE_POLL_INTERVAL_SECS: u64 = 30;
 const MERGE_CHECK_INTERVAL_SECS: u64 = 60;
 const UPDATE_CHECK_INTERVAL_SECS: u64 = 300;
 const ZOMBIE_CHECK_INTERVAL_SECS: u64 = 30;
+const CANCEL_CHECK_INTERVAL_SECS: u64 = 60;
 const CLEANLINESS_CHECK_INTERVAL_SECS: u64 = 30;
 const CLEANLINESS_COOLDOWN_SECS: u64 = 300;
 
@@ -105,6 +107,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     let mut cleanliness_notified: std::collections::HashMap<PathBuf, Instant> =
         std::collections::HashMap::new();
     let mut last_zombie_check = Instant::now();
+    let mut last_cancel_check = Instant::now();
     let mut last_cleanliness_check =
         Instant::now() - Duration::from_secs(CLEANLINESS_CHECK_INTERVAL_SECS);
 
@@ -115,6 +118,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     // Optional: absent if LINEAR_API_KEY is not configured.
     let linear_merge = merge::RealLinearMerge::new().ok();
     let linear_poll = crate::linear::LinearClient::new().ok();
+    let expected_team_key = crate::linear::configured_team_key().unwrap_or_default();
 
     loop {
         let tick_start = Instant::now();
@@ -133,6 +137,21 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                     log_daemon(&log_path, &format!("zombie check error: {e}"));
                 }
                 last_zombie_check = Instant::now();
+            }
+
+            if last_cancel_check.elapsed() >= Duration::from_secs(CANCEL_CHECK_INTERVAL_SECS) {
+                if let Some(ref lp) = linear_poll {
+                    if let Err(e) = cancel_check::check_canceled_and_stuck(
+                        &db,
+                        werma_dir,
+                        lp,
+                        &notifier,
+                        &expected_team_key,
+                    ) {
+                        log_daemon(&log_path, &format!("cancel check error: {e}"));
+                    }
+                }
+                last_cancel_check = Instant::now();
             }
 
             if let Err(e) = queue::drain_queue(&db, werma_dir, max_concurrent, &tmux) {

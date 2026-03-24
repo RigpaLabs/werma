@@ -10,6 +10,7 @@ pub fn status_icon(status: Status) -> &'static str {
         Status::Running => "◉",
         Status::Completed => "✓",
         Status::Failed => "✗",
+        Status::Canceled => "⊘",
     }
 }
 
