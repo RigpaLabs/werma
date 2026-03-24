@@ -1,6 +1,8 @@
 # Pipeline: Engineer Stage
 Linear issue: {issue_id}
 
+The issue context is provided above in the ---ISSUE--- block.
+
 ## Context
 {issue_title}
 

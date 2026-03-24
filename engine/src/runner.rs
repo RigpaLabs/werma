@@ -14,12 +14,6 @@ const MAX_DEPENDENCY_OUTPUTS: usize = 5;
 
 /// Map task type to allowed tools (matching aq bash patterns).
 pub fn tools_for_type(task_type: &str, has_output: bool) -> String {
-    const LINEAR_READ: &str = "mcp__plugin_linear_linear__get_issue,\
-        mcp__plugin_linear_linear__list_issues,\
-        mcp__plugin_linear_linear__list_comments";
-    const LINEAR_COMMENT: &str = "mcp__plugin_linear_linear__save_comment";
-    const LINEAR_LABEL: &str = "mcp__plugin_linear_linear__list_issue_labels,\
-        mcp__plugin_linear_linear__create_issue_label";
     const SLACK_READ: &str = "mcp__plugin_slack_slack__slack_read_channel,\
         mcp__plugin_slack_slack__slack_read_thread,\
         mcp__plugin_slack_slack__slack_search_channels";
@@ -31,17 +25,10 @@ pub fn tools_for_type(task_type: &str, has_output: bool) -> String {
         "review" | "analyze" => "Read,Grep,Glob".to_string(),
         "code" | "refactor" => "Read,Edit,Write,Bash,Glob,Grep".to_string(),
         "full" => format!("Read,Edit,Write,Bash,Glob,Grep,{SLACK_READ},{SLACK_WRITE}"),
-        "pipeline-analyst" => {
-            const LINEAR_WRITE: &str = "mcp__plugin_linear_linear__save_issue";
-            format!(
-                "Read,Grep,Glob,Bash,WebSearch,WebFetch,{LINEAR_READ},{LINEAR_COMMENT},{LINEAR_LABEL},{LINEAR_WRITE}"
-            )
-        }
-        "pipeline-engineer" => {
-            format!("Read,Edit,Write,Bash,Glob,Grep,Skill,{LINEAR_READ},{LINEAR_COMMENT}")
-        }
+        "pipeline-analyst" => "Read,Grep,Glob,Bash,WebSearch,WebFetch".to_string(),
+        "pipeline-engineer" => "Read,Edit,Write,Bash,Glob,Grep,Skill".to_string(),
         "pipeline-reviewer" | "pipeline-qa" | "pipeline-devops" | "pipeline-deployer" => {
-            format!("Read,Glob,Grep,Bash,Skill,{LINEAR_READ},{LINEAR_COMMENT}")
+            "Read,Glob,Grep,Bash,Skill".to_string()
         }
         _ => "Read,Grep,Glob,WebSearch,WebFetch".to_string(),
     };
@@ -119,20 +106,23 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
         }
     }
 
-    // Auto-inject Linear issue description for non-pipeline tasks
+    // Inject Linear issue context for ALL tasks (pipeline and non-pipeline)
     if !task.linear_issue_id.is_empty()
-        && task.pipeline_stage.is_empty()
         && let Ok(client) = crate::linear::LinearClient::new()
     {
         match client.get_issue_by_identifier(&task.linear_issue_id) {
-            Ok((_uuid, identifier, title, description, _labels)) => {
+            Ok((_uuid, identifier, title, description, labels)) => {
+                prompt.push_str("\n---ISSUE---\n");
+                prompt.push_str(&format!("ID: {identifier}\n"));
+                prompt.push_str(&format!("Title: {title}\n"));
                 if !description.is_empty() {
-                    prompt.push_str(&format!(
-                        "\n## Linear Issue: {identifier} — {title}\n\n{description}\n\n"
-                    ));
-                } else {
-                    prompt.push_str(&format!("\n## Linear Issue: {identifier} — {title}\n\n"));
+                    prompt.push_str(&format!("Description:\n{description}\n"));
                 }
+                if !labels.is_empty() {
+                    prompt.push_str(&format!("Labels: {}\n", labels.join(", ")));
+                }
+                // TODO: fetch and inject comments when LinearClient::list_comments is available
+                prompt.push_str("---END ISSUE---\n\n");
             }
             Err(e) => {
                 eprintln!(
@@ -604,14 +594,23 @@ mod tests {
     fn tools_for_pipeline_types() {
         let analyst = tools_for_type("pipeline-analyst", false);
         assert!(analyst.contains("WebSearch"));
-        assert!(analyst.contains("linear"));
+        assert!(
+            !analyst.contains("linear"),
+            "pipeline agents must not have Linear tools"
+        );
 
         let engineer = tools_for_type("pipeline-engineer", false);
         assert!(engineer.contains("Edit"));
-        assert!(engineer.contains("linear"));
+        assert!(
+            !engineer.contains("linear"),
+            "pipeline agents must not have Linear tools"
+        );
 
         let reviewer = tools_for_type("pipeline-reviewer", false);
-        assert!(reviewer.contains("linear"));
+        assert!(
+            !reviewer.contains("linear"),
+            "pipeline agents must not have Linear tools"
+        );
         assert!(!reviewer.contains("Edit"));
     }
 

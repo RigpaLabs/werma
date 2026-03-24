@@ -3,6 +3,8 @@ Linear issue: {issue_id}
 
 The engineer has completed implementation. Review the code changes.
 
+The issue context is provided above in the ---ISSUE--- block.
+
 ## FIRST: Invoke the Code Review skill
 Before starting the review, invoke the `/code-review` skill using the Skill tool (skill: "code-review:code-review"). This loads the full review checklist and standards you MUST follow.
 
@@ -26,5 +28,6 @@ Include all findings, verdict, and summary in the comment.
 ## Output Format
 - List each finding with `file:line` references and severity
 - Summarize: X blockers, Y nits
+- Write your full review between `---COMMENT---` and `---END COMMENT---` markers so it gets posted to the Linear issue
 - End with: REVIEW_VERDICT=APPROVED or REVIEW_VERDICT=REJECTED
 - If REJECTED, clearly explain what must change (each blocker/nit)
