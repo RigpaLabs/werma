@@ -33,7 +33,28 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
     let cmd_runner = RealCommandRunner;
     let notifier = RealNotifier;
 
+    let now = chrono::Local::now().naive_local();
+
     for task in &tasks {
+        // TTL: skip callbacks for tasks finished more than 1 hour ago.
+        if let Some(ref finished) = task.finished_at {
+            if let Ok(finished_dt) =
+                chrono::NaiveDateTime::parse_from_str(finished, "%Y-%m-%dT%H:%M:%S")
+            {
+                if now.signed_duration_since(finished_dt).num_seconds() > 3600 {
+                    log_daemon(
+                        &log_path,
+                        &format!(
+                            "[CALLBACK] {}: {} — TTL expired (finished >1h ago), marking pushed",
+                            task.linear_issue_id, task.id
+                        ),
+                    );
+                    let _ = db.set_linear_pushed(&task.id, true);
+                    continue;
+                }
+            }
+        }
+
         if !task.pipeline_stage.is_empty() {
             let Some(ref linear_client) = linear_client else {
                 continue;

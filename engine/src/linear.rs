@@ -702,6 +702,7 @@ impl LinearClient {
                         title
                         description
                         priority
+                        state { type }
                         labels { nodes { name } }
                     }
                 }

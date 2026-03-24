@@ -141,6 +141,13 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
+            // Skip issues whose state type is completed or canceled — they're done.
+            let state_type = issue["state"]["type"].as_str().unwrap_or("");
+            if state_type == "completed" || state_type == "canceled" {
+                total_skipped += 1;
+                continue;
+            }
+
             let labels: Vec<&str> = issue["labels"]["nodes"]
                 .as_array()
                 .map(|arr| {
