@@ -41,27 +41,31 @@ pub fn check_canceled_and_stuck(
         return Ok(());
     }
 
-    // Deduplicate Linear issue IDs — multiple tasks can reference the same issue.
-    let mut checked_issues: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Cache Linear query results — multiple tasks can reference the same issue.
+    let mut issue_cache: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
 
     for task in &active_tasks {
-        // Only query Linear once per issue.
-        if !checked_issues.insert(task.linear_issue_id.clone()) {
-            // Already checked this issue — apply cached result below.
-        }
-
-        let (state_type, team_key) = match linear.get_issue_state_and_team(&task.linear_issue_id) {
-            Ok(result) => result,
-            Err(e) => {
-                // API errors are transient — log and skip, don't cancel.
-                log_daemon(
-                    &log_path,
-                    &format!(
-                        "cancel-check: failed to query {} for task {}: {e}",
-                        task.linear_issue_id, task.id
-                    ),
-                );
-                continue;
+        // Only query Linear once per issue; reuse cached result for duplicates.
+        let (state_type, team_key) = if let Some(cached) = issue_cache.get(&task.linear_issue_id) {
+            cached.clone()
+        } else {
+            match linear.get_issue_state_and_team(&task.linear_issue_id) {
+                Ok(result) => {
+                    issue_cache.insert(task.linear_issue_id.clone(), result.clone());
+                    result
+                }
+                Err(e) => {
+                    // API errors are transient — log and skip, don't cancel.
+                    log_daemon(
+                        &log_path,
+                        &format!(
+                            "cancel-check: failed to query {} for task {}: {e}",
+                            task.linear_issue_id, task.id
+                        ),
+                    );
+                    continue;
+                }
             }
         };
 
@@ -240,15 +244,15 @@ mod tests {
         db.insert_task(&task).unwrap();
 
         let linear = FakeLinearApi::new();
-        // Issue was moved to FAT team
-        linear.set_issue_status("RIG-270", "in_progress");
+        // Issue moved to FAT team — state is active but team differs from expected "RIG".
+        linear.set_issue_state_and_team("RIG-270", "started", "FAT");
 
         check_canceled_and_stuck(&db, werma_dir.path(), &linear, &FakeNotifier::new(), "RIG")
             .unwrap();
 
-        // FakeLinearApi doesn't support get_issue_state_and_team yet — we need to update it.
-        // For now this test verifies the flow with the basic fake.
-        // The actual team check test is below with a custom fake.
+        let updated = db.task("20260324-002").unwrap().unwrap();
+        assert_eq!(updated.status, Status::Canceled);
+        assert!(updated.finished_at.is_some());
     }
 
     #[test]
@@ -321,6 +325,31 @@ mod tests {
 
         let updated = db.task("20260324-005").unwrap().unwrap();
         assert_eq!(updated.status, Status::Running);
+    }
+
+    #[test]
+    fn dedup_cancels_all_tasks_sharing_same_issue() {
+        let db = Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        // Two tasks referencing the same canceled issue.
+        let task1 = make_pipeline_task("20260324-010", "RIG-275", Status::Running);
+        let task2 = make_pipeline_task("20260324-011", "RIG-275", Status::Pending);
+        db.insert_task(&task1).unwrap();
+        db.insert_task(&task2).unwrap();
+
+        let linear = FakeLinearApi::new();
+        linear.set_issue_status("RIG-275", "canceled");
+
+        check_canceled_and_stuck(&db, werma_dir.path(), &linear, &FakeNotifier::new(), "RIG")
+            .unwrap();
+
+        // Both tasks should be canceled — the cache must apply the result to both.
+        let updated1 = db.task("20260324-010").unwrap().unwrap();
+        let updated2 = db.task("20260324-011").unwrap().unwrap();
+        assert_eq!(updated1.status, Status::Canceled);
+        assert_eq!(updated2.status, Status::Canceled);
     }
 
     #[test]
