@@ -33,15 +33,21 @@ werma pipeline validate          # validate YAML config
 
 **Prompt template variables:** `{issue_id}`, `{issue_title}`, `{issue_description}`, `{previous_output}`, `{rejection_feedback}`, `{working_dir}`, plus custom `templates:` from config
 
+**Runtime overrides:** `~/.werma/pipelines/` — YAML files here override the builtin compiled config. Use `werma pipeline eject` to copy the builtin to this directory for editing.
+
 ## Engine
 
 The werma CLI (`engine/`) is a Rust binary that manages the agent queue, scheduling, Linear integration, and pipeline automation. Key commands:
 
-- `werma add/run/status/list` — task queue management
-- `werma daemon` — heartbeat + scheduler (replaces heartbeat.sh)
-- `werma sched` — cron-based scheduling
-- `werma linear` — Linear issue integration
-- `werma pipeline show/validate` — YAML-driven CI/CD pipeline management
+- `werma add/run/run-all/st/list` — task queue management
+- `werma continue <id> "clarification"` — resume a task with additional context
+- `werma kill <id>` — kill tmux session + mark failed
+- `werma daemon install/uninstall` — heartbeat + scheduler (launchd)
+- `werma sched ls/add/on/off` — cron-based scheduling
+- `werma linear sync` — pull Linear issues → werma queue
+- `werma pipeline show/validate/eject` — YAML-driven pipeline management
+- `werma pipeline poll/status/approve` — pipeline execution control
+- `werma review <#N|url|branch> [--dir]` — run reviewer agent on a PR
 - `werma dash` — status dashboard
 - `werma migrate` — import from old aq system
 
