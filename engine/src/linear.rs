@@ -604,7 +604,7 @@ impl LinearClient {
     pub fn get_issue_state_and_team(&self, issue_id: &str) -> Result<(String, String)> {
         let uuid = self.resolve_uuid(issue_id)?;
         let data = self.query(
-            r#"query($id: ID!) {
+            r#"query($id: String!) {
                 issue(id: $id) { state { type } team { key } }
             }"#,
             &json!({"id": uuid}),
