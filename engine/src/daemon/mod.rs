@@ -93,6 +93,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
     let mut max_concurrent = crate::pipeline::load_max_concurrent();
     let mut launch_stagger_secs = crate::pipeline::load_launch_stagger_secs();
+    let mut last_launch: Option<Instant> = None;
 
     // Trigger pipeline poll immediately on first tick.
     let mut last_pipeline_poll = Instant::now() - Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS);
@@ -155,10 +156,17 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 last_cancel_check = Instant::now();
             }
 
-            if let Err(e) =
-                queue::drain_queue(&db, werma_dir, max_concurrent, launch_stagger_secs, &tmux)
-            {
-                log_daemon(&log_path, &format!("queue drain error: {e}"));
+            match queue::try_launch_one(
+                &db,
+                werma_dir,
+                max_concurrent,
+                launch_stagger_secs,
+                last_launch,
+                &tmux,
+            ) {
+                Ok(true) => last_launch = Some(Instant::now()),
+                Ok(false) => {}
+                Err(e) => log_daemon(&log_path, &format!("queue launch error: {e}")),
             }
 
             if let Err(e) = cleanup::rotate_logs(werma_dir) {
