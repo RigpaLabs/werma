@@ -155,26 +155,6 @@ pub fn callback(
 
     let verdict = parse_verdict(result);
 
-    // RIG-227: Fallback spec posting for analyst stage.
-    // If the agent didn't use ---COMMENT--- blocks, the spec would be lost.
-    // Post the substantive output as a comment so the spec always reaches Linear.
-    // Only fire for DONE/ALREADY_DONE — a BLOCKED analyst shouldn't post a partial spec.
-    let verdict_lower = verdict.as_deref().unwrap_or("").to_lowercase();
-    if stage == "analyst"
-        && comments.is_empty()
-        && (verdict_lower == "done" || verdict_lower == "already_done")
-    {
-        let spec_body = extract_spec_from_output(result);
-        if !spec_body.is_empty() {
-            let truncated = truncate_lines(&spec_body, 200);
-            if let Err(e) = linear.comment(linear_issue_id, &truncated) {
-                eprintln!(
-                    "[CALLBACK] {linear_issue_id}: failed to post fallback spec comment: {e}"
-                );
-            }
-        }
-    }
-
     // For stages that require a verdict (reviewer, qa, devops), warn if missing.
     let has_explicit_transitions = !stage_cfg.transitions.is_empty();
 
@@ -197,7 +177,8 @@ pub fn callback(
         return Ok(());
     }
 
-    // For engineer/analyst: default verdict is "done" if none found
+    // Compute effective verdict once — analyst/engineer default to "done" when missing.
+    // Used for both fallback spec posting and transition routing.
     let verdict_str = verdict
         .as_deref()
         .unwrap_or(if stage == "engineer" || stage == "analyst" {
@@ -206,6 +187,23 @@ pub fn callback(
             ""
         })
         .to_lowercase();
+
+    // RIG-227: Fallback spec posting for analyst stage.
+    // If the agent didn't use ---COMMENT--- blocks, the spec would be lost.
+    // Post the substantive output as a comment so the spec always reaches Linear.
+    // Only fire for "done" — ALREADY_DONE means no new spec was written,
+    // and BLOCKED shouldn't post a partial spec.
+    if stage == "analyst" && comments.is_empty() && verdict_str == "done" {
+        let spec_body = extract_spec_from_output(result);
+        if !spec_body.is_empty() {
+            let truncated = truncate_lines(&spec_body, 200);
+            if let Err(e) = linear.comment(linear_issue_id, &truncated) {
+                eprintln!(
+                    "[CALLBACK] {linear_issue_id}: failed to post fallback spec comment: {e}"
+                );
+            }
+        }
+    }
 
     // Parse estimate from analyst output for adaptive track routing
     let estimate = if stage == "analyst" {
@@ -1743,6 +1741,90 @@ stages:
         assert!(
             spec.contains("## Spec"),
             "content before marker should be preserved: {spec}"
+        );
+    }
+
+    #[test]
+    fn callback_analyst_no_verdict_still_posts_fallback_spec() {
+        // Reviewer fix: analyst output with spec but no VERDICT= line should still
+        // trigger fallback. The effective verdict defaults to "done" for analysts,
+        // so the fallback must use the same default.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-227-nv", "todo");
+
+        let mut task = crate::db::make_test_task("20260324-227nv");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-227-nv".to_string();
+        task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Agent output with spec but NO VERDICT= line
+        let result = "## Spec\nImplement feature Y.\n## Requirements\n- Req 1\nESTIMATE=2";
+
+        callback(
+            &db,
+            "20260324-227nv",
+            "analyst",
+            result,
+            "RIG-227-nv",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        let comments = linear.comment_calls.borrow();
+        let spec_comment = comments.iter().find(|(_, body)| body.contains("## Spec"));
+        assert!(
+            spec_comment.is_some(),
+            "analyst with no VERDICT= should still get fallback spec posted: {comments:?}"
+        );
+    }
+
+    #[test]
+    fn callback_analyst_already_done_skips_fallback_spec() {
+        // Reviewer fix: ALREADY_DONE means no new spec was written, so fallback
+        // should NOT fire. Only DONE triggers fallback.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-227-ad", "done");
+
+        let mut task = crate::db::make_test_task("20260324-227ad");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-227-ad".to_string();
+        task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&task).unwrap();
+
+        let result = "Issue already has implementation.\nVERDICT=ALREADY_DONE";
+
+        callback(
+            &db,
+            "20260324-227ad",
+            "analyst",
+            result,
+            "RIG-227-ad",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        let comments = linear.comment_calls.borrow();
+        let fallback = comments
+            .iter()
+            .find(|(_, body)| body.contains("already has implementation"));
+        assert!(
+            fallback.is_none(),
+            "ALREADY_DONE should NOT trigger fallback spec posting: {comments:?}"
         );
     }
 }
