@@ -12,6 +12,7 @@ pub trait TaskRepository {
     fn list_tasks(&self, status: Option<Status>) -> Result<Vec<Task>>;
     fn list_recent_tasks(&self, status: Status, limit: usize) -> Result<Vec<Task>>;
     fn list_all_tasks_by_finished(&self, status: Status) -> Result<Vec<Task>>;
+    fn list_recent_terminal_tasks(&self, limit: usize) -> Result<Vec<Task>>;
     fn set_task_status(&self, id: &str, status: Status) -> Result<()>;
     fn find_next_pending(&self) -> Result<Option<Task>>;
     fn update_task_field(&self, id: &str, field: &str, value: &str) -> Result<()>;
@@ -36,6 +37,10 @@ impl TaskRepository for super::Db {
 
     fn list_all_tasks_by_finished(&self, status: Status) -> Result<Vec<Task>> {
         self.list_all_tasks_by_finished(status)
+    }
+
+    fn list_recent_terminal_tasks(&self, limit: usize) -> Result<Vec<Task>> {
+        self.list_recent_terminal_tasks(limit)
     }
 
     fn set_task_status(&self, id: &str, status: Status) -> Result<()> {
@@ -211,6 +216,28 @@ impl super::Db {
              ORDER BY finished_at DESC, created_at DESC",
         )?;
         let rows = stmt.query_map(params![status.to_string()], |row| Ok(task_from_row(row)))?;
+
+        let mut tasks = Vec::new();
+        for row in rows {
+            tasks.push(row??);
+        }
+        Ok(tasks)
+    }
+
+    /// List the N most recent terminal tasks (completed, failed, canceled) combined,
+    /// sorted by finished_at DESC. Used by `werma st` to apply a single combined limit
+    /// across all three terminal statuses (not 17 per status).
+    pub fn list_recent_terminal_tasks(&self, limit: usize) -> Result<Vec<Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, status, priority, created_at, started_at, finished_at,
+                    type, prompt, output_path, working_dir, model, max_turns,
+                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+             FROM tasks WHERE status IN ('completed', 'failed', 'canceled')
+             ORDER BY finished_at DESC, created_at DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| Ok(task_from_row(row)))?;
 
         let mut tasks = Vec::new();
         for row in rows {
@@ -1004,5 +1031,59 @@ mod tests {
         assert_eq!(c, 2);
         assert_eq!(f, 1);
         assert_eq!(x, 1);
+    }
+
+    // ─── list_recent_terminal_tasks ──────────────────────────────────────
+
+    #[test]
+    fn list_recent_terminal_tasks_combined_limit() {
+        let db = Db::open_in_memory().unwrap();
+
+        // 10 completed + 5 failed + 3 canceled = 18 terminal tasks total
+        for i in 1..=10u32 {
+            let mut t = make_test_task(&format!("20260310-c{i:02}"));
+            t.status = Status::Completed;
+            t.finished_at = Some(format!("2026-03-10T10:{i:02}:00"));
+            db.insert_task(&t).unwrap();
+        }
+        for i in 1..=5u32 {
+            let mut t = make_test_task(&format!("20260310-f{i:02}"));
+            t.status = Status::Failed;
+            t.finished_at = Some(format!("2026-03-10T11:{i:02}:00"));
+            db.insert_task(&t).unwrap();
+        }
+        for i in 1..=3u32 {
+            let mut t = make_test_task(&format!("20260310-x{i:02}"));
+            t.status = Status::Canceled;
+            t.finished_at = Some(format!("2026-03-10T12:{i:02}:00"));
+            db.insert_task(&t).unwrap();
+        }
+
+        // limit=17 should return exactly 17 total (not 17+17+17)
+        let tasks = db.list_recent_terminal_tasks(17).unwrap();
+        assert_eq!(
+            tasks.len(),
+            17,
+            "combined limit must cap total, not per-status"
+        );
+
+        // All 18 without limit
+        let all = db.list_recent_terminal_tasks(18).unwrap();
+        assert_eq!(all.len(), 18);
+
+        // Tasks are sorted by finished_at DESC — most recent first
+        assert!(all[0].finished_at >= all[1].finished_at);
+    }
+
+    #[test]
+    fn list_recent_terminal_tasks_fewer_than_limit() {
+        let db = Db::open_in_memory().unwrap();
+        let mut t = make_test_task("20260310-001");
+        t.status = Status::Completed;
+        t.finished_at = Some("2026-03-10T10:00:00".to_string());
+        db.insert_task(&t).unwrap();
+
+        let tasks = db.list_recent_terminal_tasks(17).unwrap();
+        assert_eq!(tasks.len(), 1, "returns all tasks when fewer than limit");
     }
 }

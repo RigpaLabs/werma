@@ -113,13 +113,36 @@ pub fn cmd_list(db: &Db, status_filter: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Default number of recent completed/failed/canceled tasks to show.
-/// Fetch terminal-status tasks: recent (sorted by finished_at DESC, limited) or all.
-/// `limit` = `None` means show all (no cap).
-fn fetch_terminal_tasks(db: &Db, status: Status, limit: Option<usize>) -> Result<Vec<Task>> {
-    match limit {
-        Some(n) => db.list_recent_tasks(status, n),
-        None => db.list_all_tasks_by_finished(status),
+/// Fetch terminal-status buckets (completed, failed, canceled).
+///
+/// When `limit` is `Some(n)`: returns the n most recent tasks combined across all three
+/// statuses (not n per status), then partitions by status. This is the key correctness fix
+/// vs. the previous approach that applied the limit per-status (giving 3×n rows total).
+///
+/// When `limit` is `None`: returns all tasks per status (used by `--all` flag).
+fn fetch_terminal_buckets(
+    db: &Db,
+    limit: Option<usize>,
+) -> Result<(Vec<Task>, Vec<Task>, Vec<Task>)> {
+    if let Some(n) = limit {
+        let tasks = db.list_recent_terminal_tasks(n)?;
+        let mut completed = vec![];
+        let mut failed = vec![];
+        let mut canceled = vec![];
+        for task in tasks {
+            match task.status {
+                Status::Completed => completed.push(task),
+                Status::Failed => failed.push(task),
+                Status::Canceled => canceled.push(task),
+                _ => {}
+            }
+        }
+        Ok((completed, failed, canceled))
+    } else {
+        let completed = db.list_all_tasks_by_finished(Status::Completed)?;
+        let failed = db.list_all_tasks_by_finished(Status::Failed)?;
+        let canceled = db.list_all_tasks_by_finished(Status::Canceled)?;
+        Ok((completed, failed, canceled))
     }
 }
 
@@ -202,9 +225,7 @@ pub fn cmd_status(
             if tick_count >= ticks_per_refresh {
                 running = db.list_tasks(Some(Status::Running))?;
                 pending = db.list_tasks(Some(Status::Pending))?;
-                completed = fetch_terminal_tasks(db, Status::Completed, limit)?;
-                failed = fetch_terminal_tasks(db, Status::Failed, limit)?;
-                canceled = fetch_terminal_tasks(db, Status::Canceled, limit)?;
+                (completed, failed, canceled) = fetch_terminal_buckets(db, limit)?;
                 terminal_counts = if limit.is_none() {
                     None
                 } else {
@@ -251,9 +272,7 @@ pub fn cmd_status(
 fn render_status(db: &Db, limit: Option<usize>) -> Result<()> {
     let running = db.list_tasks(Some(Status::Running))?;
     let pending = db.list_tasks(Some(Status::Pending))?;
-    let completed = fetch_terminal_tasks(db, Status::Completed, limit)?;
-    let failed = fetch_terminal_tasks(db, Status::Failed, limit)?;
-    let canceled = fetch_terminal_tasks(db, Status::Canceled, limit)?;
+    let (completed, failed, canceled) = fetch_terminal_buckets(db, limit)?;
     let (total_completed, total_failed, total_canceled) = if limit.is_none() {
         (completed.len(), failed.len(), canceled.len())
     } else {
@@ -342,9 +361,7 @@ fn render_status(db: &Db, limit: Option<usize>) -> Result<()> {
 fn render_compact(db: &Db, interval: Option<u64>, limit: Option<usize>) -> Result<()> {
     let running = db.list_tasks(Some(Status::Running))?;
     let pending = db.list_tasks(Some(Status::Pending))?;
-    let completed = fetch_terminal_tasks(db, Status::Completed, limit)?;
-    let failed = fetch_terminal_tasks(db, Status::Failed, limit)?;
-    let canceled = fetch_terminal_tasks(db, Status::Canceled, limit)?;
+    let (completed, failed, canceled) = fetch_terminal_buckets(db, limit)?;
     let (total_completed, total_failed, total_canceled) = if limit.is_none() {
         (completed.len(), failed.len(), canceled.len())
     } else {
@@ -477,21 +494,10 @@ fn render_compact(db: &Db, interval: Option<u64>, limit: Option<usize>) -> Resul
 }
 
 fn render_plain(db: &Db, limit: Option<usize>) -> Result<()> {
-    let terminal_statuses = [Status::Completed, Status::Failed, Status::Canceled];
-    let all_statuses = [
-        Status::Running,
-        Status::Pending,
-        Status::Completed,
-        Status::Failed,
-        Status::Canceled,
-    ];
-    for status in all_statuses {
-        let tasks = if terminal_statuses.contains(&status) {
-            fetch_terminal_tasks(db, status, limit)?
-        } else {
-            db.list_tasks(Some(status))?
-        };
-        for task in &tasks {
+    // Emit running + pending first, then terminal tasks (combined, limited).
+    let live_statuses = [Status::Running, Status::Pending];
+    for status in live_statuses {
+        for task in &db.list_tasks(Some(status))? {
             let duration = match (
                 task.started_at.as_deref(),
                 task.finished_at.as_deref(),
@@ -509,9 +515,28 @@ fn render_plain(db: &Db, limit: Option<usize>) -> Result<()> {
             let description = task.prompt.lines().next().unwrap_or(&task.prompt);
             println!(
                 "{}\t{}\t{}\t{}\t{}\t{}",
-                task.id, task.task_type, task.status, linear, duration, description,
+                task.id, task.task_type, task.status, linear, duration, description
             );
         }
+    }
+
+    // Terminal tasks: combined limit (N most recent across completed+failed+canceled).
+    let (completed, failed, canceled) = fetch_terminal_buckets(db, limit)?;
+    for task in completed.iter().chain(failed.iter()).chain(canceled.iter()) {
+        let duration = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
+            (Some(s), Some(e)) => format_duration_between(s, e),
+            _ => String::new(),
+        };
+        let linear = if task.linear_issue_id.is_empty() {
+            "-"
+        } else {
+            &task.linear_issue_id
+        };
+        let description = task.prompt.lines().next().unwrap_or(&task.prompt);
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            task.id, task.task_type, task.status, linear, duration, description
+        );
     }
     Ok(())
 }

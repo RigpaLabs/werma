@@ -293,6 +293,25 @@ mod tests {
             }
             Ok(())
         }
+
+        fn list_recent_terminal_tasks(
+            &self,
+            limit: usize,
+        ) -> anyhow::Result<Vec<crate::models::Task>> {
+            use crate::models::Status;
+            let tasks = self.tasks.borrow();
+            let mut matching: Vec<_> = tasks
+                .values()
+                .filter(|t| {
+                    matches!(
+                        t.status,
+                        Status::Completed | Status::Failed | Status::Canceled
+                    )
+                })
+                .collect();
+            matching.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
+            Ok(matching.into_iter().take(limit).cloned().collect())
+        }
     }
 
     /// In-memory fake implementing ScheduleRepository.
