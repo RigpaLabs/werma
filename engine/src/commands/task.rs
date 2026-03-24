@@ -114,14 +114,12 @@ pub fn cmd_list(db: &Db, status_filter: Option<&str>) -> Result<()> {
 }
 
 /// Default number of recent completed/failed/canceled tasks to show.
-const DEFAULT_RECENT_LIMIT: usize = 10;
-
 /// Fetch terminal-status tasks: recent (sorted by finished_at DESC, limited) or all.
-fn fetch_terminal_tasks(db: &Db, status: Status, show_all: bool) -> Result<Vec<Task>> {
-    if show_all {
-        db.list_all_tasks_by_finished(status)
-    } else {
-        db.list_recent_tasks(status, DEFAULT_RECENT_LIMIT)
+/// `limit` = `None` means show all (no cap).
+fn fetch_terminal_tasks(db: &Db, status: Status, limit: Option<usize>) -> Result<Vec<Task>> {
+    match limit {
+        Some(n) => db.list_recent_tasks(status, n),
+        None => db.list_all_tasks_by_finished(status),
     }
 }
 
@@ -132,7 +130,10 @@ pub fn cmd_status(
     plain: bool,
     interval: u64,
     all: bool,
+    completed_limit: Option<usize>,
 ) -> Result<()> {
+    // `--all` overrides config limit
+    let limit = if all { None } else { completed_limit };
     // --plain and --watch are mutually exclusive: plain is for scripting (single snapshot),
     // watch is an interactive TUI loop. Combining them makes no sense.
     if plain && watch {
@@ -143,7 +144,7 @@ pub fn cmd_status(
     let use_plain = plain || !std::io::stdout().is_terminal();
 
     if use_plain {
-        return render_plain(db, all);
+        return render_plain(db, limit);
     }
 
     let term_width = terminal_size::terminal_size()
@@ -201,10 +202,10 @@ pub fn cmd_status(
             if tick_count >= ticks_per_refresh {
                 running = db.list_tasks(Some(Status::Running))?;
                 pending = db.list_tasks(Some(Status::Pending))?;
-                completed = fetch_terminal_tasks(db, Status::Completed, all)?;
-                failed = fetch_terminal_tasks(db, Status::Failed, all)?;
-                canceled = fetch_terminal_tasks(db, Status::Canceled, all)?;
-                terminal_counts = if all {
+                completed = fetch_terminal_tasks(db, Status::Completed, limit)?;
+                failed = fetch_terminal_tasks(db, Status::Failed, limit)?;
+                canceled = fetch_terminal_tasks(db, Status::Canceled, limit)?;
+                terminal_counts = if limit.is_none() {
                     None
                 } else {
                     Some(db.terminal_task_counts()?)
@@ -240,20 +241,20 @@ pub fn cmd_status(
         if auto_compacted {
             eprintln!("tip: terminal width < 60, using compact mode (or pass -c)");
         }
-        render_compact(db, None, all)?;
+        render_compact(db, None, limit)?;
     } else {
-        render_status(db, all)?;
+        render_status(db, limit)?;
     }
     Ok(())
 }
 
-fn render_status(db: &Db, all: bool) -> Result<()> {
+fn render_status(db: &Db, limit: Option<usize>) -> Result<()> {
     let running = db.list_tasks(Some(Status::Running))?;
     let pending = db.list_tasks(Some(Status::Pending))?;
-    let completed = fetch_terminal_tasks(db, Status::Completed, all)?;
-    let failed = fetch_terminal_tasks(db, Status::Failed, all)?;
-    let canceled = fetch_terminal_tasks(db, Status::Canceled, all)?;
-    let (total_completed, total_failed, total_canceled) = if all {
+    let completed = fetch_terminal_tasks(db, Status::Completed, limit)?;
+    let failed = fetch_terminal_tasks(db, Status::Failed, limit)?;
+    let canceled = fetch_terminal_tasks(db, Status::Canceled, limit)?;
+    let (total_completed, total_failed, total_canceled) = if limit.is_none() {
         (completed.len(), failed.len(), canceled.len())
     } else {
         db.terminal_task_counts()?
@@ -338,13 +339,13 @@ fn render_status(db: &Db, all: bool) -> Result<()> {
     Ok(())
 }
 
-fn render_compact(db: &Db, interval: Option<u64>, all: bool) -> Result<()> {
+fn render_compact(db: &Db, interval: Option<u64>, limit: Option<usize>) -> Result<()> {
     let running = db.list_tasks(Some(Status::Running))?;
     let pending = db.list_tasks(Some(Status::Pending))?;
-    let completed = fetch_terminal_tasks(db, Status::Completed, all)?;
-    let failed = fetch_terminal_tasks(db, Status::Failed, all)?;
-    let canceled = fetch_terminal_tasks(db, Status::Canceled, all)?;
-    let (total_completed, total_failed, total_canceled) = if all {
+    let completed = fetch_terminal_tasks(db, Status::Completed, limit)?;
+    let failed = fetch_terminal_tasks(db, Status::Failed, limit)?;
+    let canceled = fetch_terminal_tasks(db, Status::Canceled, limit)?;
+    let (total_completed, total_failed, total_canceled) = if limit.is_none() {
         (completed.len(), failed.len(), canceled.len())
     } else {
         db.terminal_task_counts()?
@@ -475,7 +476,7 @@ fn render_compact(db: &Db, interval: Option<u64>, all: bool) -> Result<()> {
     Ok(())
 }
 
-fn render_plain(db: &Db, all: bool) -> Result<()> {
+fn render_plain(db: &Db, limit: Option<usize>) -> Result<()> {
     let terminal_statuses = [Status::Completed, Status::Failed, Status::Canceled];
     let all_statuses = [
         Status::Running,
@@ -486,7 +487,7 @@ fn render_plain(db: &Db, all: bool) -> Result<()> {
     ];
     for status in all_statuses {
         let tasks = if terminal_statuses.contains(&status) {
-            fetch_terminal_tasks(db, status, all)?
+            fetch_terminal_tasks(db, status, limit)?
         } else {
             db.list_tasks(Some(status))?
         };
@@ -1173,7 +1174,7 @@ mod tests {
     #[test]
     fn cmd_status_plain_watch_conflict() {
         let db = test_db();
-        let result = cmd_status(&db, true, false, true, 2, false);
+        let result = cmd_status(&db, true, false, true, 2, false, Some(17));
         assert!(
             result.is_err(),
             "--plain and --watch must be rejected together"

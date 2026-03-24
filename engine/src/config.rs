@@ -1,3 +1,48 @@
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+
+/// Default number of completed/failed/canceled tasks shown in `werma st`.
+pub const DEFAULT_COMPLETED_LIMIT: usize = 17;
+
+/// User-level configuration loaded from `~/.werma/config.toml`.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct UserConfig {
+    /// Max completed/failed/canceled tasks in `werma st` (0 = unlimited).
+    pub completed_limit: Option<usize>,
+}
+
+impl UserConfig {
+    /// Resolved limit: config value → default (17). 0 means unlimited (returns `None`).
+    pub fn resolved_completed_limit(&self) -> Option<usize> {
+        match self.completed_limit {
+            Some(0) => None,
+            Some(n) => Some(n),
+            None => Some(DEFAULT_COMPLETED_LIMIT),
+        }
+    }
+
+    /// Load config from a specific path; returns `Default` on missing/invalid file.
+    pub fn load_from(path: &Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|content| toml::from_str(&content).ok())
+            .unwrap_or_default()
+    }
+
+    /// Load from the default location `~/.werma/config.toml`.
+    pub fn load() -> Self {
+        Self::load_from(&Self::default_path())
+    }
+
+    fn default_path() -> PathBuf {
+        dirs::home_dir()
+            .map(|h| h.join(".werma/config.toml"))
+            .unwrap_or_default()
+    }
+}
+
 /// Read a key from ~/.werma/.env file.
 /// Falls back to VarError::NotPresent if not found.
 pub fn read_env_file_key(key: &str) -> Result<String, std::env::VarError> {
@@ -92,5 +137,71 @@ mod tests {
         std::fs::write(&env_file, "  KEY  =  value  \n").unwrap();
 
         assert_eq!(read_env_key_from_path(&env_file, "KEY").unwrap(), "value");
+    }
+
+    // ─── UserConfig tests ──────────────────────────────────────────────
+
+    #[test]
+    fn user_config_default_limit() {
+        let cfg = UserConfig::default();
+        assert_eq!(
+            cfg.resolved_completed_limit(),
+            Some(DEFAULT_COMPLETED_LIMIT)
+        );
+    }
+
+    #[test]
+    fn user_config_custom_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "completed_limit = 25\n").unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        assert_eq!(cfg.resolved_completed_limit(), Some(25));
+    }
+
+    #[test]
+    fn user_config_zero_means_unlimited() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "completed_limit = 0\n").unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        assert_eq!(cfg.resolved_completed_limit(), None);
+    }
+
+    #[test]
+    fn user_config_missing_file_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.toml");
+
+        let cfg = UserConfig::load_from(&path);
+        assert_eq!(
+            cfg.resolved_completed_limit(),
+            Some(DEFAULT_COMPLETED_LIMIT)
+        );
+    }
+
+    #[test]
+    fn user_config_invalid_toml_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "not valid toml {{{\n").unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        assert_eq!(
+            cfg.resolved_completed_limit(),
+            Some(DEFAULT_COMPLETED_LIMIT)
+        );
+    }
+
+    #[test]
+    fn user_config_ignores_unknown_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "completed_limit = 5\nunknown_key = true\n").unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        assert_eq!(cfg.resolved_completed_limit(), Some(5));
     }
 }

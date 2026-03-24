@@ -142,7 +142,16 @@ fn main() -> anyhow::Result<()> {
             all,
         } => {
             let db = open_db()?;
-            commands::task::cmd_status(&db, watch, compact, plain, interval, all)?;
+            let cfg = config::UserConfig::load();
+            commands::task::cmd_status(
+                &db,
+                watch,
+                compact,
+                plain,
+                interval,
+                all,
+                cfg.resolved_completed_limit(),
+            )?;
         }
 
         cli::Commands::View { id } => {
