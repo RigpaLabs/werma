@@ -83,6 +83,32 @@ impl super::Db {
         )?)
     }
 
+    /// Get the most recent `finished_at` timestamp for any completed task
+    /// on the given Linear issue, excluding the current stage.
+    /// Used to filter Linear comments to only those posted after the previous stage completed.
+    pub fn last_stage_finished_at(
+        &self,
+        issue_id: &str,
+        current_stage: &str,
+    ) -> Result<Option<String>> {
+        let result: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT finished_at FROM tasks
+             WHERE linear_issue_id = ?1
+               AND pipeline_stage != ?2
+               AND pipeline_stage != ''
+               AND status = 'completed'
+               AND finished_at IS NOT NULL
+             ORDER BY finished_at DESC
+             LIMIT 1",
+                rusqlite::params![issue_id, current_stage],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(result)
+    }
+
     /// Find all completed tasks with a linear_issue_id where linear_pushed=false.
     pub fn unpushed_linear_tasks(&self) -> Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(

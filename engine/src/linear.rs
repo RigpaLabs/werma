@@ -28,6 +28,13 @@ pub trait LinearApi {
     /// Get issue state type (e.g. "canceled", "completed") and team key (e.g. "RIG", "FAT").
     /// Used by cancel detection to identify canceled issues or issues moved to another team.
     fn get_issue_state_and_team(&self, issue_id: &str) -> Result<(String, String)>;
+    /// Fetch comments on an issue, optionally filtered to those created after `after_iso`.
+    /// Returns vec of (author_name, created_at_iso, body).
+    fn list_comments(
+        &self,
+        issue_id: &str,
+        after_iso: Option<&str>,
+    ) -> Result<Vec<(String, String, String)>>;
 }
 
 impl LinearApi for LinearClient {
@@ -80,6 +87,14 @@ impl LinearApi for LinearClient {
 
     fn get_issue_state_and_team(&self, issue_id: &str) -> Result<(String, String)> {
         self.get_issue_state_and_team(issue_id)
+    }
+
+    fn list_comments(
+        &self,
+        issue_id: &str,
+        after_iso: Option<&str>,
+    ) -> Result<Vec<(String, String, String)>> {
+        self.list_comments(issue_id, after_iso)
     }
 }
 
@@ -766,6 +781,62 @@ impl LinearClient {
         Ok((id, ident, title, description, labels))
     }
 
+    /// Fetch comments on an issue by UUID, optionally filtering to those after `after_iso`.
+    /// Returns vec of (author_name, created_at_iso, body) sorted chronologically.
+    pub fn list_comments(
+        &self,
+        issue_id: &str,
+        after_iso: Option<&str>,
+    ) -> Result<Vec<(String, String, String)>> {
+        let uuid = self.resolve_uuid(issue_id)?;
+
+        let data = self.query(
+            r#"query($issueId: String!) {
+                issue(id: $issueId) {
+                    comments(orderBy: createdAt) {
+                        nodes {
+                            body
+                            createdAt
+                            user { name }
+                        }
+                    }
+                }
+            }"#,
+            &json!({"issueId": uuid}),
+        )?;
+
+        let nodes = data["issue"]["comments"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        let mut comments = Vec::new();
+        for node in &nodes {
+            let body = node["body"].as_str().unwrap_or("").to_string();
+            let created_at = node["createdAt"].as_str().unwrap_or("").to_string();
+            let author = node["user"]["name"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
+
+            // Filter by timestamp if provided
+            if let Some(after) = after_iso {
+                if created_at.as_str() <= after {
+                    continue;
+                }
+            }
+
+            // Skip bot/pipeline comments (werma callback comments)
+            if body.starts_with("**Werma") || body.starts_with("**Pipeline") {
+                continue;
+            }
+
+            comments.push((author, created_at, body));
+        }
+
+        Ok(comments)
+    }
+
     /// Get issues filtered by status name, across all configured teams.
     pub fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<Value>> {
         let config = load_config()?;
@@ -1263,6 +1334,14 @@ pub mod fakes {
 
         fn get_issue_state_and_team(&self, _issue_id: &str) -> Result<(String, String)> {
             Ok(("started".to_string(), "RIG".to_string()))
+        }
+
+        fn list_comments(
+            &self,
+            _issue_id: &str,
+            _after_iso: Option<&str>,
+        ) -> Result<Vec<(String, String, String)>> {
+            Ok(vec![])
         }
     }
 }

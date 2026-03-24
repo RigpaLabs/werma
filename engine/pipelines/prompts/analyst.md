@@ -5,6 +5,8 @@ Linear issue: {issue_id}
 
 The issue context is provided above in the ---ISSUE--- block.
 
+{linear_comments}
+
 ## Instructions
 1. Read the issue description carefully from the ---ISSUE--- block
 2. Clarify requirements and identify ambiguities

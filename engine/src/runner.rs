@@ -154,6 +154,49 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
     Ok(prompt)
 }
 
+/// Fetch Linear comments for an issue at execution time.
+///
+/// Filters to comments posted after the previous pipeline stage completed,
+/// skipping werma bot comments. Returns formatted markdown or empty string.
+fn fetch_linear_comments(db: &Db, task: &Task) -> String {
+    let client = match crate::linear::LinearClient::new() {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+
+    // Find when the previous stage finished (to filter old comments)
+    let after_iso = if !task.pipeline_stage.is_empty() {
+        db.last_stage_finished_at(&task.linear_issue_id, &task.pipeline_stage)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+
+    let comments = match client.list_comments(&task.linear_issue_id, after_iso.as_deref()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "warning: could not fetch Linear comments for {}: {e}",
+                task.linear_issue_id
+            );
+            return String::new();
+        }
+    };
+
+    if comments.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("## Linear Comments (recent updates)\n\n");
+    for (author, created_at, body) in &comments {
+        // Truncate timestamp to date+time for readability
+        let ts = created_at.get(..19).unwrap_or(created_at);
+        out.push_str(&format!("**{author}** ({ts}):\n{body}\n\n---\n\n"));
+    }
+    out
+}
+
 /// Run the next pending task in a tmux session.
 /// Uses claim_next_pending for atomic find+mark-running (no TOCTOU).
 /// Returns the task ID if launched, None if no tasks available.
@@ -295,7 +338,14 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     let prompt_file = logs_dir.join(format!("{task_id}-prompt.txt"));
     let exec_script = logs_dir.join(format!("{task_id}-exec.sh"));
 
-    let full_prompt = build_prompt(task, &effective_dir, werma_dir)?;
+    let mut full_prompt = build_prompt(task, &effective_dir, werma_dir)?;
+
+    // Late-inject Linear comments at execution time (not creation time)
+    // so agents see context updates posted after task was created.
+    if full_prompt.contains("{linear_comments}") && !task.linear_issue_id.is_empty() {
+        let comments_text = fetch_linear_comments(db, task);
+        full_prompt = full_prompt.replace("{linear_comments}", &comments_text);
+    }
 
     // Write prompt to file — never interpolated into shell
     std::fs::write(&prompt_file, &full_prompt)?;

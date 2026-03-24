@@ -9,6 +9,8 @@ To post a comment on the Linear issue, write it between `---COMMENT---` and `---
 
 {issue_description}
 
+{linear_comments}
+
 {previous_output}
 
 ## Rejection Feedback

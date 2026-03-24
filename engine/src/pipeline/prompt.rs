@@ -41,7 +41,12 @@ pub fn build_vars(
 /// (backslash followed by 'n') instead of actual newlines, producing unreadable
 /// walls of text. This sanitizes them at the source before prompt rendering.
 fn sanitize_text_vars(vars: &mut HashMap<String, String>) {
-    const TEXT_KEYS: &[&str] = &["issue_description", "previous_output", "rejection_feedback"];
+    const TEXT_KEYS: &[&str] = &[
+        "issue_description",
+        "previous_output",
+        "rejection_feedback",
+        "linear_comments",
+    ];
     for key in TEXT_KEYS {
         if let Some(val) = vars.get_mut(*key) {
             let sanitized = val.replace("\\n", "\n").replace("\\t", "\t");

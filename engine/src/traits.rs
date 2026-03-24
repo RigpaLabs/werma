@@ -177,6 +177,9 @@ pub mod fakes {
         pub issue_status: RefCell<std::collections::HashMap<String, String>>,
         /// Maps issue_id -> (state_type, team_key) for get_issue_state_and_team.
         pub issue_state_and_team: RefCell<std::collections::HashMap<String, (String, String)>>,
+        /// Maps issue_id -> vec of (author, created_at, body) comments.
+        pub issue_comments:
+            RefCell<std::collections::HashMap<String, Vec<(String, String, String)>>>,
         fail_next_moves: RefCell<u32>,
     }
 
@@ -195,8 +198,16 @@ pub mod fakes {
                 issue_data: RefCell::new(std::collections::HashMap::new()),
                 issue_status: RefCell::new(std::collections::HashMap::new()),
                 issue_state_and_team: RefCell::new(std::collections::HashMap::new()),
+                issue_comments: RefCell::new(std::collections::HashMap::new()),
                 fail_next_moves: RefCell::new(0),
             }
+        }
+
+        /// Set comments that will be returned by list_comments for an issue.
+        pub fn set_issue_comments(&self, issue_id: &str, comments: Vec<(String, String, String)>) {
+            self.issue_comments
+                .borrow_mut()
+                .insert(issue_id.to_string(), comments);
         }
 
         /// Set the status that get_issue_status will return for an issue.
@@ -375,6 +386,27 @@ pub mod fakes {
             };
             // Default team: "RIG"
             Ok((state_type.to_string(), "RIG".to_string()))
+        }
+
+        fn list_comments(
+            &self,
+            issue_id: &str,
+            after_iso: Option<&str>,
+        ) -> Result<Vec<(String, String, String)>> {
+            let all = self
+                .issue_comments
+                .borrow()
+                .get(issue_id)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(after) = after_iso {
+                Ok(all
+                    .into_iter()
+                    .filter(|(_, ts, _)| ts.as_str() > after)
+                    .collect())
+            } else {
+                Ok(all)
+            }
         }
     }
 
@@ -746,6 +778,15 @@ pub mod fakes {
                 }
             }
             Ok((String::new(), String::new()))
+        }
+
+        fn list_comments(
+            &self,
+            _issue_id: &str,
+            _after_iso: Option<&str>,
+        ) -> anyhow::Result<Vec<(String, String, String)>> {
+            // StatefulFakeLinearApi doesn't track comments — return empty
+            Ok(vec![])
         }
     }
 }
