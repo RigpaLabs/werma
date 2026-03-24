@@ -69,8 +69,8 @@ pub fn check_canceled_and_stuck(
             }
         };
 
-        // Condition 1: Issue was canceled in Linear.
-        if state_type == "canceled" || state_type == "cancelled" {
+        // Condition 1: Issue was canceled or completed (Done) in Linear.
+        if state_type == "canceled" || state_type == "cancelled" || state_type == "completed" {
             cancel_task(
                 db,
                 &log_path,
