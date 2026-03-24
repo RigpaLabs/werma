@@ -55,6 +55,36 @@ pub fn parse_verdict(result: &str) -> Option<String> {
     found
 }
 
+/// Extract comment blocks from agent output.
+/// Looks for `---COMMENT---` ... `---END COMMENT---` delimiters.
+/// Returns vec of comment bodies (trimmed). Empty blocks are skipped.
+pub fn parse_comments(result: &str) -> Vec<String> {
+    let mut comments = Vec::new();
+    let mut in_comment = false;
+    let mut current = String::new();
+
+    for line in result.lines() {
+        let trimmed = line.trim();
+        if trimmed == "---COMMENT---" {
+            in_comment = true;
+            current.clear();
+        } else if trimmed == "---END COMMENT---" && in_comment {
+            in_comment = false;
+            let body = current.trim().to_string();
+            if !body.is_empty() {
+                comments.push(body);
+            }
+        } else if in_comment {
+            if !current.is_empty() {
+                current.push('\n');
+            }
+            current.push_str(line);
+        }
+    }
+
+    comments
+}
+
 /// Extract rejection/failure feedback from reviewer or QA output.
 pub fn extract_rejection_feedback(output: &str) -> String {
     let mut feedback_lines = Vec::new();
@@ -318,5 +348,58 @@ mod tests {
         assert!(!is_heavy_track(7));
         assert!(is_heavy_track(8));
         assert!(is_heavy_track(13));
+    }
+
+    #[test]
+    fn parse_comments_single_block() {
+        let output =
+            "Some output.\n---COMMENT---\nThis is my comment.\n---END COMMENT---\nVERDICT=DONE";
+        let comments = parse_comments(output);
+        assert_eq!(comments, vec!["This is my comment."]);
+    }
+
+    #[test]
+    fn parse_comments_multiple_blocks() {
+        let output = "---COMMENT---\nFirst comment.\n---END COMMENT---\nSome text.\n---COMMENT---\nSecond comment.\n---END COMMENT---";
+        let comments = parse_comments(output);
+        assert_eq!(comments, vec!["First comment.", "Second comment."]);
+    }
+
+    #[test]
+    fn parse_comments_no_blocks() {
+        let output = "Just normal output.\nVERDICT=APPROVED";
+        let comments = parse_comments(output);
+        assert!(comments.is_empty());
+    }
+
+    #[test]
+    fn parse_comments_empty_block_skipped() {
+        let output = "---COMMENT---\n   \n---END COMMENT---\n---COMMENT---\nReal content.\n---END COMMENT---";
+        let comments = parse_comments(output);
+        assert_eq!(comments, vec!["Real content."]);
+    }
+
+    #[test]
+    fn parse_comments_unclosed_block_ignored() {
+        // Unclosed block — no END COMMENT → nothing pushed
+        let output = "---COMMENT---\nOrphaned comment text.\nVERDICT=DONE";
+        let comments = parse_comments(output);
+        assert!(comments.is_empty());
+    }
+
+    #[test]
+    fn parse_comments_end_without_start_ignored() {
+        // END COMMENT before any START — should not panic or produce output
+        let output =
+            "---END COMMENT---\nSome text.\n---COMMENT---\nValid comment.\n---END COMMENT---";
+        let comments = parse_comments(output);
+        assert_eq!(comments, vec!["Valid comment."]);
+    }
+
+    #[test]
+    fn parse_comments_multiline_body() {
+        let output = "---COMMENT---\nLine one.\nLine two.\nLine three.\n---END COMMENT---";
+        let comments = parse_comments(output);
+        assert_eq!(comments, vec!["Line one.\nLine two.\nLine three."]);
     }
 }

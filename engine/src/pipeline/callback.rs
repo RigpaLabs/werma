@@ -8,7 +8,8 @@ use super::loader::{load_default, resolve_prompt};
 use super::pr::{auto_create_pr, has_open_pr_for_issue, pr_title_from_url};
 use super::prompt::{build_vars, render_prompt};
 use super::verdict::{
-    extract_rejection_feedback, is_heavy_track, parse_estimate, parse_pr_url, parse_verdict,
+    extract_rejection_feedback, is_heavy_track, parse_comments, parse_estimate, parse_pr_url,
+    parse_verdict,
 };
 use crate::db::Db;
 use crate::linear::LinearApi;
@@ -135,6 +136,14 @@ pub fn callback(
             eprintln!("callback: failed to post empty-output comment on {linear_issue_id}: {e}");
         }
         return Ok(());
+    }
+
+    // Post any comment blocks from agent output (non-critical)
+    let comments = parse_comments(result);
+    for comment_body in &comments {
+        if let Err(e) = linear.comment(linear_issue_id, comment_body) {
+            eprintln!("[CALLBACK] {linear_issue_id}: failed to post comment: {e}");
+        }
     }
 
     let stage_cfg = if let Some(s) = config.stage(stage) {

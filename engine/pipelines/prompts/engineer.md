@@ -1,6 +1,9 @@
 # Pipeline: Engineer Stage
 Linear issue: {issue_id}
 
+The issue context is provided above in the ---ISSUE--- block.
+To post a comment on the Linear issue, write it between `---COMMENT---` and `---END COMMENT---` markers in your output.
+
 ## Context
 {issue_title}
 
