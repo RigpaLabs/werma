@@ -320,6 +320,27 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
+            // RIG-274: Skip analyst if spec is already done (has spec:done or {label}:done).
+            // This prevents re-running analyst on issues that already have a completed spec,
+            // even if the trigger label is re-added (e.g., after failed label removal).
+            if *stage_name == "analyst" {
+                let done_label = format!("{label}:done");
+                let has_done = labels.iter().any(|l| {
+                    l.eq_ignore_ascii_case("spec:done") || l.eq_ignore_ascii_case(&done_label)
+                });
+                if has_done {
+                    eprintln!(
+                        "  ~ skipping analyst for {identifier}: spec already done (has done label)"
+                    );
+                    // Clean up the stale trigger label
+                    if let Err(e) = linear.remove_label(issue_id, &label) {
+                        eprintln!("  ! failed to remove stale '{label}' from {identifier}: {e}");
+                    }
+                    total_skipped += 1;
+                    continue;
+                }
+            }
+
             // Guard: don't re-run analyst if engineer has already started for this issue.
             // Prevents analyst from seeing an open PR and declaring ALREADY_DONE.
             if *stage_name == "analyst" {
@@ -467,6 +488,7 @@ pub(crate) fn build_poll_prompt(
 mod tests {
     use super::*;
     use crate::pipeline::loader::load_from_str;
+    use crate::traits::fakes::{FakeCommandRunner, FakeLinearApi};
 
     fn test_config() -> PipelineConfig {
         load_from_str(include_str!("../../pipelines/default.yaml"), "<test>").unwrap()
@@ -512,5 +534,114 @@ stages:
         assert!(prompt.contains("RIG-99"));
         assert!(prompt.contains("Bare title"));
         assert!(prompt.contains("pipeline-test")); // agent name in fallback
+    }
+
+    /// Helper: build a fake issue JSON with labels and backlog state.
+    fn fake_issue(id: &str, identifier: &str, title: &str, labels: &[&str]) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "identifier": identifier,
+            "title": title,
+            "description": "Test description",
+            "state": {"type": "backlog"},
+            "estimate": 3,
+            "labels": {
+                "nodes": labels.iter().map(|l| serde_json::json!({"name": l})).collect::<Vec<_>>()
+            }
+        })
+    }
+
+    #[test]
+    fn poll_skips_analyst_when_spec_done_label_present() {
+        // RIG-274: issues with spec:done label should not spawn analyst tasks
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Issue has both "analyze" trigger label AND "spec:done" → should be skipped
+        let issue = fake_issue(
+            "uuid-1",
+            "RIG-274",
+            "Test werma issue",
+            &["analyze", "spec:done", "repo:werma"],
+        );
+        linear.set_issues_for_label("analyze", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // No task should be created
+        let tasks = db
+            .tasks_by_linear_issue("RIG-274", Some("analyst"), false)
+            .unwrap();
+        assert!(
+            tasks.is_empty(),
+            "should not create analyst task when spec:done present"
+        );
+
+        // The stale "analyze" label should be removed
+        let removes = linear.remove_label_calls.borrow();
+        assert!(
+            removes
+                .iter()
+                .any(|(id, label)| id == "uuid-1" && label == "analyze"),
+            "should remove stale 'analyze' label, got: {removes:?}"
+        );
+    }
+
+    #[test]
+    fn poll_skips_analyst_when_analyze_done_label_present() {
+        // RIG-274: issues with analyze:done label should also be skipped
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        let issue = fake_issue(
+            "uuid-2",
+            "RIG-275",
+            "Test werma issue",
+            &["analyze", "analyze:done", "repo:werma"],
+        );
+        linear.set_issues_for_label("analyze", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        let tasks = db
+            .tasks_by_linear_issue("RIG-275", Some("analyst"), false)
+            .unwrap();
+        assert!(
+            tasks.is_empty(),
+            "should not create analyst task when analyze:done present"
+        );
+    }
+
+    #[test]
+    fn poll_skips_analyst_when_nonfailed_task_exists() {
+        // Existing dedup: non-failed task blocks re-creation
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Insert a completed analyst task for this issue
+        let mut existing = crate::db::make_test_task("20260324-001");
+        existing.status = crate::models::Status::Completed;
+        existing.linear_issue_id = "RIG-276".to_string();
+        existing.pipeline_stage = "analyst".to_string();
+        db.insert_task(&existing).unwrap();
+
+        let issue = fake_issue(
+            "uuid-3",
+            "RIG-276",
+            "Test werma issue",
+            &["analyze", "repo:werma"],
+        );
+        linear.set_issues_for_label("analyze", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // Should still only have the 1 original task
+        let tasks = db
+            .tasks_by_linear_issue("RIG-276", Some("analyst"), false)
+            .unwrap();
+        assert_eq!(tasks.len(), 1, "should not create duplicate analyst task");
     }
 }
