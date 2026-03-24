@@ -121,23 +121,25 @@ fn callback_move_failure_returns_error() {
     );
 }
 
-// ─── Test 3: poll_no_duplicate_after_completion ─────────────────────────────
+// ─── Test 3: poll_no_duplicate_while_callback_pending (RIG-209) ─────────────
+// Completed task with linear_pushed=false (callback hasn't fired yet) should
+// block the poller from creating a duplicate — prevents RIG-209 race.
 
 #[test]
-fn poll_no_duplicate_after_completion() {
+fn poll_no_duplicate_while_callback_pending() {
     let db = Db::open_in_memory().unwrap();
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
 
-    // Pre-insert a completed task for this issue+stage
+    // Pre-insert a completed but unpushed task (callback pending)
     let mut task = make_test_task("20260313-102");
     task.status = Status::Completed;
     task.linear_issue_id = "RIG-202".to_string();
     task.pipeline_stage = "engineer".to_string();
-    task.linear_pushed = true;
+    task.linear_pushed = false; // callback hasn't fired yet
     db.insert_task(&task).unwrap();
 
-    // Set up the fake Linear to return this issue at "in_progress" status
+    // Issue still at "in_progress" because callback hasn't moved it
     let issue = fake_issue(
         "uuid-202",
         "RIG-202",
@@ -148,7 +150,7 @@ fn poll_no_duplicate_after_completion() {
 
     poll(&db, &linear, &cmd).unwrap();
 
-    // Should NOT create a new task — the completed one blocks it
+    // Should NOT create a new task — unpushed completed task blocks it
     let tasks = db
         .tasks_by_linear_issue("RIG-202", Some("engineer"), false)
         .unwrap();
@@ -158,6 +160,62 @@ fn poll_no_duplicate_after_completion() {
         "expected only the original task, got {} tasks",
         tasks.len()
     );
+}
+
+// ─── Test 3b: poll_allows_respawn_after_rejection_cycle (RIG-277) ───────────
+// After reviewer rejection, the issue returns to In Progress with the old
+// engineer task completed+pushed. Poller should spawn a new engineer task.
+
+#[test]
+fn poll_allows_respawn_after_rejection_cycle() {
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+
+    ensure_working_dir();
+
+    // Engineer #1 completed and callback already processed (pushed=true)
+    let mut eng1 = make_test_task("20260324-101");
+    eng1.status = Status::Completed;
+    eng1.linear_issue_id = "RIG-277".to_string();
+    eng1.pipeline_stage = "engineer".to_string();
+    eng1.linear_pushed = true;
+    db.insert_task(&eng1).unwrap();
+
+    // Reviewer also completed and processed
+    let mut rev1 = make_test_task("20260324-102");
+    rev1.status = Status::Completed;
+    rev1.linear_issue_id = "RIG-277".to_string();
+    rev1.pipeline_stage = "reviewer".to_string();
+    rev1.linear_pushed = true;
+    db.insert_task(&rev1).unwrap();
+
+    // Issue is back at "in_progress" after reviewer rejection
+    let issue = fake_issue(
+        "uuid-277",
+        "RIG-277",
+        "Fix poller dedup",
+        &["Feature", "repo:werma"],
+    );
+    linear.set_issues_for_status("in_progress", vec![issue]);
+
+    poll(&db, &linear, &cmd).unwrap();
+
+    // Should create a NEW engineer task (RIG-277 fix)
+    let tasks = db
+        .tasks_by_linear_issue("RIG-277", Some("engineer"), false)
+        .unwrap();
+    assert_eq!(
+        tasks.len(),
+        2,
+        "expected 2 engineer tasks (original + respawn), got {}",
+        tasks.len()
+    );
+
+    // The new task should be pending
+    let new_task = tasks.iter().find(|t| t.id != "20260324-101").unwrap();
+    assert_eq!(new_task.status, Status::Pending);
+    assert_eq!(new_task.pipeline_stage, "engineer");
 }
 
 // ─── Test 4: poll_skips_review_when_review_task_exists (RIG-135) ────────────
