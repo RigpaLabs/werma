@@ -103,7 +103,7 @@ const LINEAR_API: &str = "https://api.linear.app/graphql";
 /// Compare two ISO 8601 timestamps, returning true if `ts` is strictly after `after`.
 /// Handles format mismatches between SQLite (local, no TZ) and Linear (UTC with millis).
 /// Falls back to string comparison if chrono parsing fails.
-fn is_after_timestamp(ts: &str, after: &str) -> bool {
+pub(crate) fn is_after_timestamp(ts: &str, after: &str) -> bool {
     use chrono::{DateTime, NaiveDateTime, Utc};
 
     // Try parsing both as full RFC 3339 / ISO 8601 with timezone

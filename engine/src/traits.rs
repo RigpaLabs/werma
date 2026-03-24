@@ -402,7 +402,7 @@ pub mod fakes {
             if let Some(after) = after_iso {
                 Ok(all
                     .into_iter()
-                    .filter(|(_, ts, _)| ts.as_str() > after)
+                    .filter(|(_, ts, _)| crate::linear::is_after_timestamp(ts.as_str(), after))
                     .collect())
             } else {
                 Ok(all)
