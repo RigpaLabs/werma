@@ -1,6 +1,7 @@
 pipeline: default
 description: Standard dev pipeline (analyst → engineer → reviewer)
-max_concurrent: 5
+max_concurrent: 8
+launch_stagger_secs: 4
 
 templates:
   verdict_instruction: "Output your verdict on the LAST line of your response"
