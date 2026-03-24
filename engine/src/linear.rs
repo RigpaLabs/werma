@@ -100,6 +100,31 @@ impl LinearApi for LinearClient {
 
 const LINEAR_API: &str = "https://api.linear.app/graphql";
 
+/// Compare two ISO 8601 timestamps, returning true if `ts` is strictly after `after`.
+/// Handles format mismatches between SQLite (local, no TZ) and Linear (UTC with millis).
+/// Falls back to string comparison if chrono parsing fails.
+fn is_after_timestamp(ts: &str, after: &str) -> bool {
+    use chrono::{DateTime, NaiveDateTime, Utc};
+
+    // Try parsing both as full RFC 3339 / ISO 8601 with timezone
+    let parse_ts = |s: &str| -> Option<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .ok()
+            .or_else(|| {
+                // Fallback: parse as naive (no timezone) — assume UTC
+                NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+                    .map(|ndt| ndt.and_utc())
+                    .ok()
+            })
+    };
+
+    match (parse_ts(ts), parse_ts(after)) {
+        (Some(t), Some(a)) => t > a,
+        _ => ts > after, // fallback to string comparison
+    }
+}
+
 /// Per-team configuration (team_id, team_key, and workflow status mapping).
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct TeamConfig {
@@ -791,7 +816,7 @@ impl LinearClient {
         let uuid = self.resolve_uuid(issue_id)?;
 
         let data = self.query(
-            r#"query($issueId: String!) {
+            r#"query($issueId: ID!) {
                 issue(id: $issueId) {
                     comments(orderBy: createdAt) {
                         nodes {
@@ -819,9 +844,11 @@ impl LinearClient {
                 .unwrap_or("unknown")
                 .to_string();
 
-            // Filter by timestamp if provided
+            // Filter by timestamp if provided — use chrono for proper comparison
+            // since SQLite stores local time (%Y-%m-%dT%H:%M:%S) and Linear
+            // returns UTC with fractional seconds (2026-03-24T15:30:00.000Z).
             if let Some(after) = after_iso {
-                if created_at.as_str() <= after {
+                if !is_after_timestamp(&created_at, after) {
                     continue;
                 }
             }
@@ -1599,6 +1626,41 @@ mod tests {
         // This tests the error path (file doesn't exist in test env)
         let result = read_env_file_key("NONEXISTENT_KEY");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn is_after_timestamp_same_format() {
+        // Both full ISO 8601 with timezone
+        assert!(is_after_timestamp(
+            "2026-03-24T16:00:00.000Z",
+            "2026-03-24T15:00:00.000Z"
+        ));
+        assert!(!is_after_timestamp(
+            "2026-03-24T14:00:00.000Z",
+            "2026-03-24T15:00:00.000Z"
+        ));
+    }
+
+    #[test]
+    fn is_after_timestamp_mixed_formats() {
+        // SQLite naive (no TZ) vs Linear RFC 3339 (with Z)
+        // Both treated as UTC for comparison
+        assert!(is_after_timestamp(
+            "2026-03-24T16:00:00.000Z",
+            "2026-03-24T15:00:00"
+        ));
+        assert!(!is_after_timestamp(
+            "2026-03-24T14:00:00.000Z",
+            "2026-03-24T15:00:00"
+        ));
+    }
+
+    #[test]
+    fn is_after_timestamp_equal_is_not_after() {
+        assert!(!is_after_timestamp(
+            "2026-03-24T15:00:00.000Z",
+            "2026-03-24T15:00:00"
+        ));
     }
 
     #[test]

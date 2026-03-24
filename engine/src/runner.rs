@@ -121,7 +121,6 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
                 if !labels.is_empty() {
                     prompt.push_str(&format!("Labels: {}\n", labels.join(", ")));
                 }
-                // TODO: fetch and inject comments when LinearClient::list_comments is available
                 prompt.push_str("---END ISSUE---\n\n");
             }
             Err(e) => {
@@ -158,12 +157,7 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
 ///
 /// Filters to comments posted after the previous pipeline stage completed,
 /// skipping werma bot comments. Returns formatted markdown or empty string.
-fn fetch_linear_comments(db: &Db, task: &Task) -> String {
-    let client = match crate::linear::LinearClient::new() {
-        Ok(c) => c,
-        Err(_) => return String::new(),
-    };
-
+fn fetch_linear_comments(linear: &dyn crate::linear::LinearApi, db: &Db, task: &Task) -> String {
     // Find when the previous stage finished (to filter old comments)
     let after_iso = if !task.pipeline_stage.is_empty() {
         db.last_stage_finished_at(&task.linear_issue_id, &task.pipeline_stage)
@@ -173,7 +167,7 @@ fn fetch_linear_comments(db: &Db, task: &Task) -> String {
         None
     };
 
-    let comments = match client.list_comments(&task.linear_issue_id, after_iso.as_deref()) {
+    let comments = match linear.list_comments(&task.linear_issue_id, after_iso.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!(
@@ -194,7 +188,8 @@ fn fetch_linear_comments(db: &Db, task: &Task) -> String {
         let ts = created_at.get(..19).unwrap_or(created_at);
         out.push_str(&format!("**{author}** ({ts}):\n{body}\n\n---\n\n"));
     }
-    out
+    // Sanitize escaped newlines/tabs that may come from Linear comment bodies
+    out.replace("\\n", "\n").replace("\\t", "\t")
 }
 
 /// Run the next pending task in a tmux session.
@@ -342,8 +337,15 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
 
     // Late-inject Linear comments at execution time (not creation time)
     // so agents see context updates posted after task was created.
-    if full_prompt.contains("{linear_comments}") && !task.linear_issue_id.is_empty() {
-        let comments_text = fetch_linear_comments(db, task);
+    if full_prompt.contains("{linear_comments}") {
+        let comments_text = if task.linear_issue_id.is_empty() {
+            String::new()
+        } else if let Ok(client) = crate::linear::LinearClient::new() {
+            fetch_linear_comments(&client, db, task)
+        } else {
+            eprintln!("warning: could not initialize Linear client, skipping comment fetch");
+            String::new()
+        };
         full_prompt = full_prompt.replace("{linear_comments}", &comments_text);
     }
 
