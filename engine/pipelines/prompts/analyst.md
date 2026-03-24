@@ -14,6 +14,8 @@ The issue context is provided above in the ---ISSUE--- block.
 6. Include acceptance criteria
 7. Identify risks and dependencies
 
+**CRITICAL: Do NOT create any local files.** You are a read-only research stage — do not write, create, or modify any files in the repository. Your spec must be posted as a comment block (see below), not saved to a file.
+
 To post a comment on the issue, write it between `---COMMENT---` and `---END COMMENT---` markers:
 ```
 ---COMMENT---
