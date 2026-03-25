@@ -92,6 +92,8 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     }
 
     let mut max_concurrent = crate::pipeline::load_max_concurrent();
+    let mut launch_stagger_secs = crate::pipeline::load_launch_stagger_secs();
+    let mut last_launch: Option<Instant> = None;
 
     // Trigger pipeline poll immediately on first tick.
     let mut last_pipeline_poll = Instant::now() - Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS);
@@ -124,11 +126,13 @@ pub fn run(werma_dir: &Path) -> Result<()> {
         let tick_start = Instant::now();
 
         if let Ok(db) = Db::open(&db_path) {
-            if let Err(e) = cron::check_schedules(&db, werma_dir) {
+            if let Err(e) = cron::check_schedules(&db, &db, werma_dir) {
                 log_daemon(&log_path, &format!("schedule check error: {e}"));
             }
 
-            if let Err(e) = pipeline::process_completed_tasks(&db, werma_dir) {
+            if let Err(e) =
+                pipeline::process_completed_tasks(&db, werma_dir, &cmd_runner, &notifier)
+            {
                 log_daemon(&log_path, &format!("pipeline callback error: {e}"));
             }
 
@@ -154,8 +158,27 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 last_cancel_check = Instant::now();
             }
 
-            if let Err(e) = queue::drain_queue(&db, werma_dir, max_concurrent, &tmux) {
-                log_daemon(&log_path, &format!("queue drain error: {e}"));
+            // Drain the queue: launch as many tasks as possible in this tick,
+            // respecting max_concurrent and stagger cooldown.
+            // try_launch_one returns false when cooldown hasn't elapsed yet or no
+            // more tasks are available — either way, stop trying this tick.
+            loop {
+                match queue::try_launch_one(
+                    &db,
+                    werma_dir,
+                    max_concurrent,
+                    launch_stagger_secs,
+                    last_launch,
+                    &tmux,
+                ) {
+                    Ok(true) => last_launch = Some(Instant::now()),
+                    Ok(false) => break,
+                    Err(e) => {
+                        last_launch = Some(Instant::now());
+                        log_daemon(&log_path, &format!("queue launch error: {e}"));
+                        break;
+                    }
+                }
             }
 
             if let Err(e) = cleanup::rotate_logs(werma_dir) {
@@ -170,6 +193,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                     &log_path,
                     &mut cleanliness_notified,
                     CLEANLINESS_COOLDOWN_SECS,
+                    &notifier,
                 ) {
                     log_daemon(&log_path, &format!("main branch check error: {e}"));
                 }
@@ -178,6 +202,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
             if last_pipeline_poll.elapsed() >= Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS) {
                 max_concurrent = crate::pipeline::load_max_concurrent();
+                launch_stagger_secs = crate::pipeline::load_launch_stagger_secs();
                 if let Some(ref lp) = linear_poll {
                     if let Err(e) = crate::pipeline::poll(&db, lp, &cmd_runner) {
                         log_daemon(&log_path, &format!("pipeline poll error: {e}"));

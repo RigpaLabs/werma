@@ -184,6 +184,53 @@ pub(crate) fn auto_create_pr(
     }
 }
 
+/// Post a comment on a GitHub PR for the given working directory.
+///
+/// Finds the PR number from the current branch, then posts the comment body.
+/// Returns Ok(true) if comment was posted, Ok(false) if no PR found, Err on failure.
+pub(crate) fn post_pr_comment(
+    cmd: &dyn CommandRunner,
+    working_dir: &str,
+    comment_body: &str,
+) -> Result<bool> {
+    let working_dir = resolve_home(working_dir);
+
+    // Find PR number for the current branch
+    let pr_output = cmd
+        .run(
+            "gh",
+            &["pr", "view", "--json", "number", "-q", ".number"],
+            Some(&working_dir),
+        )
+        .context("gh pr view")?;
+
+    if !pr_output.success {
+        return Ok(false);
+    }
+
+    let pr_num = pr_output.stdout_str();
+    if pr_num.is_empty() {
+        return Ok(false);
+    }
+
+    // Post comment
+    let result = cmd
+        .run(
+            "gh",
+            &["pr", "comment", &pr_num, "--body", comment_body],
+            Some(&working_dir),
+        )
+        .context("gh pr comment")?;
+
+    if !result.success {
+        let stderr = result.stderr_str();
+        eprintln!("post_pr_comment: gh pr comment failed: {stderr}");
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
 /// Derive a short title from a GitHub PR URL (e.g. "PR #42").
 pub(crate) fn pr_title_from_url(url: &str) -> String {
     url.rsplit('/')
@@ -257,5 +304,47 @@ mod tests {
 
         let found = pr_exists_for_issue(&cmd, "/tmp", "RIG-100", "open");
         assert!(!found);
+    }
+
+    // ─── post_pr_comment ─────────────────────────────────────────────────
+
+    #[test]
+    fn post_pr_comment_success() {
+        let cmd = FakeCommandRunner::new();
+        // gh pr view returns PR number
+        cmd.push_success("42");
+        // gh pr comment succeeds
+        cmd.push_success("");
+
+        let result = post_pr_comment(&cmd, "/tmp", "Great code!").unwrap();
+        assert!(result, "should return true on success");
+
+        let calls = cmd.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "gh");
+        assert_eq!(calls[1].0, "gh");
+        assert!(calls[1].1.contains(&"comment".to_string()));
+        assert!(calls[1].1.contains(&"42".to_string()));
+        assert!(calls[1].1.contains(&"Great code!".to_string()));
+    }
+
+    #[test]
+    fn post_pr_comment_no_pr() {
+        let cmd = FakeCommandRunner::new();
+        // gh pr view fails (no PR for current branch)
+        cmd.push_failure("no pull requests found");
+
+        let result = post_pr_comment(&cmd, "/tmp", "Review text").unwrap();
+        assert!(!result, "should return false when no PR found");
+    }
+
+    #[test]
+    fn post_pr_comment_empty_pr_number() {
+        let cmd = FakeCommandRunner::new();
+        // gh pr view returns empty (edge case)
+        cmd.push_success("");
+
+        let result = post_pr_comment(&cmd, "/tmp", "Review text").unwrap();
+        assert!(!result, "should return false on empty PR number");
     }
 }
