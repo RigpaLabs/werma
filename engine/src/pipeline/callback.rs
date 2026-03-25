@@ -5,11 +5,11 @@ use anyhow::{Result, anyhow};
 use super::config::PipelineConfig;
 use super::helpers::{infer_working_dir_from_issue, truncate_lines};
 use super::loader::{load_default, resolve_prompt};
-use super::pr::{auto_create_pr, has_open_pr_for_issue, pr_title_from_url};
+use super::pr::{auto_create_pr, has_open_pr_for_issue, post_pr_comment, pr_title_from_url};
 use super::prompt::{build_vars, render_prompt};
 use super::verdict::{
-    extract_rejection_feedback, is_heavy_track, parse_comments, parse_estimate, parse_pr_url,
-    parse_verdict,
+    extract_rejection_feedback, extract_review_body, is_heavy_track, parse_comments,
+    parse_estimate, parse_pr_url, parse_verdict,
 };
 use crate::db::Db;
 use crate::linear::LinearApi;
@@ -319,6 +319,31 @@ pub fn callback(
         } else {
             None
         };
+
+        // RIG-281: Post reviewer's review as a PR comment (engine-side, not agent-side).
+        // Agents no longer call `gh pr comment` directly — the engine handles it.
+        if stage == "reviewer" {
+            if let Some(review_body) = extract_review_body(result) {
+                match post_pr_comment(cmd, working_dir, &review_body) {
+                    Ok(true) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: posted review as PR comment (task {task_id})"
+                        );
+                    }
+                    Ok(false) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: no open PR found for review comment \
+                             (task {task_id})"
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: failed to post review as PR comment: {e}"
+                        );
+                    }
+                }
+            }
+        }
 
         // Post a comment — non-critical, don't fail the callback if this errors.
         let comment = format_callback_comment(
