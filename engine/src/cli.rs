@@ -205,6 +205,9 @@ pub enum Commands {
     /// Run database migrations (stub)
     Migrate,
 
+    /// Build and upload macOS binary to GitHub Releases
+    Build,
+
     /// Self-update from GitHub Releases
     Update,
 

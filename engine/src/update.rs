@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, bail};
 
-const GITHUB_REPO: &str = "RigpaLabs/werma";
+pub(crate) const GITHUB_REPO: &str = "RigpaLabs/werma";
 
 /// Read GitHub token from GITHUB_TOKEN, GH_TOKEN, or `gh auth token` fallback.
-fn github_token() -> Result<String> {
+pub(crate) fn github_token() -> Result<String> {
     if let Ok(token) = std::env::var("GITHUB_TOKEN") {
         return Ok(token);
     }
@@ -27,7 +27,7 @@ fn github_token() -> Result<String> {
 }
 
 /// Platform target triple for the current binary.
-fn current_target() -> &'static str {
+pub(crate) fn current_target() -> &'static str {
     if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
         "aarch64-apple-darwin"
     } else if cfg!(target_os = "macos") && cfg!(target_arch = "x86_64") {

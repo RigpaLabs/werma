@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::db::Db;
-use crate::{backup, dashboard, migrate, update};
+use crate::{backup, build, dashboard, migrate, update};
 
 pub fn cmd_version() {
     println!("werma {}", crate::version_string());
@@ -19,6 +19,10 @@ pub fn cmd_backup() -> Result<()> {
 
 pub fn cmd_migrate(db: &Db) -> Result<()> {
     migrate::migrate(db)
+}
+
+pub fn cmd_build() -> Result<()> {
+    build::build()
 }
 
 pub fn cmd_update() -> Result<()> {

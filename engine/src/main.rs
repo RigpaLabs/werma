@@ -1,5 +1,6 @@
 mod art;
 mod backup;
+mod build;
 mod cli;
 mod commands;
 mod config;
@@ -287,6 +288,8 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+
+        cli::Commands::Build => commands::misc::cmd_build()?,
 
         cli::Commands::Update => commands::misc::cmd_update()?,
 
@@ -914,6 +917,14 @@ mod tests {
             match parse(&["migrate"]) {
                 Commands::Migrate => {}
                 other => panic!("expected Migrate, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_build() {
+            match parse(&["build"]) {
+                Commands::Build => {}
+                other => panic!("expected Build, got {other:?}"),
             }
         }
 
