@@ -546,25 +546,31 @@ run_claude() {{
         --output-format json
 }}
 
+is_rate_limit() {{
+    # Check multiple sources for rate-limit indicators:
+    # 1. stderr (redirected to LOG_FILE) — CLI error messages
+    # 2. stdout (partial RESULT_JSON) — JSON error responses from API
+    # 3. exit code 429 directly
+    local exit_code="${{1:-0}}"
+    local stdout_text="${{2:-}}"
+    [ "$exit_code" = "429" ] && return 0
+    local combined
+    combined="$(tail -20 "$LOG_FILE" 2>/dev/null || echo "")
+$stdout_text"
+    echo "$combined" | grep -qiE "rate.?limit|429|too many requests|quota.?exceeded|server.?overloaded|api.?capacity|overloaded_error"
+}}
+
 RESULT_JSON=$(run_claude "$MODEL") || {{
     EXIT_CODE=$?
     echo "$(date): CLAUDE_EXIT code=$EXIT_CODE model=$MODEL" >> "$LOG_FILE"
-    # Check if fallback model is configured and error looks like a rate limit
-    if [ -n "$FALLBACK_MODEL" ]; then
-        LAST_LINES=$(tail -20 "$LOG_FILE" 2>/dev/null || echo "")
-        if echo "$LAST_LINES" | grep -qiE "rate.?limit|429|too many requests|quota.?exceeded|server.?overloaded|api.?capacity"; then
-            echo "$(date): primary model $MODEL rate-limited (exit $EXIT_CODE), retrying with fallback $FALLBACK_MODEL" >> "$LOG_FILE"
-            RESULT_JSON=$(run_claude "$FALLBACK_MODEL") || {{
-                echo "$(date): FAILED with fallback model (exit $?)" >> "$LOG_FILE"
-                werma fail "$TASK_ID"
-                exit 1
-            }}
-            MODEL="$FALLBACK_MODEL"
-        else
-            echo "$(date): FAILED (exit $EXIT_CODE, no rate-limit match)" >> "$LOG_FILE"
+    if [ -n "$FALLBACK_MODEL" ] && is_rate_limit "$EXIT_CODE" "$RESULT_JSON"; then
+        echo "$(date): WARNING: $MODEL rate-limited, falling back to $FALLBACK_MODEL for task $TASK_ID" >> "$LOG_FILE"
+        RESULT_JSON=$(run_claude "$FALLBACK_MODEL") || {{
+            echo "$(date): FAILED — fallback model $FALLBACK_MODEL also failed (exit $?)" >> "$LOG_FILE"
             werma fail "$TASK_ID"
             exit 1
-        fi
+        }}
+        MODEL="$FALLBACK_MODEL"
     else
         echo "$(date): FAILED (exit $EXIT_CODE)" >> "$LOG_FILE"
         werma fail "$TASK_ID"
@@ -598,6 +604,34 @@ if [ "$SUBTYPE" = "error_max_turns" ]; then
     fi
     werma fail "$TASK_ID"
     exit 1
+fi
+
+# RIG-299: Detect rate-limit errors in successful JSON responses (exit 0 but API error).
+# Claude CLI may return exit 0 with an error JSON body on overload/rate-limit.
+IS_ERROR=$(echo "$RESULT_JSON" | jq -r '.is_error // empty' 2>/dev/null || echo "")
+if [ "$IS_ERROR" = "true" ] && is_rate_limit 0 "$RESULT_JSON"; then
+    if [ -n "$FALLBACK_MODEL" ]; then
+        echo "$(date): WARNING: $MODEL returned rate-limit error in JSON, falling back to $FALLBACK_MODEL for task $TASK_ID" >> "$LOG_FILE"
+        RESULT_JSON=$(run_claude "$FALLBACK_MODEL") || {{
+            echo "$(date): FAILED — fallback model $FALLBACK_MODEL also failed (exit $?)" >> "$LOG_FILE"
+            werma fail "$TASK_ID"
+            exit 1
+        }}
+        MODEL="$FALLBACK_MODEL"
+        # Re-extract result fields from fallback response
+        RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.result // empty' 2>/dev/null)
+        if [ -z "$RESULT_TEXT" ]; then
+            RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.content // .message // .text // empty' 2>/dev/null)
+        fi
+        if [ -z "$RESULT_TEXT" ]; then
+            RESULT_TEXT="$RESULT_JSON"
+        fi
+        SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+    else
+        echo "$(date): FAILED — rate-limit error in JSON, no fallback configured" >> "$LOG_FILE"
+        werma fail "$TASK_ID"
+        exit 1
+    fi
 fi
 
 # Guard: if truly empty (claude returned nothing), log and fail
@@ -1106,7 +1140,7 @@ mod tests {
         assert!(script.contains(
             "rate.?limit|429|too many requests|quota.?exceeded|server.?overloaded|api.?capacity",
         ));
-        assert!(script.contains("retrying with fallback"));
+        assert!(script.contains("falling back to"));
     }
 
     #[test]
@@ -1384,5 +1418,172 @@ mod tests {
 
         let result = fetch_linear_comments(&linear, &db, &task);
         assert!(result.is_empty(), "should be empty when no comments");
+    }
+
+    // ─── RIG-299: Fallback model tests ──────────────────────────────────────
+
+    #[test]
+    fn resolve_fallback_model_returns_none_for_non_pipeline_task() {
+        let task = Task {
+            pipeline_stage: String::new(),
+            ..Default::default()
+        };
+        assert!(resolve_fallback_model(&task).is_none());
+    }
+
+    #[test]
+    fn resolve_fallback_model_returns_fallback_for_pipeline_task() {
+        let task = Task {
+            pipeline_stage: "engineer".to_string(),
+            ..Default::default()
+        };
+        let result = resolve_fallback_model(&task);
+        // default.yaml has fallback: sonnet for engineer stage
+        assert_eq!(result.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn resolve_fallback_model_returns_none_for_stage_without_fallback() {
+        let task = Task {
+            pipeline_stage: "deployer".to_string(),
+            ..Default::default()
+        };
+        let result = resolve_fallback_model(&task);
+        // deployer stage has no fallback configured
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn exec_script_contains_fallback_model_when_configured() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-001",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "claude-opus-4-6",
+            fallback_model: Some("claude-sonnet-4-6"),
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        assert!(
+            script.contains("FALLBACK_MODEL='claude-sonnet-4-6'"),
+            "script should set FALLBACK_MODEL"
+        );
+        assert!(
+            script.contains("is_rate_limit"),
+            "script should contain rate-limit detection function"
+        );
+        assert!(
+            script.contains("falling back to"),
+            "script should have fallback warning log"
+        );
+    }
+
+    #[test]
+    fn exec_script_empty_fallback_when_not_configured() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-002",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "claude-opus-4-6",
+            fallback_model: None,
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        assert!(
+            script.contains("FALLBACK_MODEL=''"),
+            "script should have empty FALLBACK_MODEL"
+        );
+    }
+
+    #[test]
+    fn exec_script_rate_limit_detection_checks_multiple_sources() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-003",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "claude-opus-4-6",
+            fallback_model: Some("claude-sonnet-4-6"),
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        // Verify the is_rate_limit function checks multiple patterns
+        assert!(
+            script.contains("overloaded_error"),
+            "should detect overloaded_error (Claude API error type)"
+        );
+        assert!(script.contains("429"), "should detect HTTP 429 status");
+        assert!(script.contains("quota"), "should detect quota exhaustion");
+        // Verify it checks both stderr (LOG_FILE) and stdout
+        assert!(
+            script.contains("tail -20 \"$LOG_FILE\""),
+            "should check stderr via LOG_FILE"
+        );
+        assert!(script.contains("stdout_text"), "should check stdout output");
+    }
+
+    #[test]
+    fn exec_script_json_error_fallback() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-004",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "claude-opus-4-6",
+            fallback_model: Some("claude-sonnet-4-6"),
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        // Verify the script handles is_error=true JSON responses with rate-limit
+        assert!(
+            script.contains("IS_ERROR"),
+            "should extract is_error from JSON"
+        );
+        assert!(
+            script.contains("rate-limit error in JSON"),
+            "should log JSON rate-limit detection"
+        );
+    }
+
+    #[test]
+    fn exec_script_fallback_failure_marks_task_failed() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-005",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "claude-opus-4-6",
+            fallback_model: Some("claude-sonnet-4-6"),
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        // After fallback failure, should call werma fail
+        assert!(
+            script.contains("fallback model $FALLBACK_MODEL also failed"),
+            "should log fallback failure"
+        );
+        // Count werma fail calls — should be multiple (primary fail, fallback fail, JSON fail)
+        let fail_count = script.matches("werma fail").count();
+        assert!(
+            fail_count >= 3,
+            "should have at least 3 werma fail paths (no fallback, fallback failed, JSON fallback failed), got {fail_count}"
+        );
     }
 }
