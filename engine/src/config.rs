@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -5,12 +6,19 @@ use serde::Deserialize;
 /// Default number of completed/failed/canceled tasks shown in `werma st`.
 pub const DEFAULT_COMPLETED_LIMIT: usize = 17;
 
+/// Default base directory for repo convention fallback.
+const DEFAULT_REPO_BASE: &str = "~/projects/rigpa";
+
 /// User-level configuration loaded from `~/.werma/config.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct UserConfig {
     /// Max completed/failed/canceled tasks in `werma st` (0 = unlimited).
     pub completed_limit: Option<usize>,
+
+    /// Repo label → local directory mapping.
+    /// Example: `werma = "~/projects/rigpa/werma"`
+    pub repos: HashMap<String, String>,
 }
 
 impl UserConfig {
@@ -21,6 +29,36 @@ impl UserConfig {
             Some(n) => Some(n),
             None => Some(DEFAULT_COMPLETED_LIMIT),
         }
+    }
+
+    /// Resolve a repo label to its local directory path.
+    /// Priority: explicit config entry → convention `~/projects/rigpa/{repo_name}`.
+    pub fn repo_dir(&self, repo: &str) -> String {
+        if let Some(dir) = self.repos.get(repo) {
+            return dir.clone();
+        }
+        format!("{DEFAULT_REPO_BASE}/{repo}")
+    }
+
+    /// Return all repo mappings: explicit config entries merged with defaults.
+    /// Explicit config entries override the defaults.
+    pub fn all_repos(&self) -> HashMap<String, String> {
+        let mut repos = self.repos.clone();
+        // Add convention-based defaults for well-known repos (if not overridden)
+        for name in &[
+            "werma",
+            "fathom",
+            "hyper-liq",
+            "sui-bots",
+            "ar-quant",
+            "ar-quant-alpha",
+            "sigil",
+        ] {
+            repos
+                .entry((*name).to_string())
+                .or_insert_with(|| format!("{DEFAULT_REPO_BASE}/{name}"));
+        }
+        repos
     }
 
     /// Load config from a specific path; returns `Default` on missing/invalid file.
@@ -203,5 +241,64 @@ mod tests {
 
         let cfg = UserConfig::load_from(&path);
         assert_eq!(cfg.resolved_completed_limit(), Some(5));
+    }
+
+    // ─── Repo config tests ──────────────────────────────────────────────
+
+    #[test]
+    fn repo_dir_convention_fallback() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.repo_dir("werma"), "~/projects/rigpa/werma");
+        assert_eq!(cfg.repo_dir("fathom"), "~/projects/rigpa/fathom");
+        assert_eq!(cfg.repo_dir("new-repo"), "~/projects/rigpa/new-repo");
+    }
+
+    #[test]
+    fn repo_dir_config_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[repos]\nwerma = \"/custom/werma\"\nmy-repo = \"/opt/my-repo\"\n",
+        )
+        .unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        assert_eq!(cfg.repo_dir("werma"), "/custom/werma");
+        assert_eq!(cfg.repo_dir("my-repo"), "/opt/my-repo");
+        // Non-overridden repos use convention
+        assert_eq!(cfg.repo_dir("fathom"), "~/projects/rigpa/fathom");
+    }
+
+    #[test]
+    fn all_repos_merges_config_and_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[repos]\nwerma = \"/custom/werma\"\nextra = \"/opt/extra\"\n",
+        )
+        .unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        let repos = cfg.all_repos();
+
+        // Custom override
+        assert_eq!(repos["werma"], "/custom/werma");
+        // Extra repo from config
+        assert_eq!(repos["extra"], "/opt/extra");
+        // Convention-based defaults
+        assert_eq!(repos["fathom"], "~/projects/rigpa/fathom");
+        assert_eq!(repos["sigil"], "~/projects/rigpa/sigil");
+    }
+
+    #[test]
+    fn repos_empty_by_default() {
+        let cfg = UserConfig::default();
+        assert!(cfg.repos.is_empty());
+        // all_repos still returns well-known repos
+        let repos = cfg.all_repos();
+        assert!(repos.contains_key("werma"));
+        assert!(repos.contains_key("fathom"));
     }
 }

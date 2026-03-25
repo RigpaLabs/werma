@@ -1,0 +1,33 @@
+# Pipeline: Engineer Stage
+Linear issue: {{issue_id}}
+
+---ISSUE---
+ID: {{issue_id}}
+Title: {{issue_title}}
+Description:
+{{issue_description}}
+---END ISSUE---
+
+## Context
+{{issue_title}}
+
+{{issue_description}}
+
+## Rejection Feedback
+{{rejection_feedback}}
+
+## Instructions
+You are implementing changes for a Linear issue. You may be:
+1. **Starting fresh** — the analyst spec is in the handoff context file
+2. **Fixing rejection** — the reviewer found issues listed above in "Rejection Feedback"
+
+### Workflow
+1. Read the handoff context file and any rejection feedback
+2. Implement the changes (or fix the issues raised by the reviewer)
+3. Pre-commit verification — ALL must pass before committing
+4. Stage and commit with conventional commit format: `RIG-XX type: description`
+5. Push: `git push -u origin HEAD`
+
+IMPORTANT: Do NOT call `gh pr create`, `gh pr merge`, or any other `gh` write commands directly. The pipeline engine handles PR creation and all GitHub mutations automatically after your task completes. Your job is to write code, commit, and push.
+
+Output your verdict on the LAST line of your response. Example: `VERDICT=DONE`

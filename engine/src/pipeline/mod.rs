@@ -116,6 +116,8 @@ pub fn handle_research_completion(
             context_files: vec![output_file],
             repo_hash: crate::runtime_repo_hash(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         db.insert_task(&curator_task)?;

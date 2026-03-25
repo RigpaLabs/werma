@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::db::Db;
-use crate::traits::{RealCommandRunner, RealNotifier};
+use crate::traits::{CommandRunner, Notifier};
 use crate::{linear, pipeline};
 
 use super::log_daemon;
@@ -15,7 +15,12 @@ const MAX_CALLBACK_ATTEMPTS: i32 = 5;
 /// Process completed tasks that have Linear integration but haven't been pushed yet.
 /// Pipeline tasks get routed through `pipeline::callback()` to advance the issue state.
 /// Non-pipeline tasks get a comment + move-to-Done via `linear.push()`.
-pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
+pub fn process_completed_tasks(
+    db: &Db,
+    werma_dir: &Path,
+    cmd_runner: &dyn CommandRunner,
+    notifier: &dyn Notifier,
+) -> Result<()> {
     let log_path = werma_dir.join("logs/daemon.log");
     let tasks = db.unpushed_linear_tasks()?;
 
@@ -34,8 +39,6 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
             None
         }
     };
-    let cmd_runner = RealCommandRunner;
-    let notifier = RealNotifier;
 
     let now = chrono::Local::now().naive_local();
 
@@ -83,8 +86,8 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                 &task.linear_issue_id,
                 &task.working_dir,
                 linear_client,
-                &cmd_runner,
-                &notifier,
+                cmd_runner,
+                notifier,
             ) {
                 Ok(()) => {
                     db.set_linear_pushed(&task.id, true)?;
@@ -251,6 +254,7 @@ fn write_dead_letter(
 mod tests {
     use crate::db::Db;
     use crate::models::{Status, Task};
+    use crate::traits::fakes::{FakeCommandRunner, FakeNotifier};
 
     fn make_task(id: &str, pipeline_stage: &str, task_type: &str) -> Task {
         Task {
@@ -275,6 +279,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         }
     }
 
@@ -351,7 +357,13 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
         let db = Db::open_in_memory().unwrap();
 
-        super::process_completed_tasks(&db, dir.path()).unwrap();
+        super::process_completed_tasks(
+            &db,
+            dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -383,7 +395,13 @@ mod tests {
         // Verify it's in unpushed list before
         assert_eq!(db.unpushed_linear_tasks().unwrap().len(), 1);
 
-        super::process_completed_tasks(&db, dir.path()).unwrap();
+        super::process_completed_tasks(
+            &db,
+            dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+        )
+        .unwrap();
 
         // After TTL, should be marked as pushed
         let unpushed = db.unpushed_linear_tasks().unwrap();
@@ -407,7 +425,12 @@ mod tests {
         // Callback will fire (not TTL'd) — even if it fails/succeeds, the point
         // is that TTL didn't skip it. Verify the task was NOT skipped by TTL
         // by checking that the callback attempted to process it (log file will have output).
-        let _ = super::process_completed_tasks(&db, dir.path());
+        let _ = super::process_completed_tasks(
+            &db,
+            dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+        );
 
         let log_content =
             std::fs::read_to_string(dir.path().join("logs/daemon.log")).unwrap_or_default();

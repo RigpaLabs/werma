@@ -1,11 +1,14 @@
 # Pipeline: Analyst Stage
-Linear issue: {issue_id}
+Linear issue: {{issue_id}}
 
-[{issue_id}] {issue_title}
+[{{issue_id}}] {{issue_title}}
 
-The issue context is provided above in the ---ISSUE--- block.
-
-{linear_comments}
+---ISSUE---
+ID: {{issue_id}}
+Title: {{issue_title}}
+Description:
+{{issue_description}}
+---END ISSUE---
 
 ## Instructions
 1. Read the issue description carefully from the ---ISSUE--- block
@@ -27,4 +30,4 @@ Your comment text here.
 
 Post the spec as a comment block using the markers above. Do NOT use any Linear MCP tools.
 
-{verdict_instruction}. Example: `VERDICT=DONE`, `VERDICT=BLOCKED`, or `VERDICT=ALREADY_DONE`
+Output your verdict on the LAST line of your response. Example: `VERDICT=DONE`, `VERDICT=BLOCKED`, or `VERDICT=ALREADY_DONE`

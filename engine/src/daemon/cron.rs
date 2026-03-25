@@ -5,7 +5,7 @@ use anyhow::Result;
 use chrono::Local;
 use cron::Schedule;
 
-use crate::db::Db;
+use crate::db::{ScheduleRepository, TaskRepository};
 
 use super::log_daemon;
 
@@ -16,9 +16,13 @@ pub fn cron5_to_cron7(expr: &str) -> String {
 }
 
 /// Check all enabled schedules and enqueue matching tasks.
-pub fn check_schedules(db: &Db, werma_dir: &Path) -> Result<()> {
+pub fn check_schedules(
+    task_repo: &dyn TaskRepository,
+    sched_repo: &dyn ScheduleRepository,
+    werma_dir: &Path,
+) -> Result<()> {
     let log_path = werma_dir.join("logs/daemon.log");
-    let schedules = db.list_schedules()?;
+    let schedules = sched_repo.list_schedules()?;
     let now = Local::now();
 
     for sched in &schedules {
@@ -83,7 +87,7 @@ pub fn check_schedules(db: &Db, werma_dir: &Path) -> Result<()> {
 
         let allowed_tools = crate::runner::tools_for_type(&sched.schedule_type, false);
 
-        let task_id = db.next_task_id()?;
+        let task_id = task_repo.next_task_id()?;
         let created_at = now.format("%Y-%m-%dT%H:%M:%S").to_string();
 
         let task = crate::models::Task {
@@ -108,12 +112,14 @@ pub fn check_schedules(db: &Db, werma_dir: &Path) -> Result<()> {
             context_files: sched.context_files.clone(),
             repo_hash: crate::runtime_repo_hash(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
-        db.insert_task(&task)?;
+        task_repo.insert_task(&task)?;
 
         let enqueued_at = now.format("%Y-%m-%dT%H:%M").to_string();
-        db.set_schedule_last_enqueued(&sched.id, &enqueued_at)?;
+        sched_repo.set_schedule_last_enqueued(&sched.id, &enqueued_at)?;
 
         log_daemon(
             &log_path,
@@ -235,7 +241,7 @@ mod tests {
         };
         db.insert_schedule(&sched).unwrap();
 
-        check_schedules(&db, dir.path()).unwrap();
+        check_schedules(&db, &db, dir.path()).unwrap();
 
         let tasks = db.list_tasks(Some(crate::models::Status::Pending)).unwrap();
         assert_eq!(tasks.len(), 1);
@@ -266,7 +272,7 @@ mod tests {
         };
         db.insert_schedule(&sched).unwrap();
 
-        check_schedules(&db, dir.path()).unwrap();
+        check_schedules(&db, &db, dir.path()).unwrap();
 
         let tasks = db.list_tasks(None).unwrap();
         assert!(tasks.is_empty());
@@ -295,7 +301,7 @@ mod tests {
         };
         db.insert_schedule(&sched).unwrap();
 
-        check_schedules(&db, dir.path()).unwrap();
+        check_schedules(&db, &db, dir.path()).unwrap();
 
         let tasks = db.list_tasks(None).unwrap();
         assert!(tasks.is_empty());
@@ -323,7 +329,7 @@ mod tests {
         };
         db.insert_schedule(&sched).unwrap();
 
-        check_schedules(&db, dir.path()).unwrap();
+        check_schedules(&db, &db, dir.path()).unwrap();
 
         let tasks = db.list_tasks(Some(crate::models::Status::Pending)).unwrap();
         assert_eq!(tasks.len(), 1);
@@ -359,7 +365,7 @@ mod tests {
         db.insert_schedule(&sched).unwrap();
 
         // Should not error — just skip the bad schedule
-        check_schedules(&db, dir.path()).unwrap();
+        check_schedules(&db, &db, dir.path()).unwrap();
 
         let tasks = db.list_tasks(None).unwrap();
         assert!(tasks.is_empty());
@@ -376,7 +382,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
 
         let db = crate::db::Db::open_in_memory().unwrap();
-        check_schedules(&db, dir.path()).unwrap();
+        check_schedules(&db, &db, dir.path()).unwrap();
     }
 
     #[test]
@@ -415,5 +421,102 @@ mod tests {
             next <= now,
             "midnight schedule should match at 00:00:30, got {next}"
         );
+    }
+
+    // ─── Tests using FakeTaskRepo + FakeScheduleRepo (no SQLite) ─────────
+
+    use crate::db::TaskRepository;
+    use crate::db::fakes::{FakeScheduleRepo, FakeTaskRepo};
+
+    #[test]
+    fn fake_repos_enqueue_matching_schedule() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        let task_repo = FakeTaskRepo::new();
+        let sched_repo = FakeScheduleRepo::new();
+
+        let sched = crate::models::Schedule {
+            id: "every-minute".to_string(),
+            cron_expr: "* * * * *".to_string(),
+            prompt: "do the thing {date}".to_string(),
+            schedule_type: "research".to_string(),
+            model: "sonnet".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            max_turns: 10,
+            enabled: true,
+            context_files: vec![],
+            last_enqueued: String::new(),
+        };
+        sched_repo.insert_schedule(&sched).unwrap();
+
+        check_schedules(&task_repo, &sched_repo, dir.path()).unwrap();
+
+        let tasks = task_repo
+            .list_tasks(Some(crate::models::Status::Pending))
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(!tasks[0].prompt.contains("{date}"));
+        assert_eq!(tasks[0].task_type, "research");
+    }
+
+    #[test]
+    fn fake_repos_skip_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        let task_repo = FakeTaskRepo::new();
+        let sched_repo = FakeScheduleRepo::new();
+
+        let sched = crate::models::Schedule {
+            id: "disabled-one".to_string(),
+            cron_expr: "* * * * *".to_string(),
+            prompt: "should not run".to_string(),
+            schedule_type: "research".to_string(),
+            model: "sonnet".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            max_turns: 10,
+            enabled: false,
+            context_files: vec![],
+            last_enqueued: String::new(),
+        };
+        sched_repo.insert_schedule(&sched).unwrap();
+
+        check_schedules(&task_repo, &sched_repo, dir.path()).unwrap();
+
+        let tasks = task_repo.list_tasks(None).unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn fake_repos_dedup_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        let task_repo = FakeTaskRepo::new();
+        let sched_repo = FakeScheduleRepo::new();
+
+        let now = Local::now().format("%Y-%m-%dT%H:%M").to_string();
+        let sched = crate::models::Schedule {
+            id: "dedup-test".to_string(),
+            cron_expr: "* * * * *".to_string(),
+            prompt: "should be deduped".to_string(),
+            schedule_type: "research".to_string(),
+            model: "sonnet".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            max_turns: 10,
+            enabled: true,
+            context_files: vec![],
+            last_enqueued: now,
+        };
+        sched_repo.insert_schedule(&sched).unwrap();
+
+        check_schedules(&task_repo, &sched_repo, dir.path()).unwrap();
+
+        let tasks = task_repo.list_tasks(None).unwrap();
+        assert!(tasks.is_empty());
     }
 }

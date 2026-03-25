@@ -1,0 +1,32 @@
+# Pipeline: Code Review Stage
+Linear issue: {{issue_id}}
+
+The engineer has completed implementation. Review the code changes.
+
+---ISSUE---
+ID: {{issue_id}}
+Title: {{issue_title}}
+Description:
+{{issue_description}}
+---END ISSUE---
+
+## Review Protocol
+1. Run `git diff main...HEAD` to see the actual code diff
+2. For each file modified in the diff — read the full file to understand context
+3. Review the changes for correctness, security, missing tests, and style
+4. Classify issues as **blocker** or **nit**
+5. Decision criteria:
+   - **REJECT** on any blockers (bugs, security, missing critical tests)
+   - Nits alone do NOT justify rejection
+
+## Code Diff
+{{code_diff}}
+
+## Output Format
+- List each finding with `file:line` references and severity
+- Summarize: X blockers, Y nits
+- Write your full review between `---COMMENT---` and `---END COMMENT---` markers
+- End with: REVIEW_VERDICT=APPROVED or REVIEW_VERDICT=REJECTED
+- If REJECTED, clearly explain what must change (each blocker/nit)
+
+IMPORTANT: Do NOT call `gh pr comment` or any other `gh` write commands directly. The pipeline engine handles all GitHub mutations. Your job is to output the review — the engine posts it.

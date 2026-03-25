@@ -5,11 +5,11 @@ use anyhow::{Result, anyhow};
 use super::config::PipelineConfig;
 use super::helpers::{infer_working_dir_from_issue, truncate_lines};
 use super::loader::{load_default, resolve_prompt};
-use super::pr::{auto_create_pr, has_open_pr_for_issue, pr_title_from_url};
+use super::pr::{auto_create_pr, has_open_pr_for_issue, post_pr_comment, pr_title_from_url};
 use super::prompt::{build_vars, render_prompt};
 use super::verdict::{
-    extract_rejection_feedback, is_heavy_track, parse_comments, parse_estimate, parse_pr_url,
-    parse_verdict,
+    extract_rejection_feedback, extract_review_body, is_heavy_track, is_max_turns_exit,
+    parse_comments, parse_estimate, parse_pr_url, parse_verdict,
 };
 use crate::db::Db;
 use crate::linear::LinearApi;
@@ -138,12 +138,22 @@ pub fn callback(
         return Ok(());
     }
 
-    // Post any comment blocks from agent output (non-critical)
-    let comments = parse_comments(result);
-    for comment_body in &comments {
-        if let Err(e) = linear.comment(linear_issue_id, comment_body) {
-            eprintln!("[CALLBACK] {linear_issue_id}: failed to post comment: {e}");
+    // RIG-252: Detect error_max_turns in output — agent ran out of turns without completing.
+    if is_max_turns_exit(result) {
+        eprintln!(
+            "[CALLBACK] {linear_issue_id}: task {task_id} (stage={stage}) hit max_turns — \
+             marking as incomplete, no transition"
+        );
+        if let Err(e) = linear.comment(
+            linear_issue_id,
+            &format!(
+                "**Werma task `{task_id}`** (stage: {stage}) hit `max_turns` — agent ran out of \
+                 turns without completing. Task marked as failed. Will be retried."
+            ),
+        ) {
+            eprintln!("callback: failed to post max_turns comment on {linear_issue_id}: {e}");
         }
+        return Ok(());
     }
 
     let stage_cfg = if let Some(s) = config.stage(stage) {
@@ -152,6 +162,14 @@ pub fn callback(
         eprintln!("unknown pipeline stage: {stage}");
         return Ok(());
     };
+
+    // Post any comment blocks from agent output (non-critical)
+    let comments = parse_comments(result);
+    for comment_body in &comments {
+        if let Err(e) = linear.comment(linear_issue_id, comment_body) {
+            eprintln!("[CALLBACK] {linear_issue_id}: failed to post comment: {e}");
+        }
+    }
 
     let verdict = parse_verdict(result);
 
@@ -177,7 +195,8 @@ pub fn callback(
         return Ok(());
     }
 
-    // For engineer/analyst: default verdict is "done" if none found
+    // Compute effective verdict once — analyst/engineer default to "done" when missing.
+    // Used for both fallback spec posting and transition routing.
     let verdict_str = verdict
         .as_deref()
         .unwrap_or(if stage == "engineer" || stage == "analyst" {
@@ -186,6 +205,25 @@ pub fn callback(
             ""
         })
         .to_lowercase();
+
+    // RIG-227: Fallback spec posting for analyst stage.
+    // Post substantive plain-text output as a comment so the spec reaches Linear.
+    // Only fire for "done" — ALREADY_DONE means no new spec was written,
+    // and BLOCKED shouldn't post a partial spec.
+    // When COMMENT blocks were posted, require substantial plain-text content
+    // (>= 5 lines) to avoid posting trivial preamble alongside proper blocks.
+    if stage == "analyst" && verdict_str == "done" {
+        let spec_body = extract_spec_from_output(result);
+        let min_lines = if comments.is_empty() { 1 } else { 5 };
+        if spec_body.lines().count() >= min_lines {
+            let truncated = truncate_lines(&spec_body, 200);
+            if let Err(e) = linear.comment(linear_issue_id, &truncated) {
+                eprintln!(
+                    "[CALLBACK] {linear_issue_id}: failed to post fallback spec comment: {e}"
+                );
+            }
+        }
+    }
 
     // Parse estimate from analyst output for adaptive track routing
     let estimate = if stage == "analyst" {
@@ -251,16 +289,23 @@ pub fn callback(
             return Err(e);
         }
 
-        // Analyst label swap: remove trigger label, add "analyze:done" + "spec:done"
+        // RIG-300: Analyst label swap — remove trigger label, add verdict-specific label.
+        // done/already_done → "analyze:done" + "spec:done"
+        // blocked → "analyze:blocked" (no spec:done — spec wasn't completed)
         if stage == "analyst" {
             if let Some(ref label) = stage_cfg.linear_label {
                 if let Err(e) = linear.remove_label(linear_issue_id, label) {
                     eprintln!("callback: failed to remove '{label}' from {linear_issue_id}: {e}");
                 }
-                let done_label = format!("{label}:done");
-                if let Err(e) = linear.add_label(linear_issue_id, &done_label) {
+                let suffix = if verdict_str == "blocked" {
+                    "blocked"
+                } else {
+                    "done"
+                };
+                let result_label = format!("{label}:{suffix}");
+                if let Err(e) = linear.add_label(linear_issue_id, &result_label) {
                     eprintln!(
-                        "callback: failed to add '{done_label}' label to {linear_issue_id}: {e}"
+                        "callback: failed to add '{result_label}' label to {linear_issue_id}: {e}"
                     );
                 }
             }
@@ -319,6 +364,31 @@ pub fn callback(
         } else {
             None
         };
+
+        // RIG-281: Post reviewer's review as a PR comment (engine-side, not agent-side).
+        // Agents no longer call `gh pr comment` directly — the engine handles it.
+        if stage == "reviewer" {
+            if let Some(review_body) = extract_review_body(result) {
+                match post_pr_comment(cmd, working_dir, &review_body) {
+                    Ok(true) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: posted review as PR comment (task {task_id})"
+                        );
+                    }
+                    Ok(false) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: no open PR found for review comment \
+                             (task {task_id})"
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: failed to post review as PR comment: {e}"
+                        );
+                    }
+                }
+            }
+        }
 
         // Post a comment — non-critical, don't fail the callback if this errors.
         let comment = format_callback_comment(
@@ -446,6 +516,69 @@ pub(crate) fn format_callback_comment(
             )
         }
     }
+}
+
+pub(crate) fn extract_spec_from_output(output: &str) -> String {
+    let mut lines = Vec::new();
+    let mut in_comment_block = false;
+    let mut unclosed_block_start = 0;
+
+    for (idx, line) in output.lines().enumerate() {
+        let trimmed = line.trim();
+
+        // Skip ---COMMENT---/---END COMMENT--- blocks (already posted)
+        if trimmed == "---COMMENT---" {
+            in_comment_block = true;
+            unclosed_block_start = idx;
+            continue;
+        }
+        if trimmed == "---END COMMENT---" {
+            in_comment_block = false;
+            continue;
+        }
+        if in_comment_block {
+            continue;
+        }
+
+        // Skip verdict and estimate metadata lines
+        let upper = trimmed.to_uppercase();
+        if upper.starts_with("VERDICT=") || upper.starts_with("ESTIMATE=") {
+            continue;
+        }
+
+        lines.push(line);
+    }
+
+    // If a ---COMMENT--- was never closed, treat it as plain text.
+    // This handles non-conforming agent output where markers are malformed.
+    if in_comment_block {
+        lines.clear();
+        for (idx, line) in output.lines().enumerate() {
+            if idx < unclosed_block_start {
+                let trimmed = line.trim();
+                let upper = trimmed.to_uppercase();
+                if upper.starts_with("VERDICT=") || upper.starts_with("ESTIMATE=") {
+                    continue;
+                }
+                lines.push(line);
+            } else {
+                // Include unclosed block content as-is (skip the marker line itself)
+                if idx == unclosed_block_start {
+                    continue;
+                }
+                let trimmed = line.trim();
+                let upper = trimmed.to_uppercase();
+                if upper.starts_with("VERDICT=") || upper.starts_with("ESTIMATE=") {
+                    continue;
+                }
+                lines.push(line);
+            }
+        }
+    }
+
+    // Trim leading/trailing blank lines
+    let result = lines.join("\n");
+    result.trim().to_string()
 }
 
 /// Parameters for creating the next pipeline stage task.
@@ -588,6 +721,8 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         context_files: vec![handoff_path.to_string_lossy().to_string()],
         repo_hash: crate::runtime_repo_hash(),
         estimate: p.estimate,
+        retry_count: 0,
+        retry_after: None,
     };
 
     db.insert_task(&task)?;
@@ -799,6 +934,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
         db.insert_task(&analyst_task).unwrap();
 
@@ -1364,8 +1501,9 @@ stages:
     }
 
     #[test]
-    fn callback_analyst_blocked_does_not_add_spec_done() {
-        // RIG-274: BLOCKED verdict should NOT add spec:done label
+    fn callback_analyst_blocked_adds_analyze_blocked_not_spec_done() {
+        // RIG-300: BLOCKED verdict should add analyze:blocked (not analyze:done)
+        // and should NOT add spec:done
         let db = crate::db::Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
@@ -1401,6 +1539,30 @@ stages:
                 .any(|(id, label)| id == "RIG-274b" && label == "spec:done"),
             "BLOCKED should NOT add 'spec:done' label, got: {adds:?}"
         );
+
+        // RIG-300: should add analyze:blocked label
+        assert!(
+            adds.iter()
+                .any(|(id, label)| id == "RIG-274b" && label == "analyze:blocked"),
+            "BLOCKED should add 'analyze:blocked' label, got: {adds:?}"
+        );
+
+        // RIG-300: should NOT add analyze:done label
+        assert!(
+            !adds
+                .iter()
+                .any(|(id, label)| id == "RIG-274b" && label == "analyze:done"),
+            "BLOCKED should NOT add 'analyze:done' label, got: {adds:?}"
+        );
+
+        // Trigger label should be removed
+        let removes = linear.remove_label_calls.borrow();
+        assert!(
+            removes
+                .iter()
+                .any(|(id, label)| id == "RIG-274b" && label == "analyze"),
+            "BLOCKED should remove 'analyze' trigger label, got: {removes:?}"
+        );
     }
 
     #[test]
@@ -1435,6 +1597,8 @@ stages:
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
         db.insert_task(&task).unwrap();
 
@@ -1509,6 +1673,8 @@ stages:
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
         db.insert_task(&task).unwrap();
 
@@ -1538,6 +1704,137 @@ stages:
         assert!(
             db.is_callback_recently_fired("20260324-unk", 60).unwrap(),
             "callback_fired_at should be set for unknown verdict"
+        );
+    }
+
+    // ─── RIG-252: max_turns exit tests ──────────────────────────────────
+
+    #[test]
+    fn callback_max_turns_exit_does_not_transition() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-252a", "in_progress");
+
+        let mut task = crate::db::make_test_task("20260325-252a");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-252a".to_string();
+        task.pipeline_stage = "engineer".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Simulate output containing error_max_turns (raw JSON dumped as fallback)
+        let result = r#"{"type":"result","subtype":"error_max_turns","is_error":false,"result":"partial work"}"#;
+
+        callback(
+            &db,
+            "20260325-252a",
+            "engineer",
+            result,
+            "RIG-252a",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        // No status moves should happen
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves.is_empty(),
+            "max_turns exit should not trigger any status moves, got: {moves:?}"
+        );
+
+        // Should post a comment about max_turns
+        let comments = linear.comment_calls.borrow();
+        assert!(
+            comments
+                .iter()
+                .any(|(id, body)| id == "RIG-252a" && body.contains("max_turns")),
+            "should post max_turns warning comment, got: {comments:?}"
+        );
+    }
+
+    #[test]
+    fn callback_max_turns_in_text_output_does_not_transition() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-252b", "in_progress");
+
+        let mut task = crate::db::make_test_task("20260325-252b");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-252b".to_string();
+        task.pipeline_stage = "engineer".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Text output that mentions error_max_turns
+        let result = "Partial implementation done.\nerror_max_turns\nSome more text";
+
+        callback(
+            &db,
+            "20260325-252b",
+            "engineer",
+            result,
+            "RIG-252b",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves.is_empty(),
+            "max_turns text should not trigger moves, got: {moves:?}"
+        );
+    }
+
+    #[test]
+    fn callback_normal_engineer_done_still_works() {
+        // Sanity check: normal DONE output should NOT be caught by max_turns guard
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-252c", "in_progress");
+
+        let mut task = crate::db::make_test_task("20260325-252c");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-252c".to_string();
+        task.pipeline_stage = "engineer".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Normal success output — no max_turns indicator
+        cmd.push_success("main"); // for auto_create_pr branch check
+        let result = "All work done.\nPR_URL=https://github.com/org/repo/pull/1\nVERDICT=DONE";
+
+        callback(
+            &db,
+            "20260325-252c",
+            "engineer",
+            result,
+            "RIG-252c",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        // Should transition normally
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves
+                .iter()
+                .any(|(id, status)| id == "RIG-252c" && status == "review"),
+            "normal DONE should still move to review, got: {moves:?}"
         );
     }
 }

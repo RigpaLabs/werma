@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use crate::db::Db;
+use crate::traits::Notifier;
 
 use super::log_daemon;
 
@@ -49,6 +50,7 @@ pub fn check_main_branch_cleanliness(
     log_path: &Path,
     notified: &mut HashMap<PathBuf, Instant>,
     cooldown_secs: u64,
+    notifier: &dyn Notifier,
 ) -> Result<()> {
     let running = db.list_tasks(Some(crate::models::Status::Running))?;
 
@@ -95,7 +97,7 @@ pub fn check_main_branch_cleanliness(
                         dirty_files.join(", ")
                     ),
                 );
-                crate::notify::notify_macos(
+                notifier.notify_macos(
                     "werma: main branch contamination detected",
                     &format!(
                         "Dirty files in {}: {}",
@@ -243,7 +245,8 @@ mod tests {
         let log_path = dir.path().join("daemon.log");
         let db = crate::db::Db::open_in_memory().unwrap();
         let mut notified = HashMap::new();
+        let fake_notifier = crate::traits::fakes::FakeNotifier::new();
 
-        check_main_branch_cleanliness(&db, &log_path, &mut notified, 300).unwrap();
+        check_main_branch_cleanliness(&db, &log_path, &mut notified, 300, &fake_notifier).unwrap();
     }
 }

@@ -190,6 +190,12 @@ pub enum Commands {
         force: bool,
     },
 
+    /// Configuration management
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+
     /// Dashboard (stub)
     Dash,
 
@@ -198,6 +204,9 @@ pub enum Commands {
 
     /// Run database migrations (stub)
     Migrate,
+
+    /// Build and upload macOS binary to GitHub Releases
+    Build,
 
     /// Self-update from GitHub Releases
     Update,
@@ -292,6 +301,12 @@ pub enum LinearAction {
     },
     /// Push all completed tasks to Linear
     PushAll,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigAction {
+    /// Show current configuration (repo mappings, limits)
+    Show,
 }
 
 #[derive(Subcommand, Debug)]

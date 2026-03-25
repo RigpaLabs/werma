@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::db::Db;
+use crate::db::TaskRepository;
 use crate::traits::Notifier;
 
 use super::TmuxSession;
@@ -15,7 +15,7 @@ use super::log_daemon;
 /// Case 2 catches the bug where claude exits silently but tmux keeps the session
 /// alive (e.g., due to `remain-on-exit` or process tree issues).
 pub fn check_zombie_tasks(
-    db: &Db,
+    db: &dyn TaskRepository,
     werma_dir: &Path,
     tmux: &impl TmuxSession,
     notifier: &dyn Notifier,
@@ -97,7 +97,7 @@ pub fn check_zombie_tasks(
 
 /// Mark a task as zombie (failed) and send notifications.
 fn mark_zombie(
-    db: &Db,
+    db: &dyn TaskRepository,
     log_path: &Path,
     task: &crate::models::Task,
     reason: &str,
@@ -212,6 +212,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         }
     }
 
@@ -262,6 +264,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
         db.insert_task(&task).unwrap();
 
@@ -417,5 +421,66 @@ mod tests {
         let task_log = werma_dir.path().join("logs/20260313-994.log");
         let content = std::fs::read_to_string(&task_log).unwrap();
         assert!(content.contains("ZOMBIE (dead process in live session)"));
+    }
+
+    // ─── Tests using FakeTaskRepo (no SQLite) ────────────────────────────
+
+    use crate::db::fakes::FakeTaskRepo;
+
+    #[test]
+    fn fake_repo_marks_dead_sessions_as_failed() {
+        let repo = FakeTaskRepo::new();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_running_task("20260325-001");
+        repo.insert_task(&task).unwrap();
+
+        let tmux = FakeTmux::new(vec![]);
+        check_zombie_tasks(&repo, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+
+        let updated = repo.task("20260325-001").unwrap().unwrap();
+        assert_eq!(updated.status, Status::Failed);
+        assert!(updated.finished_at.is_some());
+    }
+
+    #[test]
+    fn fake_repo_skips_alive_sessions() {
+        let repo = FakeTaskRepo::new();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_running_task("20260325-002");
+        repo.insert_task(&task).unwrap();
+
+        let tmux = FakeTmux::new(vec!["werma-20260325-002".to_string()]);
+        check_zombie_tasks(&repo, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+
+        let updated = repo.task("20260325-002").unwrap().unwrap();
+        assert_eq!(updated.status, Status::Running);
+    }
+
+    #[test]
+    fn fake_repo_mixed_alive_and_dead() {
+        let repo = FakeTaskRepo::new();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let alive = make_running_task("20260325-010");
+        let dead = make_running_task("20260325-011");
+        repo.insert_task(&alive).unwrap();
+        repo.insert_task(&dead).unwrap();
+
+        let tmux = FakeTmux::new(vec!["werma-20260325-010".to_string()]);
+        check_zombie_tasks(&repo, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+
+        assert_eq!(
+            repo.task("20260325-010").unwrap().unwrap().status,
+            Status::Running
+        );
+        assert_eq!(
+            repo.task("20260325-011").unwrap().unwrap().status,
+            Status::Failed
+        );
     }
 }

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::db::Db;
+use crate::db::TaskRepository;
 use crate::linear::LinearApi;
 use crate::models::Status;
 use crate::traits::Notifier;
@@ -24,7 +24,7 @@ const STUCK_THRESHOLD_SECS: i64 = 7200; // 2 hours
 /// `expected_team_keys`: all configured team keys. If the issue's team is not in this set,
 /// the task is canceled (moved to an unmanaged team).
 pub fn check_canceled_and_stuck(
-    db: &Db,
+    db: &dyn TaskRepository,
     werma_dir: &Path,
     linear: &dyn LinearApi,
     notifier: &dyn Notifier,
@@ -170,7 +170,7 @@ pub fn check_canceled_and_stuck(
 
 /// Cancel a task: kill tmux session (if running), set status to Canceled, notify.
 fn cancel_task(
-    db: &Db,
+    db: &dyn TaskRepository,
     log_path: &Path,
     task: &crate::models::Task,
     reason: &str,
@@ -222,6 +222,7 @@ fn cancel_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Db;
     use crate::models::Task;
     use crate::traits::fakes::{FakeLinearApi, FakeNotifier};
 
@@ -257,6 +258,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         }
     }
 
@@ -486,5 +489,86 @@ mod tests {
         assert_eq!(notifier.macos_calls.borrow().len(), 1);
         assert_eq!(notifier.slack_calls.borrow().len(), 1);
         assert!(notifier.slack_calls.borrow()[0].1.contains("Canceled"));
+    }
+
+    // ─── Tests using FakeTaskRepo (no SQLite) ────────────────────────────
+
+    use crate::db::TaskRepository;
+    use crate::db::fakes::FakeTaskRepo;
+
+    #[test]
+    fn fake_repo_cancels_task_when_issue_canceled() {
+        let repo = FakeTaskRepo::new();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_pipeline_task("20260325-001", "RIG-350", Status::Running);
+        repo.insert_task(&task).unwrap();
+
+        let linear = FakeLinearApi::new();
+        linear.set_issue_status("RIG-350", "canceled");
+
+        check_canceled_and_stuck(
+            &repo,
+            werma_dir.path(),
+            &linear,
+            &FakeNotifier::new(),
+            &rig_keys(),
+        )
+        .unwrap();
+
+        let updated = repo.task("20260325-001").unwrap().unwrap();
+        assert_eq!(updated.status, Status::Canceled);
+        assert!(updated.finished_at.is_some());
+    }
+
+    #[test]
+    fn fake_repo_keeps_task_alive_when_active() {
+        let repo = FakeTaskRepo::new();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_pipeline_task("20260325-002", "RIG-351", Status::Running);
+        repo.insert_task(&task).unwrap();
+
+        let linear = FakeLinearApi::new();
+        linear.set_issue_status("RIG-351", "in_progress");
+
+        check_canceled_and_stuck(
+            &repo,
+            werma_dir.path(),
+            &linear,
+            &FakeNotifier::new(),
+            &rig_keys(),
+        )
+        .unwrap();
+
+        let updated = repo.task("20260325-002").unwrap().unwrap();
+        assert_eq!(updated.status, Status::Running);
+    }
+
+    #[test]
+    fn fake_repo_cancels_pending_on_canceled_issue() {
+        let repo = FakeTaskRepo::new();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_pipeline_task("20260325-003", "RIG-352", Status::Pending);
+        repo.insert_task(&task).unwrap();
+
+        let linear = FakeLinearApi::new();
+        linear.set_issue_status("RIG-352", "canceled");
+
+        check_canceled_and_stuck(
+            &repo,
+            werma_dir.path(),
+            &linear,
+            &FakeNotifier::new(),
+            &rig_keys(),
+        )
+        .unwrap();
+
+        let updated = repo.task("20260325-003").unwrap().unwrap();
+        assert_eq!(updated.status, Status::Canceled);
     }
 }

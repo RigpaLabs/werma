@@ -121,7 +121,6 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
                 if !labels.is_empty() {
                     prompt.push_str(&format!("Labels: {}\n", labels.join(", ")));
                 }
-                // TODO: fetch and inject comments when LinearClient::list_comments is available
                 prompt.push_str("---END ISSUE---\n\n");
             }
             Err(e) => {
@@ -135,7 +134,9 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
 
     prompt.push_str(&task.prompt);
 
-    // For write tasks, instruct agents to commit, push, and create PRs autonomously
+    // For write tasks, instruct agents to commit and push autonomously.
+    // RIG-281: agents must NOT call `gh pr create/merge/comment` — the engine handles all
+    // GitHub mutations via callbacks (auto_create_pr, post_pr_comment).
     if crate::worktree::needs_worktree(&task.task_type) {
         prompt.push_str(concat!(
             "\n\nIMPORTANT — autonomous mode instructions:",
@@ -145,13 +146,74 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
             "\n2. Run `cargo test` (or equivalent) to verify",
             "\n3. Stage and commit changes with a descriptive message (conventional commits format)",
             "\n4. Push the branch to remote: `git push -u origin HEAD`",
-            "\n5. Create a PR: `gh pr create --title \"RIG-XX type: description\" --body \"...\" --label ai-generated`",
             "\nDo NOT ask for permission to commit or push. Do NOT stop and wait for review.",
             "\nYou are in a worktree — commits here are safe and isolated from main.",
+            "\n",
+            "\nIMPORTANT: Do NOT call `gh pr create`, `gh pr merge`, `gh pr comment`, or any ",
+            "other `gh` write commands. The pipeline engine handles all GitHub mutations ",
+            "(PR creation, commenting, merging) automatically after your task completes.",
         ));
     }
 
     Ok(prompt)
+}
+
+/// Convert a naive local timestamp (written by `chrono::Local::now()`) to UTC RFC 3339.
+///
+/// All `finished_at` timestamps in the DB are stored as naive local time
+/// (e.g. "2026-03-24T16:00:00" in WITA = UTC+8). Linear comment timestamps
+/// are RFC 3339 UTC (e.g. "2026-03-24T08:00:00.000Z"). Without conversion,
+/// `is_after_timestamp` would treat the naive value as UTC, creating an
+/// 8-hour window where valid comments are incorrectly excluded.
+fn naive_local_to_utc_iso(local_ts: &str) -> String {
+    use chrono::{Local, NaiveDateTime};
+    NaiveDateTime::parse_from_str(local_ts, "%Y-%m-%dT%H:%M:%S")
+        .ok()
+        .and_then(|ndt| ndt.and_local_timezone(Local).single())
+        .map(|dt| dt.to_utc().to_rfc3339())
+        .unwrap_or_else(|| local_ts.to_string())
+}
+
+/// Fetch Linear comments for an issue at execution time.
+///
+/// Filters to comments posted after the previous pipeline stage completed,
+/// skipping werma bot comments. Returns formatted markdown or empty string.
+fn fetch_linear_comments(linear: &dyn crate::linear::LinearApi, db: &Db, task: &Task) -> String {
+    // Find when the previous stage finished (to filter old comments).
+    // Convert from local time (stored by chrono::Local::now) to UTC
+    // so the comparison against Linear's UTC timestamps is correct.
+    let after_iso = if !task.pipeline_stage.is_empty() {
+        db.last_stage_finished_at(&task.linear_issue_id, &task.pipeline_stage)
+            .ok()
+            .flatten()
+            .map(|ts| naive_local_to_utc_iso(&ts))
+    } else {
+        None
+    };
+
+    let comments = match linear.list_comments(&task.linear_issue_id, after_iso.as_deref()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "warning: could not fetch Linear comments for {}: {e}",
+                task.linear_issue_id
+            );
+            return String::new();
+        }
+    };
+
+    if comments.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("## Linear Comments (recent updates)\n\n");
+    for (author, created_at, body) in &comments {
+        // Truncate timestamp to date+time for readability
+        let ts = created_at.get(..19).unwrap_or(created_at);
+        out.push_str(&format!("**{author}** ({ts}):\n{body}\n\n---\n\n"));
+    }
+    // Sanitize escaped newlines/tabs that may come from Linear comment bodies
+    out.replace("\\n", "\n").replace("\\t", "\t")
 }
 
 /// Run the next pending task in a tmux session.
@@ -295,7 +357,21 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     let prompt_file = logs_dir.join(format!("{task_id}-prompt.txt"));
     let exec_script = logs_dir.join(format!("{task_id}-exec.sh"));
 
-    let full_prompt = build_prompt(task, &effective_dir, werma_dir)?;
+    let mut full_prompt = build_prompt(task, &effective_dir, werma_dir)?;
+
+    // Late-inject Linear comments at execution time (not creation time)
+    // so agents see context updates posted after task was created.
+    if full_prompt.contains("{linear_comments}") {
+        let comments_text = if task.linear_issue_id.is_empty() {
+            String::new()
+        } else if let Ok(client) = crate::linear::LinearClient::new() {
+            fetch_linear_comments(&client, db, task)
+        } else {
+            eprintln!("warning: could not initialize Linear client, skipping comment fetch");
+            String::new()
+        };
+        full_prompt = full_prompt.replace("{linear_comments}", &comments_text);
+    }
 
     // Write prompt to file — never interpolated into shell
     std::fs::write(&prompt_file, &full_prompt)?;
@@ -470,25 +546,31 @@ run_claude() {{
         --output-format json
 }}
 
+is_rate_limit() {{
+    # Check multiple sources for rate-limit indicators:
+    # 1. stderr (redirected to LOG_FILE) — CLI error messages
+    # 2. stdout (partial RESULT_JSON) — JSON error responses from API
+    # 3. exit code 429 directly
+    local exit_code="${{1:-0}}"
+    local stdout_text="${{2:-}}"
+    [ "$exit_code" = "429" ] && return 0
+    local combined
+    combined="$(tail -20 "$LOG_FILE" 2>/dev/null || echo "")
+$stdout_text"
+    echo "$combined" | grep -qiE "rate.?limit|429|too many requests|quota.?exceeded|server.?overloaded|api.?capacity|overloaded_error"
+}}
+
 RESULT_JSON=$(run_claude "$MODEL") || {{
     EXIT_CODE=$?
     echo "$(date): CLAUDE_EXIT code=$EXIT_CODE model=$MODEL" >> "$LOG_FILE"
-    # Check if fallback model is configured and error looks like a rate limit
-    if [ -n "$FALLBACK_MODEL" ]; then
-        LAST_LINES=$(tail -20 "$LOG_FILE" 2>/dev/null || echo "")
-        if echo "$LAST_LINES" | grep -qiE "rate.?limit|429|too many requests|quota.?exceeded|server.?overloaded|api.?capacity"; then
-            echo "$(date): primary model $MODEL rate-limited (exit $EXIT_CODE), retrying with fallback $FALLBACK_MODEL" >> "$LOG_FILE"
-            RESULT_JSON=$(run_claude "$FALLBACK_MODEL") || {{
-                echo "$(date): FAILED with fallback model (exit $?)" >> "$LOG_FILE"
-                werma fail "$TASK_ID"
-                exit 1
-            }}
-            MODEL="$FALLBACK_MODEL"
-        else
-            echo "$(date): FAILED (exit $EXIT_CODE, no rate-limit match)" >> "$LOG_FILE"
+    if [ -n "$FALLBACK_MODEL" ] && is_rate_limit "$EXIT_CODE" "$RESULT_JSON"; then
+        echo "$(date): WARNING: $MODEL rate-limited, falling back to $FALLBACK_MODEL for task $TASK_ID" >> "$LOG_FILE"
+        RESULT_JSON=$(run_claude "$FALLBACK_MODEL") || {{
+            echo "$(date): FAILED — fallback model $FALLBACK_MODEL also failed (exit $?)" >> "$LOG_FILE"
             werma fail "$TASK_ID"
             exit 1
-        fi
+        }}
+        MODEL="$FALLBACK_MODEL"
     else
         echo "$(date): FAILED (exit $EXIT_CODE)" >> "$LOG_FILE"
         werma fail "$TASK_ID"
@@ -510,6 +592,47 @@ if [ -z "$RESULT_TEXT" ]; then
 fi
 
 SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+
+# RIG-252: Detect error_max_turns — agent ran out of turns without completing.
+# Claude returns is_error=false for this, but the work is incomplete.
+SUBTYPE=$(echo "$RESULT_JSON" | jq -r '.subtype // empty' 2>/dev/null || echo "")
+if [ "$SUBTYPE" = "error_max_turns" ]; then
+    echo "$(date): MAX_TURNS_EXIT — agent hit max_turns (subtype=$SUBTYPE), marking failed" >> "$LOG_FILE"
+    # Still save output for inspection
+    if [ -n "$RESULT_TEXT" ]; then
+        echo "$RESULT_TEXT" > "$RESULT_FILE"
+    fi
+    werma fail "$TASK_ID"
+    exit 1
+fi
+
+# RIG-299: Detect rate-limit errors in successful JSON responses (exit 0 but API error).
+# Claude CLI may return exit 0 with an error JSON body on overload/rate-limit.
+IS_ERROR=$(echo "$RESULT_JSON" | jq -r '.is_error // empty' 2>/dev/null || echo "")
+if [ "$IS_ERROR" = "true" ] && is_rate_limit 0 "$RESULT_JSON"; then
+    if [ -n "$FALLBACK_MODEL" ]; then
+        echo "$(date): WARNING: $MODEL returned rate-limit error in JSON, falling back to $FALLBACK_MODEL for task $TASK_ID" >> "$LOG_FILE"
+        RESULT_JSON=$(run_claude "$FALLBACK_MODEL") || {{
+            echo "$(date): FAILED — fallback model $FALLBACK_MODEL also failed (exit $?)" >> "$LOG_FILE"
+            werma fail "$TASK_ID"
+            exit 1
+        }}
+        MODEL="$FALLBACK_MODEL"
+        # Re-extract result fields from fallback response
+        RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.result // empty' 2>/dev/null)
+        if [ -z "$RESULT_TEXT" ]; then
+            RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.content // .message // .text // empty' 2>/dev/null)
+        fi
+        if [ -z "$RESULT_TEXT" ]; then
+            RESULT_TEXT="$RESULT_JSON"
+        fi
+        SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+    else
+        echo "$(date): FAILED — rate-limit error in JSON, no fallback configured" >> "$LOG_FILE"
+        werma fail "$TASK_ID"
+        exit 1
+    fi
+fi
 
 # Guard: if truly empty (claude returned nothing), log and fail
 if [ -z "$(echo "$RESULT_TEXT" | tr -d '[:space:]')" ]; then
@@ -665,6 +788,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -699,6 +824,8 @@ mod tests {
             context_files: vec!["ctx.txt".to_string()],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, dir.path(), dir.path()).unwrap();
@@ -731,6 +858,8 @@ mod tests {
             context_files: vec!["/nonexistent/file.txt".to_string()],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -771,6 +900,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -815,6 +946,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -850,6 +983,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -937,6 +1072,36 @@ mod tests {
     }
 
     #[test]
+    fn exec_script_detects_max_turns_exit() {
+        // RIG-252: runner script must detect error_max_turns subtype and call werma fail
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "20260325-252",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Edit,Write,Bash",
+            max_turns: 30,
+            model: "claude-opus-4-6",
+            fallback_model: None,
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        assert!(
+            script.contains("error_max_turns"),
+            "script should check for error_max_turns subtype"
+        );
+        assert!(
+            script.contains("SUBTYPE"),
+            "script should extract SUBTYPE from JSON"
+        );
+        assert!(
+            script.contains("MAX_TURNS_EXIT"),
+            "script should log MAX_TURNS_EXIT marker"
+        );
+    }
+
+    #[test]
     fn exec_script_write_task_has_worktree_guard() {
         let script = generate_exec_script(&ExecScriptParams {
             task_id: "20260312-002",
@@ -975,7 +1140,7 @@ mod tests {
         assert!(script.contains(
             "rate.?limit|429|too many requests|quota.?exceeded|server.?overloaded|api.?capacity",
         ));
-        assert!(script.contains("retrying with fallback"));
+        assert!(script.contains("falling back to"));
     }
 
     #[test]
@@ -1062,7 +1227,12 @@ mod tests {
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
         assert!(result.contains("autonomous mode instructions"));
         assert!(result.contains("git push"));
-        assert!(result.contains("gh pr create"));
+        // RIG-281: agents must NOT be told to call gh pr create — engine handles it
+        assert!(
+            !result.contains("gh pr create --title"),
+            "prompt must not instruct agent to call gh pr create"
+        );
+        assert!(result.contains("Do NOT call `gh pr create`"));
     }
 
     #[test]
@@ -1158,5 +1328,262 @@ mod tests {
         assert!(result.contains("dep-000"));
         assert!(result.contains("dep-004"));
         assert!(!result.contains("dep-005")); // beyond limit
+    }
+
+    #[test]
+    fn naive_local_to_utc_iso_converts_correctly() {
+        // The output should be a valid RFC 3339 timestamp in UTC.
+        // We can't assert the exact value since it depends on the test machine's
+        // timezone, but we can verify it parses as RFC 3339 and the round-trip
+        // produces the same instant.
+        use chrono::{DateTime, Local, NaiveDateTime, Utc};
+
+        let local_ts = "2026-03-24T16:00:00";
+        let result = naive_local_to_utc_iso(local_ts);
+
+        // Should be valid RFC 3339
+        let parsed = DateTime::parse_from_rfc3339(&result);
+        assert!(
+            parsed.is_ok(),
+            "should produce valid RFC 3339, got: {result}"
+        );
+
+        // Round-trip: the UTC timestamp should represent the same instant
+        // as the original local timestamp interpreted in the local timezone
+        let expected = NaiveDateTime::parse_from_str(local_ts, "%Y-%m-%dT%H:%M:%S")
+            .unwrap()
+            .and_local_timezone(Local)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(parsed.unwrap().with_timezone(&Utc), expected);
+    }
+
+    #[test]
+    fn naive_local_to_utc_iso_invalid_input_passthrough() {
+        // Invalid timestamps should pass through unchanged
+        assert_eq!(naive_local_to_utc_iso("not-a-timestamp"), "not-a-timestamp");
+        assert_eq!(naive_local_to_utc_iso(""), "");
+    }
+
+    #[test]
+    fn naive_local_to_utc_iso_already_rfc3339_passthrough() {
+        // RFC 3339 timestamps don't match the naive format, so pass through
+        let rfc = "2026-03-24T08:00:00+00:00";
+        assert_eq!(naive_local_to_utc_iso(rfc), rfc);
+    }
+
+    #[test]
+    fn fetch_linear_comments_sanitizes_escaped_newlines() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = crate::traits::fakes::FakeLinearApi::new();
+
+        // Set up comments with escaped newlines (as Linear sometimes returns)
+        linear.set_issue_comments(
+            "RIG-TEST",
+            vec![(
+                "Ar".to_string(),
+                "2026-03-24T14:00:00.000Z".to_string(),
+                "Line one\\nLine two\\tTabbed".to_string(),
+            )],
+        );
+
+        let task = Task {
+            linear_issue_id: "RIG-TEST".to_string(),
+            pipeline_stage: "engineer".to_string(),
+            ..Default::default()
+        };
+
+        let result = fetch_linear_comments(&linear, &db, &task);
+        assert!(
+            result.contains("Line one\nLine two\tTabbed"),
+            "should unescape \\n and \\t, got: {result}"
+        );
+        assert!(
+            !result.contains("\\n"),
+            "should not contain literal \\n, got: {result}"
+        );
+    }
+
+    #[test]
+    fn fetch_linear_comments_empty_when_no_comments() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = crate::traits::fakes::FakeLinearApi::new();
+
+        let task = Task {
+            linear_issue_id: "RIG-EMPTY".to_string(),
+            pipeline_stage: "engineer".to_string(),
+            ..Default::default()
+        };
+
+        let result = fetch_linear_comments(&linear, &db, &task);
+        assert!(result.is_empty(), "should be empty when no comments");
+    }
+
+    // ─── RIG-299: Fallback model tests ──────────────────────────────────────
+
+    #[test]
+    fn resolve_fallback_model_returns_none_for_non_pipeline_task() {
+        let task = Task {
+            pipeline_stage: String::new(),
+            ..Default::default()
+        };
+        assert!(resolve_fallback_model(&task).is_none());
+    }
+
+    #[test]
+    fn resolve_fallback_model_returns_fallback_for_pipeline_task() {
+        let task = Task {
+            pipeline_stage: "engineer".to_string(),
+            ..Default::default()
+        };
+        let result = resolve_fallback_model(&task);
+        // default.yaml has fallback: sonnet for engineer stage
+        assert_eq!(result.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn resolve_fallback_model_returns_none_for_stage_without_fallback() {
+        let task = Task {
+            pipeline_stage: "deployer".to_string(),
+            ..Default::default()
+        };
+        let result = resolve_fallback_model(&task);
+        // deployer stage has no fallback configured
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn exec_script_contains_fallback_model_when_configured() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-001",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "claude-opus-4-6",
+            fallback_model: Some("claude-sonnet-4-6"),
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        assert!(
+            script.contains("FALLBACK_MODEL='claude-sonnet-4-6'"),
+            "script should set FALLBACK_MODEL"
+        );
+        assert!(
+            script.contains("is_rate_limit"),
+            "script should contain rate-limit detection function"
+        );
+        assert!(
+            script.contains("falling back to"),
+            "script should have fallback warning log"
+        );
+    }
+
+    #[test]
+    fn exec_script_empty_fallback_when_not_configured() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-002",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "claude-opus-4-6",
+            fallback_model: None,
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        assert!(
+            script.contains("FALLBACK_MODEL=''"),
+            "script should have empty FALLBACK_MODEL"
+        );
+    }
+
+    #[test]
+    fn exec_script_rate_limit_detection_checks_multiple_sources() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-003",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "claude-opus-4-6",
+            fallback_model: Some("claude-sonnet-4-6"),
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        // Verify the is_rate_limit function checks multiple patterns
+        assert!(
+            script.contains("overloaded_error"),
+            "should detect overloaded_error (Claude API error type)"
+        );
+        assert!(script.contains("429"), "should detect HTTP 429 status");
+        assert!(script.contains("quota"), "should detect quota exhaustion");
+        // Verify it checks both stderr (LOG_FILE) and stdout
+        assert!(
+            script.contains("tail -20 \"$LOG_FILE\""),
+            "should check stderr via LOG_FILE"
+        );
+        assert!(script.contains("stdout_text"), "should check stdout output");
+    }
+
+    #[test]
+    fn exec_script_json_error_fallback() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-004",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "claude-opus-4-6",
+            fallback_model: Some("claude-sonnet-4-6"),
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        // Verify the script handles is_error=true JSON responses with rate-limit
+        assert!(
+            script.contains("IS_ERROR"),
+            "should extract is_error from JSON"
+        );
+        assert!(
+            script.contains("rate-limit error in JSON"),
+            "should log JSON rate-limit detection"
+        );
+    }
+
+    #[test]
+    fn exec_script_fallback_failure_marks_task_failed() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-005",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "claude-opus-4-6",
+            fallback_model: Some("claude-sonnet-4-6"),
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        // After fallback failure, should call werma fail
+        assert!(
+            script.contains("fallback model $FALLBACK_MODEL also failed"),
+            "should log fallback failure"
+        );
+        // Count werma fail calls — should be multiple (primary fail, fallback fail, JSON fail)
+        let fail_count = script.matches("werma fail").count();
+        assert!(
+            fail_count >= 3,
+            "should have at least 3 werma fail paths (no fallback, fallback failed, JSON fallback failed), got {fail_count}"
+        );
     }
 }

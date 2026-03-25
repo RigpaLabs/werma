@@ -28,6 +28,13 @@ pub trait LinearApi {
     /// Get issue state type (e.g. "canceled", "completed") and team key (e.g. "RIG", "FAT").
     /// Used by cancel detection to identify canceled issues or issues moved to another team.
     fn get_issue_state_and_team(&self, issue_id: &str) -> Result<(String, String)>;
+    /// Fetch comments on an issue, optionally filtered to those created after `after_iso`.
+    /// Returns vec of (author_name, created_at_iso, body).
+    fn list_comments(
+        &self,
+        issue_id: &str,
+        after_iso: Option<&str>,
+    ) -> Result<Vec<(String, String, String)>>;
 }
 
 impl LinearApi for LinearClient {
@@ -81,9 +88,42 @@ impl LinearApi for LinearClient {
     fn get_issue_state_and_team(&self, issue_id: &str) -> Result<(String, String)> {
         self.get_issue_state_and_team(issue_id)
     }
+
+    fn list_comments(
+        &self,
+        issue_id: &str,
+        after_iso: Option<&str>,
+    ) -> Result<Vec<(String, String, String)>> {
+        self.list_comments(issue_id, after_iso)
+    }
 }
 
 const LINEAR_API: &str = "https://api.linear.app/graphql";
+
+/// Compare two ISO 8601 timestamps, returning true if `ts` is strictly after `after`.
+/// Handles format mismatches between SQLite (local, no TZ) and Linear (UTC with millis).
+/// Falls back to string comparison if chrono parsing fails.
+pub(crate) fn is_after_timestamp(ts: &str, after: &str) -> bool {
+    use chrono::{DateTime, NaiveDateTime, Utc};
+
+    // Try parsing both as full RFC 3339 / ISO 8601 with timezone
+    let parse_ts = |s: &str| -> Option<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&Utc))
+            .ok()
+            .or_else(|| {
+                // Fallback: parse as naive (no timezone) — assume UTC
+                NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+                    .map(|ndt| ndt.and_utc())
+                    .ok()
+            })
+    };
+
+    match (parse_ts(ts), parse_ts(after)) {
+        (Some(t), Some(a)) => t > a,
+        _ => ts > after, // fallback to string comparison
+    }
+}
 
 /// Per-team configuration (team_id, team_key, and workflow status mapping).
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -481,6 +521,8 @@ impl LinearClient {
                         title
                         description
                         priority
+                        estimate
+                        state { type }
                         labels { nodes { name } }
                     }
                 }
@@ -533,7 +575,8 @@ impl LinearClient {
             }
 
             let task_type = infer_type_from_labels(&labels);
-            let working_dir = infer_working_dir(title, &labels);
+            let user_cfg = crate::config::UserConfig::load();
+            let working_dir = infer_working_dir(title, &labels, &user_cfg);
             if validate_working_dir(&working_dir).is_none() {
                 eprintln!(
                     "  ! skipping {identifier} [{title}]: working dir '{working_dir}' does not exist"
@@ -578,6 +621,8 @@ impl LinearClient {
                 context_files: vec![],
                 repo_hash: crate::runtime_repo_hash(),
                 estimate,
+                retry_count: 0,
+                retry_after: None,
             };
 
             db.insert_task(&task)?;
@@ -863,6 +908,64 @@ impl LinearClient {
         Ok((id, ident, title, description, labels))
     }
 
+    /// Fetch comments on an issue by UUID, optionally filtering to those after `after_iso`.
+    /// Returns vec of (author_name, created_at_iso, body) sorted chronologically.
+    pub fn list_comments(
+        &self,
+        issue_id: &str,
+        after_iso: Option<&str>,
+    ) -> Result<Vec<(String, String, String)>> {
+        let uuid = self.resolve_uuid(issue_id)?;
+
+        let data = self.query(
+            r#"query($issueId: ID!) {
+                issue(id: $issueId) {
+                    comments(orderBy: createdAt) {
+                        nodes {
+                            body
+                            createdAt
+                            user { name }
+                        }
+                    }
+                }
+            }"#,
+            &json!({"issueId": uuid}),
+        )?;
+
+        let nodes = data["issue"]["comments"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        let mut comments = Vec::new();
+        for node in &nodes {
+            let body = node["body"].as_str().unwrap_or("").to_string();
+            let created_at = node["createdAt"].as_str().unwrap_or("").to_string();
+            let author = node["user"]["name"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
+
+            // Filter by timestamp if provided — use chrono for proper comparison
+            // since SQLite stores local time (%Y-%m-%dT%H:%M:%S) and Linear
+            // returns UTC with fractional seconds (2026-03-24T15:30:00.000Z).
+            if let Some(after) = after_iso {
+                if !is_after_timestamp(&created_at, after) {
+                    continue;
+                }
+            }
+
+            // Skip bot/pipeline comments (werma callback comments)
+            if body.starts_with("**Werma") || body.starts_with("**Pipeline") {
+                continue;
+            }
+
+            comments.push((author, created_at, body));
+        }
+
+        Ok(comments)
+    }
+
     /// Get issues filtered by status name, across all configured teams.
     pub fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<Value>> {
         let config = load_config()?;
@@ -1146,19 +1249,13 @@ pub fn is_manual_issue(labels: &[&str]) -> bool {
     labels.iter().any(|l| l.eq_ignore_ascii_case("manual"))
 }
 
-/// Map a `repo:*` label value to its local directory path.
-/// All RigpaLabs repos live under `~/projects/rigpa/`.
-fn repo_label_to_dir(repo: &str) -> Option<&'static str> {
-    match repo.trim() {
-        "forge" | "werma" => Some("~/projects/rigpa/werma"),
-        "fathom" => Some("~/projects/rigpa/fathom"),
-        "hyper-liq" => Some("~/projects/rigpa/hyper-liq"),
-        "sui-bots" => Some("~/projects/rigpa/sui-bots"),
-        "ar-quant" => Some("~/projects/rigpa/ar-quant"),
-        "ar-quant-alpha" => Some("~/projects/rigpa/ar-quant-alpha"),
-        "sigil" => Some("~/projects/rigpa/sigil"),
-        _ => None,
-    }
+/// Map a `repo:*` label value to its local directory path using config.
+/// Handles the `forge` → `werma` alias, then delegates to `UserConfig::repo_dir`.
+fn repo_label_to_dir(repo: &str, config: &crate::config::UserConfig) -> String {
+    let repo = repo.trim();
+    // Handle legacy alias
+    let repo = if repo == "forge" { "werma" } else { repo };
+    config.repo_dir(repo)
 }
 
 /// Expand `~` to the user's home directory.
@@ -1183,41 +1280,40 @@ pub fn validate_working_dir(dir: &str) -> Option<String> {
 }
 
 /// Infer working directory from title keywords and labels.
-pub fn infer_working_dir(title: &str, labels: &[&str]) -> String {
+/// Uses `UserConfig` for repo label → directory resolution.
+pub fn infer_working_dir(
+    title: &str,
+    labels: &[&str],
+    config: &crate::config::UserConfig,
+) -> String {
     let title_lower = title.to_lowercase();
 
     // Check for repo: label (explicit mapping takes priority)
     for label in labels {
         if let Some(repo) = label.strip_prefix("repo:") {
-            if let Some(dir) = repo_label_to_dir(repo) {
-                return dir.to_string();
-            }
-            // Unknown repo label — fall through to keyword matching
-            eprintln!(
-                "warning: unknown repo label 'repo:{repo}', falling back to keyword inference"
-            );
+            return repo_label_to_dir(repo, config);
         }
     }
 
-    // Keyword-based inference
+    // Keyword-based inference: keyword → repo name, resolved via config
     let keywords: &[(&str, &str)] = &[
-        ("werma", "~/projects/rigpa/werma"),
-        ("pipeline", "~/projects/rigpa/werma"),
-        ("fathom", "~/projects/rigpa/fathom"),
-        ("sigil", "~/projects/rigpa/sigil"),
-        ("sui", "~/projects/rigpa/sui-bots"),
-        ("hyper", "~/projects/rigpa/hyper-liq"),
-        ("ar-quant-alpha", "~/projects/rigpa/ar-quant-alpha"),
-        ("ar-quant", "~/projects/rigpa/ar-quant"),
+        ("werma", "werma"),
+        ("pipeline", "werma"),
+        ("fathom", "fathom"),
+        ("sigil", "sigil"),
+        ("sui", "sui-bots"),
+        ("hyper", "hyper-liq"),
+        ("ar-quant-alpha", "ar-quant-alpha"),
+        ("ar-quant", "ar-quant"),
     ];
 
-    for (keyword, dir) in keywords {
+    for (keyword, repo) in keywords {
         if title_lower.contains(keyword) {
-            return (*dir).to_string();
+            return config.repo_dir(repo);
         }
     }
 
-    "~/projects/rigpa/werma".to_string()
+    config.repo_dir("werma")
 }
 
 // ─── FakeLinearApi (test-only) ────────────────────────────────────────────────
@@ -1361,6 +1457,14 @@ pub mod fakes {
         fn get_issue_state_and_team(&self, _issue_id: &str) -> Result<(String, String)> {
             Ok(("started".to_string(), "RIG".to_string()))
         }
+
+        fn list_comments(
+            &self,
+            _issue_id: &str,
+            _after_iso: Option<&str>,
+        ) -> Result<Vec<(String, String, String)>> {
+            Ok(vec![])
+        }
     }
 }
 
@@ -1392,75 +1496,103 @@ mod tests {
         assert_eq!(infer_type_from_labels(&[]), "code"); // empty labels
     }
 
+    /// Helper: default UserConfig for tests (no custom repos — convention fallback only).
+    fn test_config() -> crate::config::UserConfig {
+        crate::config::UserConfig::default()
+    }
+
     #[test]
     fn working_dir_from_title() {
+        let cfg = test_config();
         assert_eq!(
-            infer_working_dir("Fix werma daemon crash", &[]),
+            infer_working_dir("Fix werma daemon crash", &[], &cfg),
             "~/projects/rigpa/werma"
         );
         assert_eq!(
-            infer_working_dir("Add pipeline stage", &[]),
+            infer_working_dir("Add pipeline stage", &[], &cfg),
             "~/projects/rigpa/werma"
         );
         // Default fallback for unknown titles
         assert_eq!(
-            infer_working_dir("Random task title", &[]),
+            infer_working_dir("Random task title", &[], &cfg),
             "~/projects/rigpa/werma"
         );
     }
 
     #[test]
     fn working_dir_from_repo_label() {
-        // Known repo labels map to rigpa/ paths
+        let cfg = test_config();
+        // Convention-based repo labels resolve to rigpa/ paths
         assert_eq!(
-            infer_working_dir("Some task", &["repo:forge"]),
+            infer_working_dir("Some task", &["repo:forge"], &cfg),
             "~/projects/rigpa/werma"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:werma"]),
+            infer_working_dir("Some task", &["repo:werma"], &cfg),
             "~/projects/rigpa/werma"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:fathom"]),
+            infer_working_dir("Some task", &["repo:fathom"], &cfg),
             "~/projects/rigpa/fathom"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:hyper-liq"]),
+            infer_working_dir("Some task", &["repo:hyper-liq"], &cfg),
             "~/projects/rigpa/hyper-liq"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:sui-bots"]),
+            infer_working_dir("Some task", &["repo:sui-bots"], &cfg),
             "~/projects/rigpa/sui-bots"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:ar-quant"]),
+            infer_working_dir("Some task", &["repo:ar-quant"], &cfg),
             "~/projects/rigpa/ar-quant"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:ar-quant-alpha"]),
+            infer_working_dir("Some task", &["repo:ar-quant-alpha"], &cfg),
             "~/projects/rigpa/ar-quant-alpha"
         );
         // repo: label takes priority over title keywords
         assert_eq!(
-            infer_working_dir("Fix werma bug", &["repo:fathom"]),
+            infer_working_dir("Fix werma bug", &["repo:fathom"], &cfg),
             "~/projects/rigpa/fathom"
         );
-        // Unknown repo label falls through to keyword inference
+        // Unknown repo label uses convention fallback (no keyword inference)
         assert_eq!(
-            infer_working_dir("Fix werma bug", &["repo:unknown-project"]),
-            "~/projects/rigpa/werma"
+            infer_working_dir("Fix werma bug", &["repo:unknown-project"], &cfg),
+            "~/projects/rigpa/unknown-project"
         );
     }
 
     #[test]
     fn working_dir_title_keywords() {
+        let cfg = test_config();
         assert_eq!(
-            infer_working_dir("sui bot improvements", &[]),
+            infer_working_dir("sui bot improvements", &[], &cfg),
             "~/projects/rigpa/sui-bots"
         );
         assert_eq!(
-            infer_working_dir("hyper liquidation fix", &[]),
+            infer_working_dir("hyper liquidation fix", &[], &cfg),
             "~/projects/rigpa/hyper-liq"
+        );
+    }
+
+    #[test]
+    fn working_dir_custom_config_override() {
+        let mut cfg = test_config();
+        cfg.repos
+            .insert("werma".to_string(), "/custom/path/werma".to_string());
+        assert_eq!(
+            infer_working_dir("Fix werma bug", &[], &cfg),
+            "/custom/path/werma"
+        );
+        assert_eq!(
+            infer_working_dir("Some task", &["repo:werma"], &cfg),
+            "/custom/path/werma"
+        );
+        // Non-overridden repos still use convention
+        assert_eq!(
+            infer_working_dir("Some task", &["repo:fathom"], &cfg),
+            "~/projects/rigpa/fathom"
         );
     }
 
@@ -1496,40 +1628,47 @@ mod tests {
 
     #[test]
     fn repo_label_mapping() {
-        assert_eq!(repo_label_to_dir("forge"), Some("~/projects/rigpa/werma"));
-        assert_eq!(repo_label_to_dir("werma"), Some("~/projects/rigpa/werma"));
-        assert_eq!(repo_label_to_dir("fathom"), Some("~/projects/rigpa/fathom"));
+        let cfg = test_config();
+        assert_eq!(repo_label_to_dir("forge", &cfg), "~/projects/rigpa/werma");
+        assert_eq!(repo_label_to_dir("werma", &cfg), "~/projects/rigpa/werma");
+        assert_eq!(repo_label_to_dir("fathom", &cfg), "~/projects/rigpa/fathom");
         assert_eq!(
-            repo_label_to_dir("hyper-liq"),
-            Some("~/projects/rigpa/hyper-liq")
+            repo_label_to_dir("hyper-liq", &cfg),
+            "~/projects/rigpa/hyper-liq"
         );
         assert_eq!(
-            repo_label_to_dir("sui-bots"),
-            Some("~/projects/rigpa/sui-bots")
+            repo_label_to_dir("sui-bots", &cfg),
+            "~/projects/rigpa/sui-bots"
         );
         assert_eq!(
-            repo_label_to_dir("ar-quant"),
-            Some("~/projects/rigpa/ar-quant")
+            repo_label_to_dir("ar-quant", &cfg),
+            "~/projects/rigpa/ar-quant"
         );
         assert_eq!(
-            repo_label_to_dir("ar-quant-alpha"),
-            Some("~/projects/rigpa/ar-quant-alpha")
+            repo_label_to_dir("ar-quant-alpha", &cfg),
+            "~/projects/rigpa/ar-quant-alpha"
         );
-        assert_eq!(repo_label_to_dir("sigil"), Some("~/projects/rigpa/sigil"));
-        assert_eq!(repo_label_to_dir("unknown-repo"), None);
+        assert_eq!(repo_label_to_dir("sigil", &cfg), "~/projects/rigpa/sigil");
+        // Unknown repos get convention-based fallback
+        assert_eq!(
+            repo_label_to_dir("unknown-repo", &cfg),
+            "~/projects/rigpa/unknown-repo"
+        );
     }
 
     #[test]
     fn infer_working_dir_repo_label_overrides_keyword() {
+        let cfg = test_config();
         // repo: label should take priority over title keyword matching
         assert_eq!(
-            infer_working_dir("Fix fathom collector", &["repo:werma"]),
+            infer_working_dir("Fix fathom collector", &["repo:werma"], &cfg),
             "~/projects/rigpa/werma"
         );
     }
 
     #[test]
     fn infer_working_dir_all_repo_labels() {
+        let cfg = test_config();
         let cases = [
             ("repo:werma", "~/projects/rigpa/werma"),
             ("repo:forge", "~/projects/rigpa/werma"),
@@ -1542,7 +1681,7 @@ mod tests {
         ];
         for (label, expected) in cases {
             assert_eq!(
-                infer_working_dir("Some task", &[label]),
+                infer_working_dir("Some task", &[label], &cfg),
                 expected,
                 "failed for label: {label}"
             );
@@ -1550,27 +1689,30 @@ mod tests {
     }
 
     #[test]
-    fn infer_working_dir_unknown_repo_falls_back_to_keyword() {
-        // Unknown repo label should fall through to keyword inference
+    fn infer_working_dir_unknown_repo_uses_convention() {
+        let cfg = test_config();
+        // Unknown repo label uses convention fallback ~/projects/rigpa/{name}
         assert_eq!(
-            infer_working_dir("Fix fathom bug", &["repo:nonexistent"]),
-            "~/projects/rigpa/fathom"
+            infer_working_dir("Fix fathom bug", &["repo:nonexistent"], &cfg),
+            "~/projects/rigpa/nonexistent"
         );
     }
 
     #[test]
-    fn infer_working_dir_unknown_repo_no_keyword_defaults_to_werma() {
-        // Unknown repo label + no keyword match → default werma
+    fn infer_working_dir_unknown_repo_no_keyword_uses_convention() {
+        let cfg = test_config();
+        // Unknown repo label → convention path (not keyword inference)
         assert_eq!(
-            infer_working_dir("Some generic task", &["repo:nonexistent"]),
-            "~/projects/rigpa/werma"
+            infer_working_dir("Some generic task", &["repo:my-new-repo"], &cfg),
+            "~/projects/rigpa/my-new-repo"
         );
     }
 
     #[test]
     fn infer_working_dir_sigil_keyword() {
+        let cfg = test_config();
         assert_eq!(
-            infer_working_dir("Build sigil signal engine", &[]),
+            infer_working_dir("Build sigil signal engine", &[], &cfg),
             "~/projects/rigpa/sigil"
         );
     }
@@ -1594,20 +1736,22 @@ mod tests {
 
     #[test]
     fn working_dir_fathom_keyword() {
+        let cfg = test_config();
         assert_eq!(
-            infer_working_dir("Fix fathom collector", &[]),
+            infer_working_dir("Fix fathom collector", &[], &cfg),
             "~/projects/rigpa/fathom"
         );
     }
 
     #[test]
     fn working_dir_ar_quant_keywords() {
+        let cfg = test_config();
         assert_eq!(
-            infer_working_dir("Update ar-quant-alpha bot", &[]),
+            infer_working_dir("Update ar-quant-alpha bot", &[], &cfg),
             "~/projects/rigpa/ar-quant-alpha"
         );
         assert_eq!(
-            infer_working_dir("Fix ar-quant backtesting", &[]),
+            infer_working_dir("Fix ar-quant backtesting", &[], &cfg),
             "~/projects/rigpa/ar-quant"
         );
     }
@@ -1617,6 +1761,41 @@ mod tests {
         // This tests the error path (file doesn't exist in test env)
         let result = read_env_file_key("NONEXISTENT_KEY");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn is_after_timestamp_same_format() {
+        // Both full ISO 8601 with timezone
+        assert!(is_after_timestamp(
+            "2026-03-24T16:00:00.000Z",
+            "2026-03-24T15:00:00.000Z"
+        ));
+        assert!(!is_after_timestamp(
+            "2026-03-24T14:00:00.000Z",
+            "2026-03-24T15:00:00.000Z"
+        ));
+    }
+
+    #[test]
+    fn is_after_timestamp_mixed_formats() {
+        // SQLite naive (no TZ) vs Linear RFC 3339 (with Z)
+        // Both treated as UTC for comparison
+        assert!(is_after_timestamp(
+            "2026-03-24T16:00:00.000Z",
+            "2026-03-24T15:00:00"
+        ));
+        assert!(!is_after_timestamp(
+            "2026-03-24T14:00:00.000Z",
+            "2026-03-24T15:00:00"
+        ));
+    }
+
+    #[test]
+    fn is_after_timestamp_equal_is_not_after() {
+        assert!(!is_after_timestamp(
+            "2026-03-24T15:00:00.000Z",
+            "2026-03-24T15:00:00"
+        ));
     }
 
     #[test]

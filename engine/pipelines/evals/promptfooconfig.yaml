@@ -1,0 +1,37 @@
+# Werma Pipeline Prompt Evaluation Suite
+#
+# Usage:
+#   cd engine/pipelines/evals
+#   promptfoo eval                    # run all evals
+#   promptfoo eval --filter-pattern "verdict"  # run verdict tests only
+#   promptfoo eval --no-cache         # skip cache for fresh results
+#   promptfoo view                    # view results in browser
+#
+# CI:
+#   promptfoo eval --output results.json
+#   promptfoo eval --grader openai:gpt-4o-mini  # cheaper grader for CI
+
+description: Werma pipeline prompt evaluation suite
+
+providers:
+  - id: anthropic:messages:claude-sonnet-4-20250514
+    label: claude-sonnet
+    config:
+      max_tokens: 4096
+      temperature: 0
+
+prompts:
+  - id: file://prompts/analyst-eval.txt
+    label: analyst
+  - id: file://prompts/engineer-eval.txt
+    label: engineer
+  - id: file://prompts/reviewer-eval.txt
+    label: reviewer
+  - id: file://prompts/deployer-eval.txt
+    label: deployer
+
+defaultTest:
+  options:
+    transformVars: "{ ...vars, issue_id: vars.issue_id || 'RIG-999', verdict_instruction: 'Output your verdict on the LAST line of your response' }"
+
+tests: file://tests/golden-dataset.yaml

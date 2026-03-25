@@ -110,7 +110,8 @@ pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<(
         // The daemon's drain_queue respects concurrency limits when launching tasks.
 
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        let working_dir = linear::infer_working_dir(&title, &label_refs);
+        let user_cfg = crate::config::UserConfig::load();
+        let working_dir = linear::infer_working_dir(&title, &label_refs, &user_cfg);
         if linear::validate_working_dir(&working_dir).is_none() {
             eprintln!("  ! skipping {ident} [{title}]: working dir '{working_dir}' does not exist");
             skipped += 1;

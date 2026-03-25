@@ -1,5 +1,6 @@
 mod art;
 mod backup;
+mod build;
 mod cli;
 mod commands;
 mod config;
@@ -288,6 +289,8 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        cli::Commands::Build => commands::misc::cmd_build()?,
+
         cli::Commands::Update => commands::misc::cmd_update()?,
 
         cli::Commands::Review { target, dir, force } => {
@@ -295,6 +298,10 @@ fn main() -> anyhow::Result<()> {
             let wdir = werma_dir()?;
             commands::review::cmd_review(&db, &wdir, target.as_deref(), dir.as_deref(), force)?;
         }
+
+        cli::Commands::Config { action } => match action {
+            cli::ConfigAction::Show => commands::config_cmd::cmd_config_show()?,
+        },
 
         cli::Commands::Dash => {
             let db = open_db()?;
@@ -910,6 +917,14 @@ mod tests {
             match parse(&["migrate"]) {
                 Commands::Migrate => {}
                 other => panic!("expected Migrate, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_build() {
+            match parse(&["build"]) {
+                Commands::Build => {}
+                other => panic!("expected Build, got {other:?}"),
             }
         }
 
