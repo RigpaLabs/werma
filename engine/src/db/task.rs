@@ -7,6 +7,7 @@ use super::task_from_row;
 
 /// Trait for task persistence operations, enabling testability via fakes/mocks.
 pub trait TaskRepository {
+    fn next_task_id(&self) -> Result<String>;
     fn insert_task(&self, task: &Task) -> Result<()>;
     fn task(&self, id: &str) -> Result<Option<Task>>;
     fn list_tasks(&self, status: Option<Status>) -> Result<Vec<Task>>;
@@ -19,6 +20,10 @@ pub trait TaskRepository {
 }
 
 impl TaskRepository for super::Db {
+    fn next_task_id(&self) -> Result<String> {
+        self.next_task_id()
+    }
+
     fn insert_task(&self, task: &Task) -> Result<()> {
         self.insert_task(task)
     }
