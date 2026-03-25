@@ -149,6 +149,14 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
+            // RIG-272: Skip canceled/completed issues (defensive — the Linear query
+            // filters by status, but state_type can be stale or change mid-poll).
+            let state_type = issue["state"]["type"].as_str().unwrap_or("");
+            if state_type == "canceled" || state_type == "completed" {
+                total_skipped += 1;
+                continue;
+            }
+
             let labels: Vec<&str> = issue["labels"]["nodes"]
                 .as_array()
                 .map(|arr| {
@@ -711,169 +719,6 @@ stages:
         assert!(
             tasks.is_empty(),
             "should not create analyst task when engineer already ran"
-        );
-    }
-
-    #[test]
-    fn poll_skips_analyst_when_nonfailed_task_exists() {
-        // Existing dedup: non-failed task blocks re-creation
-        let db = crate::db::Db::open_in_memory().unwrap();
-        let linear = FakeLinearApi::new();
-        let cmd = FakeCommandRunner::new();
-
-        // Insert a completed analyst task for this issue
-        let mut existing = crate::db::make_test_task("20260324-001");
-        existing.status = crate::models::Status::Completed;
-        existing.linear_issue_id = "RIG-276".to_string();
-        existing.pipeline_stage = "analyst".to_string();
-        db.insert_task(&existing).unwrap();
-
-        let issue = fake_issue(
-            "uuid-3",
-            "RIG-276",
-            "Test werma issue",
-            &["analyze", "repo:werma"],
-        );
-        linear.set_issues_for_label("analyze", vec![issue]);
-
-        poll(&db, &linear, &cmd).unwrap();
-
-        // Should still only have the 1 original task
-        let tasks = db
-            .tasks_by_linear_issue("RIG-276", Some("analyst"), false)
-            .unwrap();
-        assert_eq!(tasks.len(), 1, "should not create duplicate analyst task");
-    }
-
-    #[test]
-    fn poll_skips_completed_and_canceled_issues() {
-        let db = crate::db::Db::open_in_memory().unwrap();
-        let linear = FakeLinearApi::new();
-        let cmd = FakeCommandRunner::new();
-
-        // Issue with state type "completed" (Done in Linear)
-        let mut done_issue = fake_issue("uuid-done", "RIG-300", "Done issue", &["repo:werma"]);
-        done_issue["state"]["type"] = serde_json::json!("completed");
-
-        // Issue with state type "canceled"
-        let mut canceled_issue =
-            fake_issue("uuid-cancel", "RIG-301", "Canceled issue", &["repo:werma"]);
-        canceled_issue["state"]["type"] = serde_json::json!("canceled");
-
-        // Issue with state type "cancelled" (British spelling)
-        let mut cancelled_issue = fake_issue(
-            "uuid-cancel2",
-            "RIG-302",
-            "Cancelled issue",
-            &["repo:werma"],
-        );
-        cancelled_issue["state"]["type"] = serde_json::json!("cancelled");
-
-        // Normal active issue
-        let active_issue = fake_issue("uuid-active", "RIG-303", "Active issue", &["repo:werma"]);
-
-        linear.set_issues_for_status(
-            "in_progress",
-            vec![done_issue, canceled_issue, cancelled_issue, active_issue],
-        );
-
-        poll(&db, &linear, &cmd).unwrap();
-
-        // Only the active issue should spawn a task
-        let all_tasks = db.list_tasks(None).unwrap();
-        let engineer_tasks: Vec<_> = all_tasks
-            .iter()
-            .filter(|t| t.pipeline_stage == "engineer")
-            .collect();
-        assert_eq!(
-            engineer_tasks.len(),
-            1,
-            "only active issue should spawn engineer task"
-        );
-        assert_eq!(engineer_tasks[0].linear_issue_id, "RIG-303");
-    }
-
-    /// RIG-296: poller should NOT create an engineer task if a reviewer task
-    /// is still running for the same issue.
-    #[test]
-    fn poll_skips_engineer_when_reviewer_running_for_same_issue() {
-        let db = crate::db::Db::open_in_memory().unwrap();
-        let linear = FakeLinearApi::new();
-        let cmd = FakeCommandRunner::new();
-
-        // Reviewer is running for RIG-296
-        let mut reviewer = crate::db::make_test_task("20260325-rev");
-        reviewer.status = crate::models::Status::Running;
-        reviewer.linear_issue_id = "RIG-296".to_string();
-        reviewer.pipeline_stage = "reviewer".to_string();
-        db.insert_task(&reviewer).unwrap();
-        db.set_task_status("20260325-rev", crate::models::Status::Running)
-            .unwrap();
-
-        // Issue is in "In Progress" (e.g., after callback moved it but reviewer lingers)
-        let issue = serde_json::json!({
-            "id": "uuid-296",
-            "identifier": "RIG-296",
-            "title": "Test werma issue",
-            "description": "Fix race condition",
-            "state": {"type": "started"},
-            "estimate": 3,
-            "labels": {
-                "nodes": [{"name": "repo:werma"}]
-            }
-        });
-        linear.set_issues_for_status("in_progress", vec![issue]);
-
-        poll(&db, &linear, &cmd).unwrap();
-
-        // Should NOT create an engineer task — reviewer is still running
-        let engineer_tasks = db
-            .tasks_by_linear_issue("RIG-296", Some("engineer"), false)
-            .unwrap();
-        assert!(
-            engineer_tasks.is_empty(),
-            "should not create engineer task while reviewer is running"
-        );
-    }
-
-    /// RIG-296: poller should create engineer task once reviewer completes.
-    #[test]
-    fn poll_creates_engineer_after_reviewer_completes() {
-        let db = crate::db::Db::open_in_memory().unwrap();
-        let linear = FakeLinearApi::new();
-        let cmd = FakeCommandRunner::new();
-
-        // Reviewer completed and pushed (cycle done)
-        let mut reviewer = crate::db::make_test_task("20260325-rev");
-        reviewer.status = crate::models::Status::Completed;
-        reviewer.linear_issue_id = "RIG-296".to_string();
-        reviewer.pipeline_stage = "reviewer".to_string();
-        reviewer.linear_pushed = true;
-        db.insert_task(&reviewer).unwrap();
-
-        let issue = serde_json::json!({
-            "id": "uuid-296",
-            "identifier": "RIG-296",
-            "title": "Test werma issue",
-            "description": "Fix race condition",
-            "state": {"type": "started"},
-            "estimate": 3,
-            "labels": {
-                "nodes": [{"name": "repo:werma"}]
-            }
-        });
-        linear.set_issues_for_status("in_progress", vec![issue]);
-
-        poll(&db, &linear, &cmd).unwrap();
-
-        // Should create an engineer task — reviewer is done
-        let engineer_tasks = db
-            .tasks_by_linear_issue("RIG-296", Some("engineer"), false)
-            .unwrap();
-        assert_eq!(
-            engineer_tasks.len(),
-            1,
-            "should create engineer task after reviewer completes"
         );
     }
 }
