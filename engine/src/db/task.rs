@@ -356,6 +356,20 @@ impl super::Db {
                    SELECT 1 FROM tasks t2 WHERE t2.id = dep.value AND t2.status = 'completed'
                  )
                )
+               -- RIG-296: cross-stage guard — don't launch a pipeline task if another
+               -- pipeline task for the same issue is still running. Prevents reviewer
+               -- and engineer from running simultaneously on the same issue.
+               AND NOT (
+                 linear_issue_id != ''
+                 AND pipeline_stage != ''
+                 AND EXISTS (
+                   SELECT 1 FROM tasks t3
+                   WHERE t3.linear_issue_id = tasks.linear_issue_id
+                     AND t3.pipeline_stage != ''
+                     AND t3.status = 'running'
+                     AND t3.id != tasks.id
+                 )
+               )
              ORDER BY priority ASC, created_at ASC
              LIMIT 1",
             [],
@@ -749,6 +763,87 @@ mod tests {
         assert!(first.is_some());
         let second = db.claim_next_pending().unwrap();
         assert!(second.is_none());
+    }
+
+    /// RIG-296: cross-stage guard — pending engineer should NOT be claimed
+    /// while reviewer is still running for the same issue.
+    #[test]
+    fn claim_next_pending_blocks_cross_stage_conflict() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Reviewer is running for RIG-296
+        let mut reviewer = make_test_task("20260325-rev");
+        reviewer.linear_issue_id = "RIG-296".to_string();
+        reviewer.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&reviewer).unwrap();
+        db.set_task_status("20260325-rev", Status::Running).unwrap();
+
+        // Engineer is pending for the same issue
+        let mut engineer = make_test_task("20260325-eng");
+        engineer.linear_issue_id = "RIG-296".to_string();
+        engineer.pipeline_stage = "engineer".to_string();
+        db.insert_task(&engineer).unwrap();
+
+        // Should NOT claim engineer — reviewer is still running
+        let claimed = db.claim_next_pending().unwrap();
+        assert!(
+            claimed.is_none(),
+            "should not claim engineer while reviewer is running for same issue"
+        );
+
+        // Once reviewer completes, engineer becomes claimable
+        db.set_task_status("20260325-rev", Status::Completed)
+            .unwrap();
+        let claimed = db.claim_next_pending().unwrap();
+        assert!(claimed.is_some());
+        assert_eq!(claimed.unwrap().id, "20260325-eng");
+    }
+
+    /// RIG-296: cross-stage guard should NOT block tasks for different issues.
+    #[test]
+    fn claim_next_pending_allows_different_issues() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Reviewer running for RIG-100
+        let mut reviewer = make_test_task("20260325-rev");
+        reviewer.linear_issue_id = "RIG-100".to_string();
+        reviewer.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&reviewer).unwrap();
+        db.set_task_status("20260325-rev", Status::Running).unwrap();
+
+        // Engineer pending for RIG-200 (different issue)
+        let mut engineer = make_test_task("20260325-eng");
+        engineer.linear_issue_id = "RIG-200".to_string();
+        engineer.pipeline_stage = "engineer".to_string();
+        db.insert_task(&engineer).unwrap();
+
+        // Should claim — different issue
+        let claimed = db.claim_next_pending().unwrap();
+        assert!(claimed.is_some());
+        assert_eq!(claimed.unwrap().id, "20260325-eng");
+    }
+
+    /// RIG-296: non-pipeline tasks should not be blocked by the cross-stage guard.
+    #[test]
+    fn claim_next_pending_allows_non_pipeline_tasks() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Pipeline reviewer running for RIG-296
+        let mut reviewer = make_test_task("20260325-rev");
+        reviewer.linear_issue_id = "RIG-296".to_string();
+        reviewer.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&reviewer).unwrap();
+        db.set_task_status("20260325-rev", Status::Running).unwrap();
+
+        // Non-pipeline task (no pipeline_stage, no linear_issue_id) should still be claimable
+        let mut adhoc = make_test_task("20260325-adhoc");
+        adhoc.linear_issue_id = String::new();
+        adhoc.pipeline_stage = String::new();
+        db.insert_task(&adhoc).unwrap();
+
+        let claimed = db.claim_next_pending().unwrap();
+        assert!(claimed.is_some());
+        assert_eq!(claimed.unwrap().id, "20260325-adhoc");
     }
 
     // ─── find_all_launchable ────────────────────────────────────────────────
