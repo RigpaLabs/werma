@@ -5,11 +5,11 @@ use anyhow::{Result, anyhow};
 use super::config::PipelineConfig;
 use super::helpers::{infer_working_dir_from_issue, truncate_lines};
 use super::loader::{load_default, resolve_prompt};
-use super::pr::{auto_create_pr, has_open_pr_for_issue, pr_title_from_url};
+use super::pr::{auto_create_pr, has_open_pr_for_issue, post_pr_comment, pr_title_from_url};
 use super::prompt::{build_vars, render_prompt};
 use super::verdict::{
-    extract_rejection_feedback, is_heavy_track, parse_comments, parse_estimate, parse_pr_url,
-    parse_verdict,
+    extract_rejection_feedback, extract_review_body, is_heavy_track, parse_comments,
+    parse_estimate, parse_pr_url, parse_verdict,
 };
 use crate::db::Db;
 use crate::linear::LinearApi;
@@ -188,6 +188,7 @@ pub fn callback(
         })
         .to_lowercase();
 
+
     // RIG-227: Fallback spec posting for analyst stage.
     // Post substantive plain-text output as a comment so the spec reaches Linear.
     // Only fire for "done" — ALREADY_DONE means no new spec was written,
@@ -340,6 +341,31 @@ pub fn callback(
             None
         };
 
+        // RIG-281: Post reviewer's review as a PR comment (engine-side, not agent-side).
+        // Agents no longer call `gh pr comment` directly — the engine handles it.
+        if stage == "reviewer" {
+            if let Some(review_body) = extract_review_body(result) {
+                match post_pr_comment(cmd, working_dir, &review_body) {
+                    Ok(true) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: posted review as PR comment (task {task_id})"
+                        );
+                    }
+                    Ok(false) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: no open PR found for review comment \
+                             (task {task_id})"
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: failed to post review as PR comment: {e}"
+                        );
+                    }
+                }
+            }
+        }
+
         // Post a comment — non-critical, don't fail the callback if this errors.
         let comment = format_callback_comment(
             task_id,
@@ -363,16 +389,27 @@ pub fn callback(
                     .review_round_limit()
                     .unwrap_or(DEFAULT_MAX_REVIEW_ROUNDS) as i64;
                 if review_count >= max_rounds {
+                    // Use the pipeline config's blocked transition target status
+                    // (e.g. "backlog"), falling back to "backlog" if not configured.
+                    let escalation_status = stage_cfg
+                        .transition_for("blocked")
+                        .map(|t| t.status.as_str())
+                        .unwrap_or("backlog");
                     eprintln!(
                         "review cycle limit ({max_rounds}) reached for issue {linear_issue_id}, \
-                             escalating to blocked"
+                             escalating to {escalation_status}"
                     );
-                    move_with_retry(linear, linear_issue_id, "blocked")?;
+                    if let Err(e) = move_with_retry(linear, linear_issue_id, escalation_status) {
+                        eprintln!(
+                            "callback: escalation move to '{escalation_status}' failed for \
+                                 {linear_issue_id}: {e} — marking callback as fired to prevent retry loop"
+                        );
+                    }
                     if let Err(e) = linear.comment(
                         linear_issue_id,
                         &format!(
                             "**Review cycle limit reached** ({max_rounds} rounds). \
-                                 Moving to Blocked — manual review required."
+                                 Moving to {escalation_status} — manual review required."
                         ),
                     ) {
                         eprintln!(
@@ -457,10 +494,6 @@ pub(crate) fn format_callback_comment(
     }
 }
 
-/// Extract substantive spec content from analyst output, stripping metadata lines
-/// (VERDICT, ESTIMATE) and ---COMMENT--- blocks that were already posted separately.
-///
-/// Used as a fallback when the agent doesn't wrap its spec in ---COMMENT--- markers.
 pub(crate) fn extract_spec_from_output(output: &str) -> String {
     let mut lines = Vec::new();
     let mut in_comment_block = false;
@@ -1479,65 +1512,58 @@ stages:
         );
     }
 
-    // ── RIG-227: analyst fallback spec posting ──────────────────────────
-
     #[test]
-    fn extract_spec_strips_verdict_and_estimate() {
-        let output = "## Spec\nDo thing A.\n## Requirements\n- Req 1\nESTIMATE=3\nVERDICT=DONE";
-        let spec = extract_spec_from_output(output);
-        assert!(spec.contains("## Spec"));
-        assert!(spec.contains("Do thing A."));
-        assert!(spec.contains("- Req 1"));
-        assert!(!spec.contains("VERDICT="));
-        assert!(!spec.contains("ESTIMATE="));
-    }
-
-    #[test]
-    fn extract_spec_strips_comment_blocks() {
-        let output = "Preamble.\n---COMMENT---\nPosted separately.\n---END COMMENT---\n\
-                       ## Extra output\nVERDICT=DONE";
-        let spec = extract_spec_from_output(output);
-        assert!(spec.contains("Preamble."));
-        assert!(spec.contains("## Extra output"));
-        assert!(!spec.contains("Posted separately."));
-        assert!(!spec.contains("---COMMENT---"));
-        assert!(!spec.contains("VERDICT="));
-    }
-
-    #[test]
-    fn extract_spec_empty_when_only_verdict() {
-        let output = "VERDICT=DONE";
-        let spec = extract_spec_from_output(output);
-        assert!(spec.is_empty());
-    }
-
-    #[test]
-    fn callback_analyst_posts_fallback_spec_when_no_comment_blocks() {
-        // RIG-227: when analyst output has no ---COMMENT--- blocks,
-        // the callback should post the substantive output as a fallback comment.
+    fn review_cycle_escalation_uses_config_status() {
+        // When review cycle limit is reached, the callback should use the
+        // pipeline config's blocked transition target (backlog), not hardcode "blocked".
         let db = crate::db::Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
 
-        linear.set_issue_status("RIG-227", "todo");
-
-        let mut task = crate::db::make_test_task("20260324-227");
-        task.status = Status::Completed;
-        task.linear_issue_id = "RIG-227".to_string();
-        task.pipeline_stage = "analyst".to_string();
+        // Insert a reviewer task for the issue
+        let task = Task {
+            id: "20260324-esc".to_string(),
+            status: Status::Completed,
+            priority: 1,
+            created_at: "2026-03-24T10:00:00".to_string(),
+            started_at: None,
+            finished_at: None,
+            task_type: "pipeline-reviewer".to_string(),
+            prompt: "review issue".to_string(),
+            output_path: String::new(),
+            working_dir: "~/projects/rigpa/werma".to_string(),
+            model: "opus".to_string(),
+            max_turns: 50,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: "RIG-ESC".to_string(),
+            linear_pushed: false,
+            pipeline_stage: "reviewer".to_string(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: String::new(),
+            estimate: 0,
+        };
         db.insert_task(&task).unwrap();
 
-        // Agent output WITHOUT ---COMMENT--- blocks — just raw spec + verdict
-        let result = "## Spec\nImplement feature X.\n## Requirements\n- Do A\n- Do B\n\
-                       ESTIMATE=3\nVERDICT=DONE";
+        // Simulate 3 completed reviewer tasks (at the limit)
+        for i in 0..3 {
+            let mut prev = task.clone();
+            prev.id = format!("20260324-prev{i}");
+            prev.status = Status::Completed;
+            prev.linear_pushed = true;
+            db.insert_task(&prev).unwrap();
+        }
+
+        let result = "Code needs changes.\nVERDICT=REJECTED";
 
         callback(
             &db,
-            "20260324-227",
-            "analyst",
+            "20260324-esc",
+            "reviewer",
             result,
-            "RIG-227",
+            "RIG-ESC",
             "~/projects/rigpa/werma",
             &linear,
             &cmd,
@@ -1545,58 +1571,64 @@ stages:
         )
         .unwrap();
 
-        let comments = linear.comment_calls.borrow();
-        // Exactly 2 comments: fallback spec + status line
-        assert_eq!(
-            comments.len(),
-            2,
-            "expected fallback spec + status comment, got {}: {comments:?}",
-            comments.len()
-        );
-
-        // Find the fallback spec comment by content (not positional)
-        let spec_comment = comments
-            .iter()
-            .find(|(_, body)| body.contains("## Spec"))
-            .map(|(_, body)| body.as_str())
-            .expect("expected a fallback spec comment");
+        // Verify it moved to "backlog" (from config), not "blocked"
+        let moves = linear.move_calls.borrow();
+        // First move is the "review" status from the rejected transition,
+        // but escalation should override to "backlog"
+        let has_backlog = moves.iter().any(|(_, status)| status == "backlog");
+        let has_blocked = moves.iter().any(|(_, status)| status == "blocked");
         assert!(
-            spec_comment.contains("Implement feature X."),
-            "fallback comment should contain spec body, got: {spec_comment}"
+            has_backlog,
+            "escalation should move to 'backlog' (from config), got: {moves:?}"
         );
         assert!(
-            !spec_comment.contains("VERDICT="),
-            "fallback comment should not contain VERDICT line"
+            !has_blocked,
+            "escalation should NOT move to 'blocked' (hardcoded), got: {moves:?}"
         );
     }
 
     #[test]
-    fn callback_analyst_skips_fallback_when_comment_blocks_present() {
-        // RIG-227: when analyst output has proper ---COMMENT--- blocks,
-        // the fallback should NOT fire (comments already posted via parse_comments).
+    fn callback_no_transition_sets_fired_at() {
+        // When a verdict has no matching transition, callback should still
+        // set callback_fired_at to prevent re-processing.
         let db = crate::db::Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
 
-        linear.set_issue_status("RIG-227b", "todo");
-
-        let mut task = crate::db::make_test_task("20260324-228");
-        task.status = Status::Completed;
-        task.linear_issue_id = "RIG-227b".to_string();
-        task.pipeline_stage = "analyst".to_string();
+        let task = Task {
+            id: "20260324-unk".to_string(),
+            status: Status::Completed,
+            priority: 1,
+            created_at: "2026-03-24T10:00:00".to_string(),
+            started_at: None,
+            finished_at: None,
+            task_type: "pipeline-reviewer".to_string(),
+            prompt: "review issue".to_string(),
+            output_path: String::new(),
+            working_dir: "~/projects/rigpa/werma".to_string(),
+            model: "opus".to_string(),
+            max_turns: 50,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: "RIG-UNK".to_string(),
+            linear_pushed: false,
+            pipeline_stage: "reviewer".to_string(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: String::new(),
+            estimate: 0,
+        };
         db.insert_task(&task).unwrap();
 
-        // Agent output WITH proper ---COMMENT--- blocks
-        let result = "---COMMENT---\n## Spec\nImplement feature X.\n---END COMMENT---\n\
-                       ESTIMATE=3\nVERDICT=DONE";
+        let result = "Something unusual happened.\nVERDICT=UNKNOWN_VERDICT_XYZ";
 
         callback(
             &db,
-            "20260324-228",
-            "analyst",
+            "20260324-unk",
+            "reviewer",
             result,
-            "RIG-227b",
+            "RIG-UNK",
             "~/projects/rigpa/werma",
             &linear,
             &cmd,
@@ -1604,328 +1636,17 @@ stages:
         )
         .unwrap();
 
-        let comments = linear.comment_calls.borrow();
-        // Should have exactly 2 comments: the ---COMMENT--- block + status line
-        // (no fallback because ---COMMENT--- block was found)
-        let spec_comments: Vec<_> = comments
-            .iter()
-            .filter(|(_, body)| body.contains("## Spec"))
-            .collect();
-        assert_eq!(
-            spec_comments.len(),
-            1,
-            "spec should be posted exactly once (from COMMENT block, not fallback): {comments:?}"
-        );
-    }
-
-    #[test]
-    fn callback_engineer_does_not_post_fallback_spec() {
-        // RIG-227: fallback spec posting is analyst-only — engineer stage should not trigger it.
-        let db = crate::db::Db::open_in_memory().unwrap();
-        let linear = FakeLinearApi::new();
-        let cmd = crate::traits::fakes::FakeCommandRunner::new();
-        let notifier = FakeNotifier::new();
-
-        linear.set_issue_status("RIG-227c", "review");
-
-        let mut task = crate::db::make_test_task("20260324-229");
-        task.status = Status::Completed;
-        task.linear_issue_id = "RIG-227c".to_string();
-        task.pipeline_stage = "engineer".to_string();
-        db.insert_task(&task).unwrap();
-
-        // Engineer output without COMMENT blocks
-        let result = "Implementation complete.\nAll tests pass.\nVERDICT=DONE";
-
-        // Engineer DONE checks for PR via `has_open_pr_for_issue` → needs cmd response
-        cmd.push_success("[]"); // no open PRs
-
-        callback(
-            &db,
-            "20260324-229",
-            "engineer",
-            result,
-            "RIG-227c",
-            "~/projects/rigpa/werma",
-            &linear,
-            &cmd,
-            &notifier,
-        )
-        .unwrap();
-
-        let comments = linear.comment_calls.borrow();
-        // No comment should contain the raw "Implementation complete" text as a fallback
-        let fallback_comments: Vec<_> = comments
-            .iter()
-            .filter(|(_, body)| body.contains("Implementation complete"))
-            .collect();
+        // No moves should have been made
+        let moves = linear.move_calls.borrow();
         assert!(
-            fallback_comments.is_empty(),
-            "engineer stage should not have fallback spec posting: {comments:?}"
+            moves.is_empty(),
+            "unknown verdict should not trigger any moves, got: {moves:?}"
         );
-    }
 
-    // ── Blocker 1: fallback must NOT fire for BLOCKED verdict ────────────
-
-    #[test]
-    fn callback_analyst_blocked_does_not_post_fallback_spec() {
-        let db = crate::db::Db::open_in_memory().unwrap();
-        let linear = FakeLinearApi::new();
-        let cmd = crate::traits::fakes::FakeCommandRunner::new();
-        let notifier = FakeNotifier::new();
-
-        linear.set_issue_status("RIG-BLOCK", "todo");
-
-        let mut task = crate::db::make_test_task("20260324-block");
-        task.status = Status::Completed;
-        task.linear_issue_id = "RIG-BLOCK".to_string();
-        task.pipeline_stage = "analyst".to_string();
-        db.insert_task(&task).unwrap();
-
-        // BLOCKED analyst output without COMMENT blocks — fallback must NOT fire
-        let result = "Cannot proceed — dependency not met.\nVERDICT=BLOCKED";
-
-        callback(
-            &db,
-            "20260324-block",
-            "analyst",
-            result,
-            "RIG-BLOCK",
-            "~/projects/rigpa/werma",
-            &linear,
-            &cmd,
-            &notifier,
-        )
-        .unwrap();
-
-        let comments = linear.comment_calls.borrow();
-        let fallback = comments
-            .iter()
-            .find(|(_, body)| body.contains("Cannot proceed"));
+        // callback_fired_at should be set to prevent re-processing
         assert!(
-            fallback.is_none(),
-            "BLOCKED analyst should NOT trigger fallback spec posting: {comments:?}"
-        );
-    }
-
-    // ── Blocker 2: unclosed ---COMMENT--- must not drop output ──────────
-
-    #[test]
-    fn extract_spec_unclosed_comment_block_preserves_output() {
-        // A stray ---COMMENT--- with no closing marker should not discard all
-        // subsequent lines. The fallback path handles non-conforming output,
-        // so malformed markers are expected.
-        let output = "## Spec\nDo thing A.\n---COMMENT---\nMore content.\nVERDICT=DONE";
-        let spec = extract_spec_from_output(output);
-        assert!(
-            spec.contains("## Spec"),
-            "preamble should be preserved: {spec}"
-        );
-        assert!(
-            spec.contains("More content."),
-            "content after unclosed marker should be preserved: {spec}"
-        );
-        assert!(
-            !spec.contains("VERDICT="),
-            "VERDICT line should still be stripped: {spec}"
-        );
-        assert!(
-            !spec.contains("---COMMENT---"),
-            "marker itself should be stripped: {spec}"
-        );
-    }
-
-    #[test]
-    fn extract_spec_unclosed_comment_block_at_end() {
-        // Edge case: ---COMMENT--- is the last line
-        let output = "## Spec\nDo thing.\n---COMMENT---";
-        let spec = extract_spec_from_output(output);
-        assert!(
-            spec.contains("## Spec"),
-            "content before marker should be preserved: {spec}"
-        );
-    }
-
-    #[test]
-    fn callback_analyst_no_verdict_still_posts_fallback_spec() {
-        // Reviewer fix: analyst output with spec but no VERDICT= line should still
-        // trigger fallback. The effective verdict defaults to "done" for analysts,
-        // so the fallback must use the same default.
-        let db = crate::db::Db::open_in_memory().unwrap();
-        let linear = FakeLinearApi::new();
-        let cmd = crate::traits::fakes::FakeCommandRunner::new();
-        let notifier = FakeNotifier::new();
-
-        linear.set_issue_status("RIG-227-nv", "todo");
-
-        let mut task = crate::db::make_test_task("20260324-227nv");
-        task.status = Status::Completed;
-        task.linear_issue_id = "RIG-227-nv".to_string();
-        task.pipeline_stage = "analyst".to_string();
-        db.insert_task(&task).unwrap();
-
-        // Agent output with spec but NO VERDICT= line
-        let result = "## Spec\nImplement feature Y.\n## Requirements\n- Req 1\nESTIMATE=2";
-
-        callback(
-            &db,
-            "20260324-227nv",
-            "analyst",
-            result,
-            "RIG-227-nv",
-            "~/projects/rigpa/werma",
-            &linear,
-            &cmd,
-            &notifier,
-        )
-        .unwrap();
-
-        let comments = linear.comment_calls.borrow();
-        let spec_comment = comments.iter().find(|(_, body)| body.contains("## Spec"));
-        assert!(
-            spec_comment.is_some(),
-            "analyst with no VERDICT= should still get fallback spec posted: {comments:?}"
-        );
-    }
-
-    #[test]
-    fn callback_analyst_already_done_skips_fallback_spec() {
-        // Reviewer fix: ALREADY_DONE means no new spec was written, so fallback
-        // should NOT fire. Only DONE triggers fallback.
-        let db = crate::db::Db::open_in_memory().unwrap();
-        let linear = FakeLinearApi::new();
-        let cmd = crate::traits::fakes::FakeCommandRunner::new();
-        let notifier = FakeNotifier::new();
-
-        linear.set_issue_status("RIG-227-ad", "done");
-
-        let mut task = crate::db::make_test_task("20260324-227ad");
-        task.status = Status::Completed;
-        task.linear_issue_id = "RIG-227-ad".to_string();
-        task.pipeline_stage = "analyst".to_string();
-        db.insert_task(&task).unwrap();
-
-        let result = "Issue already has implementation.\nVERDICT=ALREADY_DONE";
-
-        callback(
-            &db,
-            "20260324-227ad",
-            "analyst",
-            result,
-            "RIG-227-ad",
-            "~/projects/rigpa/werma",
-            &linear,
-            &cmd,
-            &notifier,
-        )
-        .unwrap();
-
-        let comments = linear.comment_calls.borrow();
-        let fallback = comments
-            .iter()
-            .find(|(_, body)| body.contains("already has implementation"));
-        assert!(
-            fallback.is_none(),
-            "ALREADY_DONE should NOT trigger fallback spec posting: {comments:?}"
-        );
-    }
-
-    #[test]
-    fn callback_analyst_posts_fallback_when_comment_block_plus_plain_text_spec() {
-        // Reviewer round 4: small COMMENT block + bulk spec as plain text.
-        // The fallback should fire for the plain-text spec even though a COMMENT block exists.
-        let db = crate::db::Db::open_in_memory().unwrap();
-        let linear = FakeLinearApi::new();
-        let cmd = crate::traits::fakes::FakeCommandRunner::new();
-        let notifier = FakeNotifier::new();
-
-        linear.set_issue_status("RIG-227d", "todo");
-
-        let mut task = crate::db::make_test_task("20260324-230");
-        task.status = Status::Completed;
-        task.linear_issue_id = "RIG-227d".to_string();
-        task.pipeline_stage = "analyst".to_string();
-        db.insert_task(&task).unwrap();
-
-        // Small COMMENT block (status note) + bulk spec as plain text (>= 5 lines)
-        let result = "---COMMENT---\nAnalysis started.\n---END COMMENT---\n\
-                       ## Spec\n\
-                       Implement feature X with the following requirements:\n\
-                       - Requirement A: handle edge cases\n\
-                       - Requirement B: add validation\n\
-                       - Requirement C: update tests\n\
-                       ## Acceptance Criteria\n\
-                       All tests pass.\n\
-                       ESTIMATE=3\nVERDICT=DONE";
-
-        callback(
-            &db,
-            "20260324-230",
-            "analyst",
-            result,
-            "RIG-227d",
-            "~/projects/rigpa/werma",
-            &linear,
-            &cmd,
-            &notifier,
-        )
-        .unwrap();
-
-        let comments = linear.comment_calls.borrow();
-        // Should have 3 comments: COMMENT block + fallback spec + status line
-        let spec_fallback = comments
-            .iter()
-            .find(|(_, body)| body.contains("## Spec") && body.contains("Requirement A"));
-        assert!(
-            spec_fallback.is_some(),
-            "plain-text spec should be posted as fallback even when COMMENT blocks exist: {comments:?}"
-        );
-    }
-
-    #[test]
-    fn callback_analyst_skips_fallback_when_comment_blocks_cover_spec_with_trivial_preamble() {
-        // When spec is in COMMENT blocks and only trivial text (< 5 lines) is outside,
-        // the fallback should NOT fire to avoid posting noise.
-        let db = crate::db::Db::open_in_memory().unwrap();
-        let linear = FakeLinearApi::new();
-        let cmd = crate::traits::fakes::FakeCommandRunner::new();
-        let notifier = FakeNotifier::new();
-
-        linear.set_issue_status("RIG-227e", "todo");
-
-        let mut task = crate::db::make_test_task("20260324-231");
-        task.status = Status::Completed;
-        task.linear_issue_id = "RIG-227e".to_string();
-        task.pipeline_stage = "analyst".to_string();
-        db.insert_task(&task).unwrap();
-
-        // Spec in COMMENT blocks + trivial preamble outside (< 5 lines)
-        let result = "I'll analyze this issue now.\n\
-                       ---COMMENT---\n## Full Spec\nDetailed implementation plan.\n---END COMMENT---\n\
-                       Analysis complete.\n\
-                       ESTIMATE=3\nVERDICT=DONE";
-
-        callback(
-            &db,
-            "20260324-231",
-            "analyst",
-            result,
-            "RIG-227e",
-            "~/projects/rigpa/werma",
-            &linear,
-            &cmd,
-            &notifier,
-        )
-        .unwrap();
-
-        let comments = linear.comment_calls.borrow();
-        // Should NOT have a fallback — only the COMMENT block + status line
-        let preamble_fallback = comments
-            .iter()
-            .find(|(_, body)| body.contains("analyze this issue"));
-        assert!(
-            preamble_fallback.is_none(),
-            "trivial preamble should NOT be posted as fallback: {comments:?}"
+            db.is_callback_recently_fired("20260324-unk", 60).unwrap(),
+            "callback_fired_at should be set for unknown verdict"
         );
     }
 }

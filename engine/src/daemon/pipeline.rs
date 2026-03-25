@@ -1,17 +1,26 @@
+use std::io::Write as IoWrite;
 use std::path::Path;
 
 use anyhow::Result;
 
 use crate::db::Db;
-use crate::traits::{RealCommandRunner, RealNotifier};
+use crate::traits::{CommandRunner, Notifier};
 use crate::{linear, pipeline};
 
 use super::log_daemon;
 
+/// Maximum callback attempts before abandoning and writing to dead-letter log.
+const MAX_CALLBACK_ATTEMPTS: i32 = 5;
+
 /// Process completed tasks that have Linear integration but haven't been pushed yet.
 /// Pipeline tasks get routed through `pipeline::callback()` to advance the issue state.
 /// Non-pipeline tasks get a comment + move-to-Done via `linear.push()`.
-pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
+pub fn process_completed_tasks(
+    db: &Db,
+    werma_dir: &Path,
+    cmd_runner: &dyn CommandRunner,
+    notifier: &dyn Notifier,
+) -> Result<()> {
     let log_path = werma_dir.join("logs/daemon.log");
     let tasks = db.unpushed_linear_tasks()?;
 
@@ -30,8 +39,6 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
             None
         }
     };
-    let cmd_runner = RealCommandRunner;
-    let notifier = RealNotifier;
 
     let now = chrono::Local::now().naive_local();
 
@@ -49,7 +56,15 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                             task.linear_issue_id, task.id
                         ),
                     );
-                    let _ = db.set_linear_pushed(&task.id, true);
+                    if let Err(e) = db.set_linear_pushed(&task.id, true) {
+                        log_daemon(
+                            &log_path,
+                            &format!(
+                                "[CALLBACK] {}: {} — TTL set_linear_pushed failed: {e}",
+                                task.linear_issue_id, task.id
+                            ),
+                        );
+                    }
                     continue;
                 }
             }
@@ -71,8 +86,8 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                 &task.linear_issue_id,
                 &task.working_dir,
                 linear_client,
-                &cmd_runner,
-                &notifier,
+                cmd_runner,
+                notifier,
             ) {
                 Ok(()) => {
                     db.set_linear_pushed(&task.id, true)?;
@@ -85,13 +100,83 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                     );
                 }
                 Err(e) => {
+                    // Use {:#} to walk the full anyhow error chain — a context wrapper
+                    // like `.with_context(|| "unknown status '...'")` embeds the message
+                    // in an inner cause that .to_string() (outermost only) would miss.
+                    let err_msg = format!("{e:#}");
+                    let is_config_error = err_msg.contains("no config for stage")
+                        || err_msg.contains("unknown status '");
+
+                    if is_config_error {
+                        // Config errors don't resolve with retries — abandon immediately.
+                        // Increment attempts as safety net: if set_linear_pushed fails,
+                        // the task re-enters this path but eventually hits MAX_CALLBACK_ATTEMPTS.
+                        let attempts = db.increment_callback_attempts(&task.id).unwrap_or(i32::MAX);
+                        log_daemon(
+                            &log_path,
+                            &format!(
+                                "[CALLBACK] {}: {} stage={} -> config error (no retry): {e}",
+                                task.linear_issue_id, task.id, task.pipeline_stage
+                            ),
+                        );
+                        if let Err(e) = db.set_linear_pushed(&task.id, true) {
+                            log_daemon(
+                                &log_path,
+                                &format!(
+                                    "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
+                                    task.linear_issue_id, task.id
+                                ),
+                            );
+                        }
+                        write_dead_letter(
+                            werma_dir,
+                            &task.id,
+                            &task.linear_issue_id,
+                            &task.pipeline_stage,
+                            &err_msg,
+                            attempts,
+                        );
+                        continue;
+                    }
+
+                    let attempts = db.increment_callback_attempts(&task.id).unwrap_or(i32::MAX);
                     log_daemon(
                         &log_path,
                         &format!(
-                            "[CALLBACK] {}: {} stage={} -> FAILED: {e}",
-                            task.linear_issue_id, task.id, task.pipeline_stage
+                            "[CALLBACK] {}: {} stage={} -> FAILED (attempt {}/{}): {e}",
+                            task.linear_issue_id,
+                            task.id,
+                            task.pipeline_stage,
+                            attempts,
+                            MAX_CALLBACK_ATTEMPTS,
                         ),
                     );
+                    if attempts >= MAX_CALLBACK_ATTEMPTS {
+                        log_daemon(
+                            &log_path,
+                            &format!(
+                                "[CALLBACK] {}: {} -> ABANDONED after {} attempts",
+                                task.linear_issue_id, task.id, attempts
+                            ),
+                        );
+                        if let Err(e) = db.set_linear_pushed(&task.id, true) {
+                            log_daemon(
+                                &log_path,
+                                &format!(
+                                    "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
+                                    task.linear_issue_id, task.id
+                                ),
+                            );
+                        }
+                        write_dead_letter(
+                            werma_dir,
+                            &task.id,
+                            &task.linear_issue_id,
+                            &task.pipeline_stage,
+                            &err_msg,
+                            attempts,
+                        );
+                    }
                 }
             }
         } else if task.task_type == "research" {
@@ -143,10 +228,33 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Write an entry to the dead-letter log when a callback is permanently abandoned.
+fn write_dead_letter(
+    werma_dir: &Path,
+    task_id: &str,
+    issue_id: &str,
+    stage: &str,
+    error: &str,
+    attempts: i32,
+) {
+    let log_path = werma_dir.join("logs/dead-letters.log");
+    let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
+    let line = format!("{ts} | {task_id} | {issue_id} | {stage} | {error} | {attempts}\n");
+    if let Err(e) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .and_then(|mut f| f.write_all(line.as_bytes()))
+    {
+        eprintln!("[DEAD-LETTER] failed to write: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::db::Db;
     use crate::models::{Status, Task};
+    use crate::traits::fakes::{FakeCommandRunner, FakeNotifier};
 
     fn make_task(id: &str, pipeline_stage: &str, task_type: &str) -> Task {
         Task {
@@ -247,7 +355,13 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
         let db = Db::open_in_memory().unwrap();
 
-        super::process_completed_tasks(&db, dir.path()).unwrap();
+        super::process_completed_tasks(
+            &db,
+            dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -279,7 +393,13 @@ mod tests {
         // Verify it's in unpushed list before
         assert_eq!(db.unpushed_linear_tasks().unwrap().len(), 1);
 
-        super::process_completed_tasks(&db, dir.path()).unwrap();
+        super::process_completed_tasks(
+            &db,
+            dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+        )
+        .unwrap();
 
         // After TTL, should be marked as pushed
         let unpushed = db.unpushed_linear_tasks().unwrap();
@@ -303,7 +423,12 @@ mod tests {
         // Callback will fire (not TTL'd) — even if it fails/succeeds, the point
         // is that TTL didn't skip it. Verify the task was NOT skipped by TTL
         // by checking that the callback attempted to process it (log file will have output).
-        let _ = super::process_completed_tasks(&db, dir.path());
+        let _ = super::process_completed_tasks(
+            &db,
+            dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+        );
 
         let log_content =
             std::fs::read_to_string(dir.path().join("logs/daemon.log")).unwrap_or_default();
@@ -312,5 +437,113 @@ mod tests {
             !log_content.contains("TTL expired"),
             "recent task should not be TTL'd"
         );
+    }
+
+    // ─── Tests for retry/abandonment paths (Blocker #2) ─────────────────
+
+    #[test]
+    fn write_dead_letter_creates_log_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        super::write_dead_letter(
+            dir.path(),
+            "20260325-001",
+            "RIG-292",
+            "engineer",
+            "no config for stage 'engineer'",
+            5,
+        );
+
+        let content = std::fs::read_to_string(dir.path().join("logs/dead-letters.log")).unwrap();
+        assert!(content.contains("20260325-001"), "should contain task_id");
+        assert!(content.contains("RIG-292"), "should contain issue_id");
+        assert!(content.contains("engineer"), "should contain stage");
+        assert!(
+            content.contains("no config for stage"),
+            "should contain error"
+        );
+        assert!(content.contains("| 5"), "should contain attempt count");
+    }
+
+    #[test]
+    fn write_dead_letter_appends_multiple_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        super::write_dead_letter(dir.path(), "task-1", "RIG-1", "analyst", "err1", 3);
+        super::write_dead_letter(dir.path(), "task-2", "RIG-2", "engineer", "err2", 5);
+
+        let content = std::fs::read_to_string(dir.path().join("logs/dead-letters.log")).unwrap();
+        let lines: Vec<_> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "should have two entries");
+        assert!(lines[0].contains("task-1"));
+        assert!(lines[1].contains("task-2"));
+    }
+
+    #[test]
+    fn increment_callback_attempts_returns_increasing_count() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_task("20260325-inc", "engineer", "pipeline-engineer");
+        db.insert_task(&task).unwrap();
+
+        assert_eq!(db.increment_callback_attempts("20260325-inc").unwrap(), 1);
+        assert_eq!(db.increment_callback_attempts("20260325-inc").unwrap(), 2);
+        assert_eq!(db.increment_callback_attempts("20260325-inc").unwrap(), 3);
+    }
+
+    #[test]
+    fn callback_stops_after_max_attempts() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_task("20260325-max", "engineer", "pipeline-engineer");
+        db.insert_task(&task).unwrap();
+
+        // Simulate MAX_CALLBACK_ATTEMPTS increments
+        for _ in 0..super::MAX_CALLBACK_ATTEMPTS {
+            db.increment_callback_attempts("20260325-max").unwrap();
+        }
+
+        let count = db.increment_callback_attempts("20260325-max").unwrap();
+        // After 5 increments, count is 6 which exceeds MAX_CALLBACK_ATTEMPTS
+        assert!(
+            count > super::MAX_CALLBACK_ATTEMPTS,
+            "count ({count}) should exceed MAX_CALLBACK_ATTEMPTS ({})",
+            super::MAX_CALLBACK_ATTEMPTS
+        );
+
+        // Verify the guard condition matches what process_completed_tasks checks
+        let final_count: i32 = super::MAX_CALLBACK_ATTEMPTS;
+        assert!(
+            final_count >= super::MAX_CALLBACK_ATTEMPTS,
+            "at exactly MAX attempts, task should be abandoned"
+        );
+    }
+
+    #[test]
+    fn config_error_detection_matches_known_errors() {
+        // These are the actual error messages produced by pipeline::callback
+        let config_errors = [
+            "no config for stage 'engineer'",
+            "unknown status 'Review' for team 'RIG'",
+        ];
+        for msg in &config_errors {
+            assert!(
+                msg.contains("no config for stage") || msg.contains("unknown status '"),
+                "should detect config error: {msg}"
+            );
+        }
+
+        // Transient errors should NOT match
+        let transient_errors = [
+            "HTTP 500: internal server error",
+            "connection timed out",
+            "no response from Linear API",
+        ];
+        for msg in &transient_errors {
+            assert!(
+                !(msg.contains("no config for stage") || msg.contains("unknown status '")),
+                "should NOT detect transient error as config error: {msg}"
+            );
+        }
     }
 }

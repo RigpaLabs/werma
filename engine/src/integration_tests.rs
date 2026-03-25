@@ -1445,13 +1445,14 @@ fn callback_review_cycle_limit_escalates() {
     )
     .unwrap();
 
-    // Issue should be moved to blocked (escalation), not in_progress
+    // Issue should be moved to backlog (from reviewer config's blocked transition),
+    // not in_progress — RIG-280: escalation uses config status, not hardcoded "blocked"
     let moves = linear.move_calls.borrow();
     assert!(
         moves
             .iter()
-            .any(|(id, status)| id == "RIG-227" && status == "blocked"),
-        "review cycle limit should escalate to blocked, got: {moves:?}"
+            .any(|(id, status)| id == "RIG-227" && status == "backlog"),
+        "review cycle limit should escalate to backlog (from config), got: {moves:?}"
     );
 
     // No new engineer task should be spawned
@@ -1512,12 +1513,13 @@ fn callback_review_escalation_retries_on_failure() {
     )
     .unwrap();
 
-    // Should still escalate to blocked despite initial move failure
+    // Should still escalate to backlog (from reviewer config's blocked transition)
+    // despite initial move failure — RIG-280: no longer hardcodes "blocked"
     let moves = linear.move_calls.borrow();
     assert!(
         moves
             .iter()
-            .any(|(id, status)| id == "RIG-228" && status == "blocked"),
-        "escalation should retry and succeed moving to blocked, got: {moves:?}"
+            .any(|(id, status)| id == "RIG-228" && status == "backlog"),
+        "escalation should retry and succeed moving to backlog (from config), got: {moves:?}"
     );
 }

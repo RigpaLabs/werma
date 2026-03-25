@@ -90,6 +90,10 @@ pub enum Commands {
         /// Refresh interval in seconds (default: 3, minimum: 1)
         #[arg(short, long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..))]
         interval: u64,
+
+        /// Show all completed/failed/canceled tasks (default: last 17, configurable via config.toml)
+        #[arg(short, long)]
+        all: bool,
     },
 
     /// Show task details + output
@@ -184,6 +188,12 @@ pub enum Commands {
         /// Force review even if one is already running for this target
         #[arg(short, long)]
         force: bool,
+    },
+
+    /// Configuration management
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
     },
 
     /// Dashboard (stub)
@@ -288,6 +298,12 @@ pub enum LinearAction {
     },
     /// Push all completed tasks to Linear
     PushAll,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigAction {
+    /// Show current configuration (repo mappings, limits)
+    Show,
 }
 
 #[derive(Subcommand, Debug)]
