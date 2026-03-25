@@ -49,8 +49,8 @@ fn derive_branch_type(task: &Task) -> &'static str {
 pub fn generate_branch_name(task: &Task) -> String {
     if !task.linear_issue_id.is_empty() {
         // Try prompt first, then linear_issue_id (which is the identifier like "RIG-42")
-        let rig_id = extract_rig_id(&task.prompt)
-            .or_else(|| extract_rig_id_prefix(&task.linear_issue_id))
+        let rig_id = extract_linear_id(&task.prompt)
+            .or_else(|| extract_linear_id_prefix(&task.linear_issue_id))
             .unwrap_or_default();
 
         // Pipeline tasks: deterministic branch name based on issue + stage.
@@ -331,45 +331,73 @@ pub fn cleanup_worktree(working_dir: &Path, branch_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Extract RIG-XX from the beginning of a string.
-/// Matches patterns like "RIG-42 ...", "  RIG-42 ...", "[RIG-42] ..."
-pub fn extract_rig_id_prefix(s: &str) -> Option<String> {
+/// Extract a Linear identifier (e.g. RIG-42, FAT-36, AR-10) from the beginning of a string.
+/// Matches patterns like "RIG-42 ...", "  FAT-36 ...", "[AR-10] ..."
+/// The prefix must be 1+ uppercase ASCII letters followed by a hyphen and 1+ digits.
+pub fn extract_linear_id_prefix(s: &str) -> Option<String> {
     let trimmed = s.trim_start();
     let trimmed = trimmed.strip_prefix('[').unwrap_or(trimmed);
-    if let Some(digits) = trimmed.strip_prefix("RIG-") {
-        // Collect digits after "RIG-"
-        let digit_end = digits
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(digits.len());
-        let id = &trimmed[..4 + digit_end]; // "RIG-" + digits
-        if id.len() > 4 {
-            return Some(id.to_string());
-        }
+
+    // Find the uppercase prefix (e.g. "RIG", "FAT", "AR")
+    let prefix_end = trimmed.find(|c: char| !c.is_ascii_uppercase()).unwrap_or(0);
+    if prefix_end == 0 {
+        return None;
     }
-    None
+
+    // Must be followed by a hyphen
+    let rest = &trimmed[prefix_end..];
+    let rest = rest.strip_prefix('-')?;
+
+    // Collect digits
+    let digit_end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if digit_end == 0 {
+        return None;
+    }
+
+    // prefix + "-" + digits
+    let id_len = prefix_end + 1 + digit_end;
+    Some(trimmed[..id_len].to_string())
 }
 
-/// Extract RIG-XX identifier from a prompt string.
-fn extract_rig_id(prompt: &str) -> Option<String> {
-    let re_pattern = "RIG-";
-    let start = prompt.find(re_pattern)?;
-    let rest = &prompt[start..];
+/// Extract a Linear identifier (e.g. RIG-42, FAT-36) from anywhere in a prompt string.
+/// Matches the first occurrence of `[A-Z]+-\d+`.
+fn extract_linear_id(prompt: &str) -> Option<String> {
+    // Scan for uppercase letters followed by '-' and digits
+    let bytes = prompt.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
 
-    // Collect RIG- followed by digits
-    let end = rest
-        .char_indices()
-        .skip(4) // skip "RIG-"
-        .find(|(_, c)| !c.is_ascii_digit())
-        .map(|(i, _)| i)
-        .unwrap_or(rest.len());
+    while i < len {
+        // Find start of uppercase sequence
+        if !bytes[i].is_ascii_uppercase() {
+            i += 1;
+            continue;
+        }
 
-    let id = &rest[..end];
-    if id.len() > 4 {
-        // Must have at least one digit after RIG-
-        Some(id.to_uppercase())
-    } else {
-        None
+        let prefix_start = i;
+        while i < len && bytes[i].is_ascii_uppercase() {
+            i += 1;
+        }
+        // Must be followed by '-'
+        if i >= len || bytes[i] != b'-' {
+            continue;
+        }
+        i += 1; // skip '-'
+
+        // Must have at least one digit
+        let digit_start = i;
+        while i < len && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+
+        if i > digit_start {
+            return Some(prompt[prefix_start..i].to_uppercase());
+        }
     }
+
+    None
 }
 
 /// Slugify a prompt into a short branch-name-safe string.
@@ -613,6 +641,18 @@ mod tests {
     }
 
     #[test]
+    fn branch_name_pipeline_engineer_fat_prefix() {
+        let mut task = test_task(
+            "pipeline-engineer",
+            "FAT-36",
+            "# Pipeline: Engineer Stage\nLinear issue: FAT-36\n\nAdd per-symbol metrics",
+        );
+        task.pipeline_stage = "engineer".to_string();
+        let name = generate_branch_name(&task);
+        assert_eq!(name, "feat/FAT-36-pipeline-engineer-stage");
+    }
+
+    #[test]
     fn branch_name_pipeline_engineer_respawn_same_branch() {
         let mut task1 = test_task(
             "pipeline-engineer",
@@ -632,49 +672,122 @@ mod tests {
         assert_eq!(generate_branch_name(&task1), generate_branch_name(&task2));
     }
 
-    // --- extract_rig_id_prefix ---
+    #[test]
+    fn branch_name_pipeline_fat_respawn_same_branch() {
+        let mut task1 = test_task(
+            "pipeline-engineer",
+            "FAT-36",
+            "# Pipeline: Engineer Stage\nLinear issue: FAT-36\n\nImplement feature",
+        );
+        task1.pipeline_stage = "engineer".to_string();
+
+        let mut task2 = test_task(
+            "pipeline-engineer",
+            "FAT-36",
+            "# Pipeline: Engineer Stage (Revision)\nLinear issue: FAT-36\n\n## Rejection",
+        );
+        task2.id = "20260310-002".to_string();
+        task2.pipeline_stage = "engineer".to_string();
+
+        assert_eq!(generate_branch_name(&task1), generate_branch_name(&task2));
+        assert_eq!(
+            generate_branch_name(&task1),
+            "feat/FAT-36-pipeline-engineer-stage"
+        );
+    }
+
+    // --- extract_linear_id_prefix ---
 
     #[test]
-    fn extract_rig_id_prefix_found() {
+    fn extract_linear_id_prefix_rig() {
         assert_eq!(
-            extract_rig_id_prefix("RIG-83 do stuff"),
+            extract_linear_id_prefix("RIG-83 do stuff"),
             Some("RIG-83".to_string())
         );
         assert_eq!(
-            extract_rig_id_prefix("  RIG-42 something"),
+            extract_linear_id_prefix("  RIG-42 something"),
             Some("RIG-42".to_string())
         );
         assert_eq!(
-            extract_rig_id_prefix("[RIG-100] title"),
+            extract_linear_id_prefix("[RIG-100] title"),
             Some("RIG-100".to_string())
         );
     }
 
     #[test]
-    fn extract_rig_id_prefix_not_at_start() {
+    fn extract_linear_id_prefix_fat() {
         assert_eq!(
-            extract_rig_id_prefix("fix the thing RIG-99 mentioned"),
+            extract_linear_id_prefix("FAT-36 order book fix"),
+            Some("FAT-36".to_string())
+        );
+        assert_eq!(
+            extract_linear_id_prefix("[FAT-42] fathom feature"),
+            Some("FAT-42".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_linear_id_prefix_other_teams() {
+        assert_eq!(
+            extract_linear_id_prefix("AR-10 personal task"),
+            Some("AR-10".to_string())
+        );
+        assert_eq!(
+            extract_linear_id_prefix("ABC-999 something"),
+            Some("ABC-999".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_linear_id_prefix_not_at_start() {
+        assert_eq!(
+            extract_linear_id_prefix("fix the thing RIG-99 mentioned"),
             None
         );
-        assert_eq!(extract_rig_id_prefix("no issue here"), None);
-        assert_eq!(extract_rig_id_prefix("RIG- no digits"), None);
+        assert_eq!(extract_linear_id_prefix("no issue here"), None);
+        assert_eq!(extract_linear_id_prefix("RIG- no digits"), None);
+        assert_eq!(extract_linear_id_prefix("FAT- no digits"), None);
     }
 
-    // --- extract_rig_id ---
+    // --- extract_linear_id ---
 
     #[test]
-    fn extract_rig_id_found() {
+    fn extract_linear_id_rig() {
         assert_eq!(
-            extract_rig_id("[RIG-42] Something"),
+            extract_linear_id("[RIG-42] Something"),
             Some("RIG-42".to_string())
         );
-        assert_eq!(extract_rig_id("RIG-123 stuff"), Some("RIG-123".to_string()));
+        assert_eq!(
+            extract_linear_id("RIG-123 stuff"),
+            Some("RIG-123".to_string())
+        );
     }
 
     #[test]
-    fn extract_rig_id_not_found() {
-        assert_eq!(extract_rig_id("no issue id here"), None);
-        assert_eq!(extract_rig_id("RIG- no digits"), None);
+    fn extract_linear_id_fat() {
+        assert_eq!(
+            extract_linear_id("# Pipeline: Engineer Stage\nLinear issue: FAT-36\n"),
+            Some("FAT-36".to_string())
+        );
+        assert_eq!(
+            extract_linear_id("[FAT-42] Add per-symbol metrics"),
+            Some("FAT-42".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_linear_id_other_teams() {
+        assert_eq!(
+            extract_linear_id("Issue AR-10 needs work"),
+            Some("AR-10".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_linear_id_not_found() {
+        assert_eq!(extract_linear_id("no issue id here"), None);
+        assert_eq!(extract_linear_id("RIG- no digits"), None);
+        assert_eq!(extract_linear_id("FAT- no digits"), None);
     }
 
     // --- slugify_prompt ---
