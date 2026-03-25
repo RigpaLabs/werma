@@ -135,7 +135,9 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
 
     prompt.push_str(&task.prompt);
 
-    // For write tasks, instruct agents to commit, push, and create PRs autonomously
+    // For write tasks, instruct agents to commit and push autonomously.
+    // RIG-281: agents must NOT call `gh pr create/merge/comment` — the engine handles all
+    // GitHub mutations via callbacks (auto_create_pr, post_pr_comment).
     if crate::worktree::needs_worktree(&task.task_type) {
         prompt.push_str(concat!(
             "\n\nIMPORTANT — autonomous mode instructions:",
@@ -145,9 +147,12 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
             "\n2. Run `cargo test` (or equivalent) to verify",
             "\n3. Stage and commit changes with a descriptive message (conventional commits format)",
             "\n4. Push the branch to remote: `git push -u origin HEAD`",
-            "\n5. Create a PR: `gh pr create --title \"RIG-XX type: description\" --body \"...\" --label ai-generated`",
             "\nDo NOT ask for permission to commit or push. Do NOT stop and wait for review.",
             "\nYou are in a worktree — commits here are safe and isolated from main.",
+            "\n",
+            "\nIMPORTANT: Do NOT call `gh pr create`, `gh pr merge`, `gh pr comment`, or any ",
+            "other `gh` write commands. The pipeline engine handles all GitHub mutations ",
+            "(PR creation, commenting, merging) automatically after your task completes.",
         ));
     }
 
@@ -1105,7 +1110,12 @@ mod tests {
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
         assert!(result.contains("autonomous mode instructions"));
         assert!(result.contains("git push"));
-        assert!(result.contains("gh pr create"));
+        // RIG-281: agents must NOT be told to call gh pr create — engine handles it
+        assert!(
+            !result.contains("gh pr create --title"),
+            "prompt must not instruct agent to call gh pr create"
+        );
+        assert!(result.contains("Do NOT call `gh pr create`"));
     }
 
     #[test]

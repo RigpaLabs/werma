@@ -296,6 +296,10 @@ fn main() -> anyhow::Result<()> {
             commands::review::cmd_review(&db, &wdir, target.as_deref(), dir.as_deref(), force)?;
         }
 
+        cli::Commands::Config { action } => match action {
+            cli::ConfigAction::Show => commands::config_cmd::cmd_config_show()?,
+        },
+
         cli::Commands::Dash => {
             let db = open_db()?;
             commands::misc::cmd_dash(&db)?;
