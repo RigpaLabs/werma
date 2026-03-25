@@ -97,7 +97,10 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                     );
                 }
                 Err(e) => {
-                    let err_msg = e.to_string();
+                    // Use {:#} to walk the full anyhow error chain — a context wrapper
+                    // like `.with_context(|| "unknown status '...'")` embeds the message
+                    // in an inner cause that .to_string() (outermost only) would miss.
+                    let err_msg = format!("{e:#}");
                     let is_config_error = err_msg.contains("no config for stage")
                         || err_msg.contains("unknown status '");
 
@@ -105,7 +108,7 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                         // Config errors don't resolve with retries — abandon immediately.
                         // Increment attempts as safety net: if set_linear_pushed fails,
                         // the task re-enters this path but eventually hits MAX_CALLBACK_ATTEMPTS.
-                        let attempts = db.increment_callback_attempts(&task.id).unwrap_or(1);
+                        let attempts = db.increment_callback_attempts(&task.id).unwrap_or(i32::MAX);
                         log_daemon(
                             &log_path,
                             &format!(
@@ -133,7 +136,7 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                         continue;
                     }
 
-                    let attempts = db.increment_callback_attempts(&task.id).unwrap_or(1);
+                    let attempts = db.increment_callback_attempts(&task.id).unwrap_or(i32::MAX);
                     log_daemon(
                         &log_path,
                         &format!(
