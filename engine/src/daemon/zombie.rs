@@ -53,19 +53,28 @@ pub fn check_zombie_tasks(
                 "{}: ZOMBIE (dead process in live session){diag}\n",
                 chrono::Local::now().format("%Y-%m-%dT%H:%M:%S")
             );
-            let _ = std::fs::OpenOptions::new()
+            if let Err(e) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&task_log)
                 .and_then(|mut f| {
                     use std::io::Write;
                     f.write_all(diag_entry.as_bytes())
-                });
+                })
+            {
+                eprintln!(
+                    "[ZOMBIE] failed to write diagnostic log for {}: {e}",
+                    task.id
+                );
+            }
 
             // Kill the orphaned tmux session
-            let _ = std::process::Command::new("tmux")
+            if let Err(e) = std::process::Command::new("tmux")
                 .args(["kill-session", "-t", &session_name])
-                .output();
+                .output()
+            {
+                eprintln!("[ZOMBIE] failed to kill tmux session {session_name}: {e}");
+            }
 
             mark_zombie(
                 db,
@@ -93,9 +102,13 @@ fn mark_zombie(
         &format!("ZOMBIE detected: {} — {reason}", task.id),
     );
 
-    let _ = db.set_task_status(&task.id, crate::models::Status::Failed);
+    if let Err(e) = db.set_task_status(&task.id, crate::models::Status::Failed) {
+        eprintln!("[ZOMBIE] failed to set status for {}: {e}", task.id);
+    }
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    let _ = db.update_task_field(&task.id, "finished_at", &now);
+    if let Err(e) = db.update_task_field(&task.id, "finished_at", &now) {
+        eprintln!("[ZOMBIE] failed to set finished_at for {}: {e}", task.id);
+    }
 
     let label =
         crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);

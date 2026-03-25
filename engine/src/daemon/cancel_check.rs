@@ -135,12 +135,19 @@ pub fn check_canceled_and_stuck(
 
                         // Kill the tmux session and mark as failed.
                         let session_name = format!("werma-{}", task.id);
-                        let _ = std::process::Command::new("tmux")
+                        if let Err(e) = std::process::Command::new("tmux")
                             .args(["kill-session", "-t", &session_name])
-                            .output();
-                        let _ = db.set_task_status(&task.id, Status::Failed);
+                            .output()
+                        {
+                            eprintln!("[CANCEL] failed to kill tmux session {session_name}: {e}");
+                        }
+                        if let Err(e) = db.set_task_status(&task.id, Status::Failed) {
+                            eprintln!("[CANCEL] failed to set status for {}: {e}", task.id);
+                        }
                         let now_str = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-                        let _ = db.update_task_field(&task.id, "finished_at", &now_str);
+                        if let Err(e) = db.update_task_field(&task.id, "finished_at", &now_str) {
+                            eprintln!("[CANCEL] failed to set finished_at for {}: {e}", task.id);
+                        }
                     }
                 }
             }
@@ -163,14 +170,21 @@ fn cancel_task(
     // Kill tmux session if the task is running.
     if task.status == Status::Running {
         let session_name = format!("werma-{}", task.id);
-        let _ = std::process::Command::new("tmux")
+        if let Err(e) = std::process::Command::new("tmux")
             .args(["kill-session", "-t", &session_name])
-            .output();
+            .output()
+        {
+            eprintln!("[CANCEL] failed to kill tmux session {session_name}: {e}");
+        }
     }
 
-    let _ = db.set_task_status(&task.id, Status::Canceled);
+    if let Err(e) = db.set_task_status(&task.id, Status::Canceled) {
+        eprintln!("[CANCEL] failed to set status for {}: {e}", task.id);
+    }
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    let _ = db.update_task_field(&task.id, "finished_at", &now);
+    if let Err(e) = db.update_task_field(&task.id, "finished_at", &now) {
+        eprintln!("[CANCEL] failed to set finished_at for {}: {e}", task.id);
+    }
 
     let label =
         crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);

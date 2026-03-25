@@ -211,6 +211,20 @@ impl super::Db {
         Ok(count > 0)
     }
 
+    /// Increment callback_attempts counter for a task. Returns the new count.
+    pub fn increment_callback_attempts(&self, id: &str) -> Result<i32> {
+        self.conn.execute(
+            "UPDATE tasks SET callback_attempts = COALESCE(callback_attempts, 0) + 1 WHERE id = ?1",
+            params![id],
+        )?;
+        let count: i32 = self.conn.query_row(
+            "SELECT COALESCE(callback_attempts, 0) FROM tasks WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     // --- PR Reviewed ---
 
     pub fn is_pr_reviewed(&self, pr_key: &str) -> Result<bool> {

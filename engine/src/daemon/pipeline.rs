@@ -1,3 +1,4 @@
+use std::io::Write as IoWrite;
 use std::path::Path;
 
 use anyhow::Result;
@@ -7,6 +8,9 @@ use crate::traits::{RealCommandRunner, RealNotifier};
 use crate::{linear, pipeline};
 
 use super::log_daemon;
+
+/// Maximum callback attempts before abandoning and writing to dead-letter log.
+const MAX_CALLBACK_ATTEMPTS: i32 = 5;
 
 /// Process completed tasks that have Linear integration but haven't been pushed yet.
 /// Pipeline tasks get routed through `pipeline::callback()` to advance the issue state.
@@ -85,13 +89,61 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                     );
                 }
                 Err(e) => {
+                    let err_msg = e.to_string();
+                    let is_unknown_status =
+                        err_msg.contains("unknown status") || err_msg.contains("no config");
+
+                    if is_unknown_status {
+                        // Config errors don't resolve with retries — abandon immediately.
+                        log_daemon(
+                            &log_path,
+                            &format!(
+                                "[CALLBACK] {}: {} stage={} -> config error (no retry): {e}",
+                                task.linear_issue_id, task.id, task.pipeline_stage
+                            ),
+                        );
+                        let _ = db.set_linear_pushed(&task.id, true);
+                        write_dead_letter(
+                            werma_dir,
+                            &task.id,
+                            &task.linear_issue_id,
+                            &task.pipeline_stage,
+                            &err_msg,
+                            0,
+                        );
+                        continue;
+                    }
+
+                    let attempts = db.increment_callback_attempts(&task.id).unwrap_or(1);
                     log_daemon(
                         &log_path,
                         &format!(
-                            "[CALLBACK] {}: {} stage={} -> FAILED: {e}",
-                            task.linear_issue_id, task.id, task.pipeline_stage
+                            "[CALLBACK] {}: {} stage={} -> FAILED (attempt {}/{}): {e}",
+                            task.linear_issue_id,
+                            task.id,
+                            task.pipeline_stage,
+                            attempts,
+                            MAX_CALLBACK_ATTEMPTS,
                         ),
                     );
+                    if attempts >= MAX_CALLBACK_ATTEMPTS {
+                        log_daemon(
+                            &log_path,
+                            &format!(
+                                "[CALLBACK] {}: {} -> ABANDONED after {} attempts",
+                                task.linear_issue_id, task.id, attempts
+                            ),
+                        );
+                        let _ = db.set_linear_pushed(&task.id, true);
+                        write_dead_letter(
+                            werma_dir,
+                            &task.id,
+                            &task.linear_issue_id,
+                            &task.pipeline_stage,
+                            &err_msg,
+                            attempts,
+                        );
+                    }
                 }
             }
         } else if task.task_type == "research" {
@@ -141,6 +193,28 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Write an entry to the dead-letter log when a callback is permanently abandoned.
+fn write_dead_letter(
+    werma_dir: &Path,
+    task_id: &str,
+    issue_id: &str,
+    stage: &str,
+    error: &str,
+    attempts: i32,
+) {
+    let log_path = werma_dir.join("logs/dead-letters.log");
+    let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S");
+    let line = format!("{ts} | {task_id} | {issue_id} | {stage} | {error} | {attempts}\n");
+    if let Err(e) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .and_then(|mut f| f.write_all(line.as_bytes()))
+    {
+        eprintln!("[DEAD-LETTER] failed to write: {e}");
+    }
 }
 
 #[cfg(test)]
