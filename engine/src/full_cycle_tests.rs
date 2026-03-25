@@ -213,66 +213,166 @@ mod tests {
 
     // ─── RIG-230: Callback failure → retry → success ────────────────────────────
 
-    /// Test that move_with_retry handles N failures then succeeds on attempt N+1.
+    /// Test the full daemon-level retry cycle for engineer callback:
+    ///
+    /// 1. Engineer task completes with DONE + PR_URL
+    /// 2. First callback fires → all move_with_retry attempts fail (3 retries exhausted)
+    /// 3. callback_fired_at NOT set (verified) — allows daemon retry on next tick
+    /// 4. Second callback call → move succeeds, issue transitions to "review"
+    /// 5. callback_fired_at IS set after success
+    /// 6. poll() does NOT create a duplicate engineer task (dedup guard holds)
     #[test]
     fn rig230_callback_failure_retry_success() {
+        ensure_working_dir();
         let db = Db::open_in_memory().unwrap();
         let linear = StatefulFakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
 
+        // Seed issue in "in_progress" (engineer polls this status)
         linear.add_issue(
             "uuid-rig230",
             "RIG-230",
             "Retry test",
-            "desc",
+            "Test callback retry cycle",
             "in_progress",
-            vec![],
+            vec!["repo:werma".to_string()],
         );
 
-        // Set up: first 2 moves will fail, 3rd will succeed (within CALLBACK_MAX_RETRIES=3)
-        linear.fail_next_n_moves(2);
+        // Step 1: Poll creates engineer task for in_progress issue
+        poll(&db, &linear, &cmd).unwrap();
 
-        let mut task = make_test_task("20260314-230");
-        task.status = Status::Completed;
-        task.linear_issue_id = "RIG-230".to_string();
-        task.pipeline_stage = "analyst".to_string();
-        db.insert_task(&task).unwrap();
+        let engineer_tasks = db
+            .tasks_by_linear_issue("RIG-230", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(engineer_tasks.len(), 1, "poll should create engineer task");
+        let task_id = &engineer_tasks[0].id;
 
-        // Analyst DONE: should move to "todo"
-        let analyst_output = "Analysis done.\nVERDICT=DONE";
+        // Mark task as completed (simulates agent finishing)
+        db.set_task_status(task_id, Status::Completed).unwrap();
 
-        callback(
+        let engineer_output = "## Implementation\nDone.\n\nPR_URL=https://github.com/RigpaLabs/werma/pull/230\nVERDICT=DONE";
+
+        // Step 2: First callback — all 3 retries fail (CALLBACK_MAX_RETRIES=3)
+        linear.fail_next_n_moves(3);
+
+        let err = callback(
             &db,
-            "20260314-230",
-            "analyst",
-            analyst_output,
+            task_id,
+            "engineer",
+            engineer_output,
             "RIG-230",
             "~/projects/rigpa/werma",
             &linear,
             &cmd,
             &notifier,
-        )
-        .unwrap();
-
-        // After 2 failures and 1 success, issue should be in "todo"
-        assert_eq!(
-            linear.issue_status("RIG-230"),
-            Some("todo".to_string()),
-            "after retries, issue should move to todo"
+        );
+        assert!(
+            err.is_err(),
+            "first callback should fail when all retries exhausted"
         );
 
-        // Move calls: 2 failed (not recorded) + 1 successful = 1 move call
-        let move_call_count = linear
+        // Step 3: callback_fired_at must NOT be set — allows daemon retry
+        assert!(
+            !db.is_callback_recently_fired(task_id, 60).unwrap(),
+            "callback_fired_at should not be set after failure"
+        );
+
+        // Issue should still be in "in_progress" (move failed)
+        assert_eq!(
+            linear.issue_status("RIG-230"),
+            Some("in_progress".to_string()),
+            "issue should stay in_progress after failed callback"
+        );
+
+        // Failure notifications should have been sent
+        assert!(
+            !notifier.macos_calls.borrow().is_empty(),
+            "macOS notification should fire on retry exhaustion"
+        );
+        assert!(
+            !notifier.slack_calls.borrow().is_empty(),
+            "Slack notification should fire on retry exhaustion"
+        );
+
+        // Step 4: Second callback (daemon next tick) — moves succeed now
+        // (fail_next_n_moves counter exhausted, moves work)
+        let ok = callback(
+            &db,
+            task_id,
+            "engineer",
+            engineer_output,
+            "RIG-230",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        );
+        assert!(ok.is_ok(), "second callback should succeed: {ok:?}");
+
+        // Step 5: Issue should now be in "review" (engineer DONE transition)
+        assert_eq!(
+            linear.issue_status("RIG-230"),
+            Some("review".to_string()),
+            "engineer DONE should move issue to review after successful retry"
+        );
+
+        // callback_fired_at should be set after success
+        assert!(
+            db.is_callback_recently_fired(task_id, 60).unwrap(),
+            "callback_fired_at should be set after successful retry"
+        );
+
+        // PR URL should be attached to Linear
+        let attach_calls: Vec<_> = linear
             .calls
             .borrow()
             .iter()
-            .filter(|c| matches!(c, crate::traits::fakes::ApiCall::Move { .. }))
-            .count();
-        // StatefulFakeLinearApi records the successful move
+            .filter_map(|c| {
+                if let crate::traits::fakes::ApiCall::AttachUrl { url, .. } = c {
+                    Some(url.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            attach_calls.iter().any(|u| u.contains("/pull/230")),
+            "PR URL should be attached on success, got: {attach_calls:?}"
+        );
+
+        // Reviewer task should be spawned (engineer DONE transition spawns reviewer)
+        let reviewer_tasks = db
+            .tasks_by_linear_issue("RIG-230", Some("reviewer"), false)
+            .unwrap();
         assert_eq!(
-            move_call_count, 1,
-            "exactly 1 successful move should be recorded"
+            reviewer_tasks.len(),
+            1,
+            "reviewer should be spawned after successful engineer callback"
+        );
+
+        // Step 6: poll() should NOT create duplicate engineer task
+        // Issue is now in "review" (not "in_progress"), so engineer stage won't trigger.
+        // Additionally, there's already a completed engineer task (dedup guard).
+        poll(&db, &linear, &cmd).unwrap();
+
+        let engineer_tasks_after = db
+            .tasks_by_linear_issue("RIG-230", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(
+            engineer_tasks_after.len(),
+            1,
+            "poll should not create duplicate engineer task after successful callback"
+        );
+
+        // Reviewer should also not be duplicated by poll (already has active reviewer)
+        let reviewer_tasks_after = db
+            .tasks_by_linear_issue("RIG-230", Some("reviewer"), false)
+            .unwrap();
+        assert_eq!(
+            reviewer_tasks_after.len(),
+            1,
+            "poll should not create duplicate reviewer task"
         );
     }
 
