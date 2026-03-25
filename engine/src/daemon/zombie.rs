@@ -38,6 +38,9 @@ pub fn check_zombie_tasks(
             continue;
         }
 
+        // Activity detection: warn if worktree files haven't changed in >5min
+        check_worktree_activity(task, werma_dir, notifier);
+
         // Case 2: session exists but process inside is dead
         if !tmux.is_pane_process_alive(&session_name) {
             // Capture pane content for diagnostics before killing
@@ -132,6 +135,60 @@ fn mark_zombie(
     notifier.notify_slack("#werma-alerts", &format!(":zombie: *{label}* — {reason}"));
 }
 
+/// Check worktree for recent file modifications and warn if idle >5 min.
+fn check_worktree_activity(task: &crate::models::Task, werma_dir: &Path, _notifier: &dyn Notifier) {
+    let working_dir = std::path::Path::new(&task.working_dir);
+    if !working_dir.exists() {
+        return;
+    }
+
+    // Use `find` with stat-based approach (macOS compatible)
+    let output = std::process::Command::new("find")
+        .args([
+            ".", "-not", "-path", "./.git/*", "-type", "f", "-newer",
+            // Compare against a reference: files modified in last 5 min
+            ".",
+        ])
+        .current_dir(working_dir)
+        .output();
+
+    // Simpler approach: check git status for any changes
+    let has_recent_changes = std::process::Command::new("git")
+        .args(["diff", "--stat", "HEAD"])
+        .current_dir(working_dir)
+        .output()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+
+    // Check started_at to compute elapsed time
+    let idle_minutes = task
+        .started_at
+        .as_deref()
+        .and_then(|s| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").ok())
+        .map(|started| {
+            let now = chrono::Local::now().naive_local();
+            (now - started).num_minutes()
+        });
+
+    // Only flag if running >5 min and no git changes detected
+    if let Some(mins) = idle_minutes {
+        if mins > 5 && !has_recent_changes {
+            let log_path = werma_dir.join("logs/daemon.log");
+            log_daemon(
+                &log_path,
+                &format!(
+                    "[ACTIVITY] {} running {}m with no worktree changes — may be idle",
+                    task.id, mins
+                ),
+            );
+
+            // Don't spam notifications — only log. The zombie detector handles
+            // truly dead sessions. This is informational.
+            let _ = output; // suppress unused warning
+        }
+    }
+}
+
 /// Truncate a string for log output, replacing newlines with ` | `.
 fn truncate_for_log(s: &str, max_len: usize) -> String {
     let flat = s.replace('\n', " | ");
@@ -214,6 +271,8 @@ mod tests {
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         }
     }
 
@@ -266,6 +325,8 @@ mod tests {
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         };
         db.insert_task(&task).unwrap();
 

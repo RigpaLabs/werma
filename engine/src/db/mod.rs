@@ -22,6 +22,7 @@ const MIGRATION_006_SQL: &str = include_str!("../../migrations/006_add_canceled_
 const MIGRATION_007_SQL: &str =
     include_str!("../../migrations/007_callback_attempts_and_indexes.sql");
 const MIGRATION_008_SQL: &str = include_str!("../../migrations/008_retry.sql");
+const MIGRATION_009_SQL: &str = include_str!("../../migrations/009_cost_tracking.sql");
 
 pub struct Db {
     pub(super) conn: Connection,
@@ -117,11 +118,18 @@ impl Db {
                 return Err(e).context("migration 008_retry");
             }
         }
+        // 009: add cost_usd and turns_used columns for monitoring (RIG-291).
+        if let Err(e) = self.conn.execute_batch(MIGRATION_009_SQL) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(e).context("migration 009_cost_tracking");
+            }
+        }
         Ok(())
     }
 }
 
-/// Parse a task row from a SELECT query with the standard 21-column layout.
+/// Parse a task row from a SELECT query with the standard column layout.
 pub(super) fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
     let status_str: String = row.get(1)?;
     let status: Status = status_str.parse()?;
@@ -155,6 +163,8 @@ pub(super) fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         estimate: row.get(20).unwrap_or(0),
         retry_count: row.get(21).unwrap_or(0),
         retry_after: row.get(22).ok(),
+        cost_usd: row.get(23).ok().flatten(),
+        turns_used: row.get(24).unwrap_or(0),
     })
 }
 
@@ -185,6 +195,8 @@ pub(crate) fn make_test_task(id: &str) -> Task {
         estimate: 0,
         retry_count: 0,
         retry_after: None,
+        cost_usd: None,
+        turns_used: 0,
     }
 }
 

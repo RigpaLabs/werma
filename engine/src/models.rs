@@ -79,6 +79,12 @@ pub struct Task {
     /// ISO timestamp: task won't be re-launched until this time passes.
     #[serde(default)]
     pub retry_after: Option<String>,
+    /// Total cost in USD for this task (parsed from Claude output JSON).
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// Number of turns actually used by the agent.
+    #[serde(default)]
+    pub turns_used: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +172,8 @@ mod tests {
         assert!(task.context_files.is_empty());
         assert_eq!(task.estimate, 0);
         assert!(!task.linear_pushed);
+        assert!(task.cost_usd.is_none());
+        assert_eq!(task.turns_used, 0);
     }
 
     #[test]

@@ -107,6 +107,8 @@ impl TaskRepository for FakeTaskRepo {
                 "allowed_tools" => task.allowed_tools = value.to_string(),
                 "model" => task.model = value.to_string(),
                 "repo_hash" => task.repo_hash = value.to_string(),
+                "cost_usd" => task.cost_usd = value.parse().ok(),
+                "turns_used" => task.turns_used = value.parse().unwrap_or(0),
                 _ => {}
             }
         }

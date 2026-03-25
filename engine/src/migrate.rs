@@ -171,6 +171,8 @@ fn parse_task(v: &serde_json::Value) -> Task {
         estimate: v["estimate"].as_i64().unwrap_or(0) as i32,
         retry_count: 0,
         retry_after: None,
+        cost_usd: None,
+        turns_used: 0,
     }
 }
 

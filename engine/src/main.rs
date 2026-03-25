@@ -174,9 +174,23 @@ fn main() -> anyhow::Result<()> {
             id,
             session,
             result_file,
+            cost,
+            turns,
         } => {
             let db = open_db()?;
-            commands::task::cmd_complete(&db, &id, session.as_deref(), result_file.as_deref())?;
+            commands::task::cmd_complete(
+                &db,
+                &id,
+                session.as_deref(),
+                result_file.as_deref(),
+                cost,
+                turns,
+            )?;
+        }
+
+        cli::Commands::Peek { id } => {
+            let db = open_db()?;
+            commands::task::cmd_peek(&db, &id)?;
         }
 
         cli::Commands::Fail { id } => {
@@ -590,15 +604,23 @@ mod tests {
                 "sess-abc",
                 "--result-file",
                 "/tmp/r.md",
+                "--cost",
+                "1.23",
+                "--turns",
+                "42",
             ]) {
                 Commands::Complete {
                     id,
                     session,
                     result_file,
+                    cost,
+                    turns,
                 } => {
                     assert_eq!(id, "task-1");
                     assert_eq!(session, Some("sess-abc".into()));
                     assert_eq!(result_file, Some("/tmp/r.md".into()));
+                    assert!((cost.unwrap() - 1.23).abs() < f64::EPSILON);
+                    assert_eq!(turns, Some(42));
                 }
                 other => panic!("expected Complete, got {other:?}"),
             }

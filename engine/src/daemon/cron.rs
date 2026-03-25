@@ -114,6 +114,8 @@ pub fn check_schedules(
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         };
 
         task_repo.insert_task(&task)?;

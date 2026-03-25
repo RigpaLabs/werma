@@ -100,13 +100,13 @@ impl super::Db {
                 type, prompt, output_path, working_dir, model, max_turns,
                 allowed_tools, session_id, linear_issue_id, linear_pushed,
                 pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                retry_count, retry_after
+                retry_count, retry_after, cost_usd, turns_used
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
                 ?7, ?8, ?9, ?10, ?11, ?12,
                 ?13, ?14, ?15, ?16,
                 ?17, ?18, ?19, ?20, ?21,
-                ?22, ?23
+                ?22, ?23, ?24, ?25
             )",
             params![
                 task.id,
@@ -132,6 +132,8 @@ impl super::Db {
                 task.estimate,
                 task.retry_count,
                 task.retry_after,
+                task.cost_usd,
+                task.turns_used,
             ],
         )?;
         Ok(())
@@ -144,7 +146,7 @@ impl super::Db {
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                    retry_count, retry_after
+                    retry_count, retry_after, cost_usd, turns_used
              FROM tasks WHERE id = ?1",
             params![id],
             |row| Ok(task_from_row(row)),
@@ -167,7 +169,7 @@ impl super::Db {
                         type, prompt, output_path, working_dir, model, max_turns,
                         allowed_tools, session_id, linear_issue_id, linear_pushed,
                         pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                    retry_count, retry_after
+                    retry_count, retry_after, cost_usd, turns_used
                  FROM tasks WHERE status = ?1
                  ORDER BY priority ASC, created_at ASC",
             )?;
@@ -181,7 +183,7 @@ impl super::Db {
                         type, prompt, output_path, working_dir, model, max_turns,
                         allowed_tools, session_id, linear_issue_id, linear_pushed,
                         pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                    retry_count, retry_after
+                    retry_count, retry_after, cost_usd, turns_used
                  FROM tasks ORDER BY priority ASC, created_at ASC",
             )?;
             let rows = stmt.query_map([], |row| Ok(task_from_row(row)))?;
@@ -200,7 +202,8 @@ impl super::Db {
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate,
+                    retry_count, retry_after, cost_usd, turns_used
              FROM tasks WHERE status = ?1
              ORDER BY finished_at DESC, created_at DESC
              LIMIT ?2",
@@ -223,7 +226,8 @@ impl super::Db {
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate,
+                    retry_count, retry_after, cost_usd, turns_used
              FROM tasks WHERE status = ?1
              ORDER BY finished_at DESC, created_at DESC",
         )?;
@@ -244,7 +248,8 @@ impl super::Db {
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate,
+                    retry_count, retry_after, cost_usd, turns_used
              FROM tasks WHERE status IN ('completed', 'failed', 'canceled')
              ORDER BY finished_at DESC, created_at DESC
              LIMIT ?1",
@@ -312,6 +317,8 @@ impl super::Db {
             "estimate",
             "retry_count",
             "retry_after",
+            "cost_usd",
+            "turns_used",
         ];
         anyhow::ensure!(
             allowed.contains(&field),
@@ -332,7 +339,7 @@ impl super::Db {
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                    retry_count, retry_after
+                    retry_count, retry_after, cost_usd, turns_used
              FROM tasks
              WHERE status = 'pending'
                AND (retry_after IS NULL OR retry_after <= ?1)
@@ -424,7 +431,7 @@ impl super::Db {
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                    retry_count, retry_after
+                    retry_count, retry_after, cost_usd, turns_used
              FROM tasks
              WHERE status = 'pending'
                AND (retry_after IS NULL OR retry_after <= ?1)

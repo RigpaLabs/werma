@@ -209,14 +209,16 @@ pub fn write_task_line(buf: &mut String, task: &Task, time_str: &str, max_prompt
     } else {
         format!("  [{}]", cyan(&task.linear_issue_id))
     };
+    let cost_turns = crate::commands::display::format_cost_turns(task);
     let preview = truncate_line(&task.prompt, max_prompt);
     let _ = writeln!(
         buf,
-        "   {}  {}{}  {}  {}",
+        "   {}  {}{}  {}{}  {}",
         task.id,
         blue(&task.task_type),
         linear,
         dimmed(time_str),
+        dimmed(&cost_turns),
         preview,
     );
 }
@@ -433,14 +435,16 @@ pub fn render_compact_buf(
             _ => String::new(),
         };
         let linear = compact_linear_label_dimmed(&task.linear_issue_id);
+        let cost_turns = crate::commands::display::format_cost_turns(task);
         let _ = writeln!(
             buf,
-            " {} {} {}{} {}",
+            " {} {} {}{} {}{}",
             dimmed("✓"),
             compact_task_id(&task.id),
             compact_task_type(&task.task_type),
             linear,
             dimmed(&dur),
+            dimmed(&cost_turns),
         );
     }
 
@@ -450,14 +454,16 @@ pub fn render_compact_buf(
             _ => String::new(),
         };
         let linear = compact_linear_label_dimmed(&task.linear_issue_id);
+        let cost_turns = crate::commands::display::format_cost_turns(task);
         let _ = writeln!(
             buf,
-            " {} {} {}{} {}",
+            " {} {} {}{} {}{}",
             red("✗"),
             compact_task_id(&task.id),
             compact_task_type(&task.task_type),
             linear,
             dimmed(&dur),
+            dimmed(&cost_turns),
         );
     }
 
@@ -467,14 +473,16 @@ pub fn render_compact_buf(
             _ => String::new(),
         };
         let linear = compact_linear_label_dimmed(&task.linear_issue_id);
+        let cost_turns = crate::commands::display::format_cost_turns(task);
         let _ = writeln!(
             buf,
-            " {} {} {}{} {}",
+            " {} {} {}{} {}{}",
             dimmed("⊘"),
             compact_task_id(&task.id),
             compact_task_type(&task.task_type),
             linear,
             dimmed(&dur),
+            dimmed(&cost_turns),
         );
     }
 
@@ -582,6 +590,8 @@ mod tests {
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         }];
 
         let table = task_list_table(&tasks, 100);

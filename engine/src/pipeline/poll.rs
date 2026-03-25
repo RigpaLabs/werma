@@ -106,6 +106,8 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         };
 
         db.insert_task(&task)?;
@@ -285,6 +287,8 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     estimate: issue_estimate,
                     retry_count: 0,
                     retry_after: None,
+                    cost_usd: None,
+                    turns_used: 0,
                 };
 
                 db.insert_task(&task)?;
@@ -481,6 +485,8 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 estimate: issue_estimate,
                 retry_count: 0,
                 retry_after: None,
+                cost_usd: None,
+                turns_used: 0,
             };
 
             db.insert_task(&task)?;

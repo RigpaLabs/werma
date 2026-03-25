@@ -135,10 +135,24 @@ pub enum Commands {
         /// Path to file containing result text
         #[arg(long)]
         result_file: Option<String>,
+
+        /// Total cost in USD (parsed from Claude output JSON)
+        #[arg(long)]
+        cost: Option<f64>,
+
+        /// Number of turns used by the agent
+        #[arg(long)]
+        turns: Option<i32>,
     },
 
     /// Mark task as failed (called by exec script)
     Fail {
+        /// Task ID
+        id: String,
+    },
+
+    /// Show live agent activity for a running task
+    Peek {
         /// Task ID
         id: String,
     },
