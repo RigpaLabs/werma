@@ -211,6 +211,17 @@ impl super::Db {
         Ok(count > 0)
     }
 
+    /// Increment callback_attempts counter for a task. Returns the new count.
+    /// Uses UPDATE ... RETURNING for atomicity (SQLite 3.35+).
+    pub fn increment_callback_attempts(&self, id: &str) -> Result<i32> {
+        let count: i32 = self.conn.query_row(
+            "UPDATE tasks SET callback_attempts = COALESCE(callback_attempts, 0) + 1 WHERE id = ?1 RETURNING callback_attempts",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     // --- PR Reviewed ---
 
     pub fn is_pr_reviewed(&self, pr_key: &str) -> Result<bool> {

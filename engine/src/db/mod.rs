@@ -20,6 +20,8 @@ const MIGRATION_003_SQL: &str = include_str!("../../migrations/003_estimate.sql"
 const MIGRATION_004_SQL: &str = include_str!("../../migrations/004_normalize_linear_ids.sql");
 const MIGRATION_005_SQL: &str = include_str!("../../migrations/005_callback_fired_at.sql");
 const MIGRATION_006_SQL: &str = include_str!("../../migrations/006_add_canceled_status.sql");
+const MIGRATION_007_SQL: &str =
+    include_str!("../../migrations/007_callback_attempts_and_indexes.sql");
 
 pub struct Db {
     pub(super) conn: Connection,
@@ -98,6 +100,15 @@ impl Db {
             self.conn
                 .execute_batch(MIGRATION_006_SQL)
                 .context("migration 006_add_canceled_status")?;
+        }
+        // 007: add callback_attempts column + performance indexes.
+        // ALTER TABLE is idempotent — ignore "duplicate column" error.
+        // CREATE INDEX uses IF NOT EXISTS, so re-running is always safe.
+        if let Err(e) = self.conn.execute_batch(MIGRATION_007_SQL) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(e).context("migration 007_callback_attempts_and_indexes");
+            }
         }
         Ok(())
     }

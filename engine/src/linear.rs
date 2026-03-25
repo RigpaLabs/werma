@@ -177,10 +177,12 @@ impl LinearClient {
             .or_else(|_| read_env_file_key("LINEAR_API_KEY"))
             .context("LINEAR_API_KEY not set\n  Fix: export LINEAR_API_KEY=lin_api_...\n  Or add to ~/.werma/.env:\n    LINEAR_API_KEY=lin_api_...")?;
 
-        Ok(Self {
-            client: Client::new(),
-            api_key,
-        })
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .context("building HTTP client")?;
+
+        Ok(Self { client, api_key })
     }
 
     /// Execute a GraphQL query against the Linear API.
