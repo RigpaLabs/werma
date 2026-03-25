@@ -1110,6 +1110,8 @@ fn callback_analyst_blocked_adds_blocked_label() {
 }
 
 // ─── Test 21: callback_missing_verdict_warns ─────────────────────────────────
+// RIG-308: Updated — reviewer without verdict now treated as implicit APPROVED
+// to prevent infinite review loops.
 
 #[test]
 fn callback_missing_verdict_warns() {
@@ -1117,13 +1119,15 @@ fn callback_missing_verdict_warns() {
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
 
+    linear.set_issue_status("RIG-221", "review");
+
     let mut task = make_test_task("20260313-221");
     task.status = Status::Completed;
     task.linear_issue_id = "RIG-221".to_string();
     task.pipeline_stage = "reviewer".to_string();
     db.insert_task(&task).unwrap();
 
-    // Reviewer output without VERDICT= — should post warning comment
+    // Reviewer output without VERDICT= — RIG-308: now treated as implicit APPROVED
     let result = "Code looks fine. No major issues found.";
 
     callback(
@@ -1139,19 +1143,22 @@ fn callback_missing_verdict_warns() {
     )
     .unwrap();
 
-    // No moves — missing verdict keeps current state
+    // RIG-308: Should move to "ready" (implicit APPROVED)
+    let moves = linear.move_calls.borrow();
     assert!(
-        linear.move_calls.borrow().is_empty(),
-        "missing verdict should not trigger moves"
+        moves
+            .iter()
+            .any(|(id, status)| id == "RIG-221" && status == "ready"),
+        "reviewer without verdict should move to ready (implicit APPROVED), got: {moves:?}"
     );
 
-    // Warning comment should be posted
+    // Implicit APPROVED comment should be posted
     let comments = linear.comment_calls.borrow();
     assert!(
         comments
             .iter()
-            .any(|(id, body)| id == "RIG-221" && body.contains("no verdict")),
-        "missing verdict should post warning comment, got: {comments:?}"
+            .any(|(id, body)| id == "RIG-221" && body.contains("implicit APPROVED")),
+        "should post implicit APPROVED comment, got: {comments:?}"
     );
 }
 

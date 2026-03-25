@@ -21,7 +21,7 @@ const CALLBACK_MAX_RETRIES: u32 = 3;
 const CALLBACK_BACKOFF_MS: [u64; 3] = [50, 100, 200];
 
 /// Default maximum review cycles when not configured in YAML.
-const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 3;
+pub(crate) const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 3;
 
 /// Move a Linear issue to a new status with retry + backoff + reconciliation.
 ///
@@ -101,6 +101,68 @@ pub(crate) fn move_with_retry(
     Err(err)
 }
 
+/// RIG-308: Handle reviewer with empty/no-verdict result as implicit APPROVED.
+///
+/// When a reviewer agent completes successfully but produces no `result` text (or no
+/// verdict in the text), it means the agent did its work via tool calls (PR comments,
+/// file reads) and the final assistant message was empty. Rather than leaving the issue
+/// stuck in Review (causing infinite reviewer spawns), treat this as implicit APPROVED.
+#[allow(clippy::too_many_arguments)]
+fn handle_reviewer_implicit_approved(
+    db: &Db,
+    task_id: &str,
+    linear_issue_id: &str,
+    _working_dir: &str,
+    linear: &dyn LinearApi,
+    _cmd: &dyn CommandRunner,
+    notifier: &dyn Notifier,
+) -> Result<()> {
+    let config = load_default()?;
+    let stage_cfg = config
+        .stage("reviewer")
+        .ok_or_else(|| anyhow!("no config for stage 'reviewer'"))?;
+
+    let transition = stage_cfg.transition_for("approved");
+
+    if let Some(t) = transition {
+        if let Err(e) = move_with_retry(linear, linear_issue_id, &t.status) {
+            let alert_msg = format!(
+                "[CALLBACK FAILURE] {linear_issue_id} task `{task_id}` (stage: reviewer): \
+                 implicit APPROVED move to '{}' failed: {e}",
+                t.status
+            );
+            notifier.notify_macos("Werma Callback Failed", &alert_msg, "Basso");
+            notifier.notify_slack("#werma-alerts", &alert_msg);
+            return Err(e);
+        }
+
+        // Post review as PR comment if there's output (non-empty result case)
+        // Skip for empty result — nothing to post
+        // (handled in the caller which already checked result.is_empty())
+
+        let comment = format!(
+            "**Reviewer implicit APPROVED** (task: `{task_id}`). \
+             Agent completed without explicit verdict — treating as approved.{spawn_note}",
+            spawn_note = t
+                .spawn
+                .as_ref()
+                .map(|s| format!(" Spawning **{s}** stage."))
+                .unwrap_or_default()
+        );
+        if let Err(e) = linear.comment(linear_issue_id, &comment) {
+            eprintln!(
+                "callback: failed to post implicit-APPROVED comment on {linear_issue_id}: {e}"
+            );
+        }
+    }
+
+    if let Err(e) = db.set_callback_fired_at(task_id) {
+        eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
+    }
+
+    Ok(())
+}
+
 /// Handle pipeline callback when a task completes.
 #[allow(clippy::too_many_arguments)]
 pub fn callback(
@@ -123,8 +185,28 @@ pub fn callback(
 
     let config = load_default()?;
 
-    // Guard: if output is empty, post a comment and return early.
+    // Guard: if output is empty, handle per-stage.
+    // RIG-308: Reviewer agents write reviews via tool calls (PR comments, file reads)
+    // but Claude Code `--output-format json` only captures the final text response in
+    // `result`. If the reviewer did its work via tools, `result` is empty — treat as
+    // implicit APPROVED rather than leaving the issue stuck in Review.
     if result.trim().is_empty() {
+        if stage == "reviewer" {
+            eprintln!(
+                "[CALLBACK] {linear_issue_id}: reviewer task {task_id} produced empty result — \
+                 treating as implicit APPROVED (agent likely wrote review via tool calls)"
+            );
+            // Fall through with synthetic APPROVED verdict
+            return handle_reviewer_implicit_approved(
+                db,
+                task_id,
+                linear_issue_id,
+                working_dir,
+                linear,
+                cmd,
+                notifier,
+            );
+        }
         eprintln!("callback: empty output for task {task_id} (stage={stage}), skipping transition");
         if let Err(e) = linear.comment(
             linear_issue_id,
@@ -175,6 +257,24 @@ pub fn callback(
 
     // For stages that require a verdict (reviewer, qa, devops), warn if missing.
     let has_explicit_transitions = !stage_cfg.transitions.is_empty();
+
+    // RIG-308: Reviewer with non-empty output but no verdict — the agent wrote a review
+    // but forgot the verdict line. Treat as implicit APPROVED to avoid infinite loop.
+    if verdict.is_none() && stage == "reviewer" {
+        eprintln!(
+            "[CALLBACK] {linear_issue_id}: reviewer task {task_id} has output but no verdict — \
+             treating as implicit APPROVED"
+        );
+        return handle_reviewer_implicit_approved(
+            db,
+            task_id,
+            linear_issue_id,
+            working_dir,
+            linear,
+            cmd,
+            notifier,
+        );
+    }
 
     if verdict.is_none() && has_explicit_transitions && stage != "engineer" && stage != "analyst" {
         eprintln!(
@@ -1835,6 +1935,151 @@ stages:
                 .iter()
                 .any(|(id, status)| id == "RIG-252c" && status == "review"),
             "normal DONE should still move to review, got: {moves:?}"
+        );
+    }
+
+    // ─── RIG-308: reviewer empty result / no verdict tests ──────────────
+
+    #[test]
+    fn callback_reviewer_empty_result_treats_as_approved() {
+        // RIG-308: empty result from reviewer should move issue to Ready (implicit APPROVED)
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-308a", "review");
+
+        let mut task = crate::db::make_test_task("20260326-308a");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-308a".to_string();
+        task.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Empty result — agent did review via tool calls, final text is empty
+        let result = "";
+
+        callback(
+            &db,
+            "20260326-308a",
+            "reviewer",
+            result,
+            "RIG-308a",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        // Should move to "ready" (reviewer approved transition target)
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves
+                .iter()
+                .any(|(id, status)| id == "RIG-308a" && status == "ready"),
+            "empty reviewer result should move to ready (implicit APPROVED), got: {moves:?}"
+        );
+
+        // Should post implicit APPROVED comment
+        let comments = linear.comment_calls.borrow();
+        assert!(
+            comments
+                .iter()
+                .any(|(id, body)| id == "RIG-308a" && body.contains("implicit APPROVED")),
+            "should post implicit APPROVED comment, got: {comments:?}"
+        );
+    }
+
+    #[test]
+    fn callback_reviewer_no_verdict_treats_as_approved() {
+        // RIG-308: reviewer output without verdict should move issue to Ready
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-308b", "review");
+
+        let mut task = crate::db::make_test_task("20260326-308b");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-308b".to_string();
+        task.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Non-empty output but no verdict — agent wrote review but forgot verdict line
+        let result = "Reviewed the code. Looks good overall, minor style issues only.";
+
+        callback(
+            &db,
+            "20260326-308b",
+            "reviewer",
+            result,
+            "RIG-308b",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        // Should move to "ready" (implicit APPROVED)
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves
+                .iter()
+                .any(|(id, status)| id == "RIG-308b" && status == "ready"),
+            "reviewer without verdict should move to ready, got: {moves:?}"
+        );
+    }
+
+    #[test]
+    fn callback_reviewer_empty_result_with_max_turns_stays_in_review() {
+        // RIG-308: empty result + max_turns should NOT treat as approved
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-308c", "review");
+
+        let mut task = crate::db::make_test_task("20260326-308c");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-308c".to_string();
+        task.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&task).unwrap();
+
+        // max_turns exit — agent ran out of turns
+        let result =
+            r#"{"type":"result","subtype":"error_max_turns","is_error":false,"result":""}"#;
+
+        callback(
+            &db,
+            "20260326-308c",
+            "reviewer",
+            result,
+            "RIG-308c",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        // Should NOT move — max_turns returns early before empty-result handler
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves.is_empty(),
+            "max_turns exit should not move issue, got: {moves:?}"
+        );
+
+        // Should post max_turns comment
+        let comments = linear.comment_calls.borrow();
+        assert!(
+            comments
+                .iter()
+                .any(|(id, body)| id == "RIG-308c" && body.contains("max_turns")),
+            "should post max_turns comment, got: {comments:?}"
         );
     }
 }

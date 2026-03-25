@@ -226,6 +226,37 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     continue;
                 }
 
+                // RIG-308: Reviewer spawn limit — if reviewer has completed N+ times for
+                // this issue without the issue moving out of Review, stop spawning to
+                // prevent infinite review loops.
+                if stage_name == "reviewer" {
+                    let completed_count =
+                        db.count_completed_tasks_for_issue_stage(identifier, "reviewer")?;
+                    let max_rounds = stage_cfg
+                        .review_round_limit()
+                        .unwrap_or(super::callback::DEFAULT_MAX_REVIEW_ROUNDS)
+                        as i64;
+                    if completed_count >= max_rounds {
+                        eprintln!(
+                            "  ! skipping {identifier} stage=reviewer: spawn limit reached \
+                             ({completed_count}/{max_rounds} completed reviews)"
+                        );
+                        if let Err(e) = linear.comment(
+                            issue_id,
+                            &format!(
+                                "**Reviewer spawn limit reached** ({completed_count} reviews completed). \
+                                 Issue staying in Review — manual intervention needed."
+                            ),
+                        ) {
+                            eprintln!(
+                                "  ! failed to post spawn-limit comment on {identifier}: {e}"
+                            );
+                        }
+                        total_skipped += 1;
+                        continue;
+                    }
+                }
+
                 // For reviewer stage: skip if PR is already merged (manual merge while in Review)
                 if stage_name == "reviewer" && is_pr_merged_for_issue(cmd, &working_dir, identifier)
                 {
@@ -423,6 +454,24 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             if *stage_name == "reviewer" && db.has_any_review_task_for_issue(identifier)? {
                 total_skipped += 1;
                 continue;
+            }
+
+            // RIG-308: Reviewer spawn limit (label-based path)
+            if *stage_name == "reviewer" {
+                let completed_count =
+                    db.count_completed_tasks_for_issue_stage(identifier, "reviewer")?;
+                let max_rounds = stage_cfg
+                    .review_round_limit()
+                    .unwrap_or(super::callback::DEFAULT_MAX_REVIEW_ROUNDS)
+                    as i64;
+                if completed_count >= max_rounds {
+                    eprintln!(
+                        "  ! skipping {identifier} stage=reviewer: spawn limit reached \
+                         ({completed_count}/{max_rounds} completed reviews, label path)"
+                    );
+                    total_skipped += 1;
+                    continue;
+                }
             }
 
             // For reviewer stage: skip if PR is already merged
@@ -763,6 +812,41 @@ stages:
         assert!(
             tasks.is_empty(),
             "should not create analyst task when engineer already ran"
+        );
+    }
+
+    #[test]
+    fn poll_skips_reviewer_after_spawn_limit_reached() {
+        // RIG-308: poller should not spawn reviewer if it has completed 3+ times
+        // for the same issue without the issue moving out of Review.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Insert 3 completed reviewer tasks for this issue (simulating 3 review rounds)
+        for i in 0..3 {
+            let mut task = crate::db::make_test_task(&format!("20260326-rev{i}"));
+            task.status = crate::models::Status::Completed;
+            task.linear_issue_id = "RIG-308".to_string();
+            task.pipeline_stage = "reviewer".to_string();
+            task.linear_pushed = true; // callback already fired
+            db.insert_task(&task).unwrap();
+        }
+
+        // Issue is still in Review status
+        let issue = fake_issue("uuid-308", "RIG-308", "Test werma issue", &["repo:werma"]);
+        // Override state type to "started" (not completed/canceled)
+        let mut issue = issue;
+        issue["state"]["type"] = serde_json::json!("started");
+        linear.set_issues_for_status("review", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // No new reviewer task should be created
+        let pending_tasks = db.list_tasks(Some(crate::models::Status::Pending)).unwrap();
+        assert!(
+            pending_tasks.is_empty(),
+            "should not spawn reviewer after 3 completed reviews, got: {pending_tasks:?}"
         );
     }
 }
