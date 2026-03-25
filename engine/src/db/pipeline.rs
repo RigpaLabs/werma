@@ -83,6 +83,32 @@ impl super::Db {
         )?)
     }
 
+    /// Get the most recent `finished_at` timestamp for any completed task
+    /// on the given Linear issue, excluding the current stage.
+    /// Used to filter Linear comments to only those posted after the previous stage completed.
+    pub fn last_stage_finished_at(
+        &self,
+        issue_id: &str,
+        current_stage: &str,
+    ) -> Result<Option<String>> {
+        let result: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT finished_at FROM tasks
+             WHERE linear_issue_id = ?1
+               AND pipeline_stage != ?2
+               AND pipeline_stage != ''
+               AND status = 'completed'
+               AND finished_at IS NOT NULL
+             ORDER BY finished_at DESC
+             LIMIT 1",
+                rusqlite::params![issue_id, current_stage],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(result)
+    }
+
     /// Find all completed tasks with a linear_issue_id where linear_pushed=false.
     pub fn unpushed_linear_tasks(&self) -> Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
@@ -432,6 +458,90 @@ mod tests {
                 .unwrap(),
             "pending engineer #2 should block duplicate spawn"
         );
+    }
+
+    #[test]
+    fn last_stage_finished_at_returns_none_when_no_tasks() {
+        let db = Db::open_in_memory().unwrap();
+        let result = db.last_stage_finished_at("RIG-275", "engineer").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn last_stage_finished_at_finds_previous_stage() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Analyst completed with a finished_at timestamp
+        let mut analyst_task = make_test_task("20260324-001");
+        analyst_task.status = Status::Completed;
+        analyst_task.linear_issue_id = "RIG-275".to_string();
+        analyst_task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&analyst_task).unwrap();
+        db.update_task_field("20260324-001", "finished_at", "2026-03-24T10:00:00")
+            .unwrap();
+
+        // Query for engineer stage should find the analyst's finished_at
+        let result = db.last_stage_finished_at("RIG-275", "engineer").unwrap();
+        assert_eq!(result, Some("2026-03-24T10:00:00".to_string()));
+
+        // Query for analyst stage should NOT return its own timestamp
+        let result = db.last_stage_finished_at("RIG-275", "analyst").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn last_stage_finished_at_returns_most_recent() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Two completed stages — should return the most recent
+        let mut t1 = make_test_task("20260324-001");
+        t1.status = Status::Completed;
+        t1.linear_issue_id = "RIG-275".to_string();
+        t1.pipeline_stage = "analyst".to_string();
+        db.insert_task(&t1).unwrap();
+        db.update_task_field("20260324-001", "finished_at", "2026-03-24T09:00:00")
+            .unwrap();
+
+        let mut t2 = make_test_task("20260324-002");
+        t2.status = Status::Completed;
+        t2.linear_issue_id = "RIG-275".to_string();
+        t2.pipeline_stage = "engineer".to_string();
+        db.insert_task(&t2).unwrap();
+        db.update_task_field("20260324-002", "finished_at", "2026-03-24T11:00:00")
+            .unwrap();
+
+        // Reviewer should see engineer's timestamp (most recent non-self)
+        let result = db.last_stage_finished_at("RIG-275", "reviewer").unwrap();
+        assert_eq!(result, Some("2026-03-24T11:00:00".to_string()));
+    }
+
+    #[test]
+    fn last_stage_finished_at_excludes_non_pipeline_and_different_issue() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Non-pipeline task (empty pipeline_stage) — should be excluded
+        let mut t1 = make_test_task("20260324-001");
+        t1.status = Status::Completed;
+        t1.linear_issue_id = "RIG-275".to_string();
+        t1.pipeline_stage = String::new();
+        db.insert_task(&t1).unwrap();
+        db.update_task_field("20260324-001", "finished_at", "2026-03-24T10:00:00")
+            .unwrap();
+
+        let result = db.last_stage_finished_at("RIG-275", "engineer").unwrap();
+        assert!(result.is_none(), "non-pipeline tasks should be excluded");
+
+        // Task for a different issue — should not match
+        let mut t2 = make_test_task("20260324-002");
+        t2.status = Status::Completed;
+        t2.linear_issue_id = "RIG-999".to_string();
+        t2.pipeline_stage = "analyst".to_string();
+        db.insert_task(&t2).unwrap();
+        db.update_task_field("20260324-002", "finished_at", "2026-03-24T12:00:00")
+            .unwrap();
+
+        let result = db.last_stage_finished_at("RIG-275", "engineer").unwrap();
+        assert!(result.is_none(), "different issue should not match");
     }
 
     #[test]

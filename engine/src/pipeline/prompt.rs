@@ -41,6 +41,9 @@ pub fn build_vars(
 /// (backslash followed by 'n') instead of actual newlines, producing unreadable
 /// walls of text. This sanitizes them at the source before prompt rendering.
 fn sanitize_text_vars(vars: &mut HashMap<String, String>) {
+    // NOTE: linear_comments is NOT listed here — it's late-injected in run_task()
+    // after build_vars() returns, so sanitization here would never fire.
+    // Escaped sequences in comments are handled directly in fetch_linear_comments().
     const TEXT_KEYS: &[&str] = &["issue_description", "previous_output", "rejection_feedback"];
     for key in TEXT_KEYS {
         if let Some(val) = vars.get_mut(*key) {
