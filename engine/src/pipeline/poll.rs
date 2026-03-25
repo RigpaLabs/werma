@@ -21,6 +21,7 @@ pub fn is_research_issue(labels: &[&str]) -> bool {
 /// Poll Linear for issues at pipeline-relevant statuses and create tasks.
 pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<()> {
     let config = load_default()?;
+    let user_cfg = crate::config::UserConfig::load();
 
     let mut total_created = 0;
     let mut total_skipped = 0;
@@ -63,7 +64,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             continue;
         }
 
-        let working_dir = crate::linear::infer_working_dir(title, &labels);
+        let working_dir = crate::linear::infer_working_dir(title, &labels, &user_cfg);
         if crate::linear::validate_working_dir(&working_dir).is_none() {
             eprintln!(
                 "  ! skipping {identifier} [{title}]: working dir '{working_dir}' does not exist"
@@ -188,7 +189,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     continue;
                 }
 
-                let working_dir = crate::linear::infer_working_dir(title, &labels);
+                let working_dir = crate::linear::infer_working_dir(title, &labels, &user_cfg);
                 if crate::linear::validate_working_dir(&working_dir).is_none() {
                     eprintln!(
                         "  ! skipping {identifier} [{title}] stage={stage_name}: working dir '{working_dir}' does not exist"
@@ -372,7 +373,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 }
             }
 
-            let working_dir = crate::linear::infer_working_dir(title, &labels);
+            let working_dir = crate::linear::infer_working_dir(title, &labels, &user_cfg);
             if crate::linear::validate_working_dir(&working_dir).is_none() {
                 eprintln!(
                     "  ! skipping {identifier} [{title}] stage={stage_name}: working dir '{working_dir}' does not exist"
