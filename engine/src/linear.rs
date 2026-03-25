@@ -35,6 +35,11 @@ pub trait LinearApi {
         issue_id: &str,
         after_iso: Option<&str>,
     ) -> Result<Vec<(String, String, String)>>;
+
+    /// Fetch child (sub) issues of a parent issue.
+    /// Returns vec of (identifier, title, status_name, description).
+    /// Returns empty vec if the issue has no children.
+    fn get_sub_issues(&self, identifier: &str) -> Result<Vec<(String, String, String, String)>>;
 }
 
 impl LinearApi for LinearClient {
@@ -95,6 +100,10 @@ impl LinearApi for LinearClient {
         after_iso: Option<&str>,
     ) -> Result<Vec<(String, String, String)>> {
         self.list_comments(issue_id, after_iso)
+    }
+
+    fn get_sub_issues(&self, identifier: &str) -> Result<Vec<(String, String, String, String)>> {
+        self.get_sub_issues(identifier)
     }
 }
 
@@ -910,6 +919,48 @@ impl LinearClient {
         Ok((id, ident, title, description, labels))
     }
 
+    /// Fetch child (sub) issues of a parent issue by identifier (e.g. "RIG-236").
+    /// Returns vec of (identifier, title, status_name, description).
+    /// Returns empty vec if the issue has no children.
+    pub fn get_sub_issues(
+        &self,
+        identifier: &str,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        let uuid = self.resolve_uuid(identifier)?;
+
+        let data = self.query(
+            r#"query($issueId: ID!) {
+                issue(id: $issueId) {
+                    children(first: 50, orderBy: createdAt) {
+                        nodes {
+                            identifier
+                            title
+                            description
+                            state { name }
+                        }
+                    }
+                }
+            }"#,
+            &json!({"issueId": uuid}),
+        )?;
+
+        let nodes = data["issue"]["children"]["nodes"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        let mut sub_issues = Vec::new();
+        for node in &nodes {
+            let ident = node["identifier"].as_str().unwrap_or("").to_string();
+            let title = node["title"].as_str().unwrap_or("").to_string();
+            let status = node["state"]["name"].as_str().unwrap_or("").to_string();
+            let description = node["description"].as_str().unwrap_or("").to_string();
+            sub_issues.push((ident, title, status, description));
+        }
+
+        Ok(sub_issues)
+    }
+
     /// Fetch comments on an issue by UUID, optionally filtering to those after `after_iso`.
     /// Returns vec of (author_name, created_at_iso, body) sorted chronologically.
     pub fn list_comments(
@@ -1465,6 +1516,13 @@ pub mod fakes {
             _issue_id: &str,
             _after_iso: Option<&str>,
         ) -> Result<Vec<(String, String, String)>> {
+            Ok(vec![])
+        }
+
+        fn get_sub_issues(
+            &self,
+            _identifier: &str,
+        ) -> Result<Vec<(String, String, String, String)>> {
             Ok(vec![])
         }
     }
