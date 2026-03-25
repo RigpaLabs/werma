@@ -212,6 +212,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         }
     }
 
@@ -262,6 +264,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
         db.insert_task(&task).unwrap();
 

@@ -112,6 +112,8 @@ pub fn check_schedules(
             context_files: sched.context_files.clone(),
             repo_hash: crate::runtime_repo_hash(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         task_repo.insert_task(&task)?;

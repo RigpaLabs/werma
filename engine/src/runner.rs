@@ -121,7 +121,6 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
                 if !labels.is_empty() {
                     prompt.push_str(&format!("Labels: {}\n", labels.join(", ")));
                 }
-                // TODO: fetch and inject comments when LinearClient::list_comments is available
                 prompt.push_str("---END ISSUE---\n\n");
             }
             Err(e) => {
@@ -157,6 +156,64 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
     }
 
     Ok(prompt)
+}
+
+/// Convert a naive local timestamp (written by `chrono::Local::now()`) to UTC RFC 3339.
+///
+/// All `finished_at` timestamps in the DB are stored as naive local time
+/// (e.g. "2026-03-24T16:00:00" in WITA = UTC+8). Linear comment timestamps
+/// are RFC 3339 UTC (e.g. "2026-03-24T08:00:00.000Z"). Without conversion,
+/// `is_after_timestamp` would treat the naive value as UTC, creating an
+/// 8-hour window where valid comments are incorrectly excluded.
+fn naive_local_to_utc_iso(local_ts: &str) -> String {
+    use chrono::{Local, NaiveDateTime};
+    NaiveDateTime::parse_from_str(local_ts, "%Y-%m-%dT%H:%M:%S")
+        .ok()
+        .and_then(|ndt| ndt.and_local_timezone(Local).single())
+        .map(|dt| dt.to_utc().to_rfc3339())
+        .unwrap_or_else(|| local_ts.to_string())
+}
+
+/// Fetch Linear comments for an issue at execution time.
+///
+/// Filters to comments posted after the previous pipeline stage completed,
+/// skipping werma bot comments. Returns formatted markdown or empty string.
+fn fetch_linear_comments(linear: &dyn crate::linear::LinearApi, db: &Db, task: &Task) -> String {
+    // Find when the previous stage finished (to filter old comments).
+    // Convert from local time (stored by chrono::Local::now) to UTC
+    // so the comparison against Linear's UTC timestamps is correct.
+    let after_iso = if !task.pipeline_stage.is_empty() {
+        db.last_stage_finished_at(&task.linear_issue_id, &task.pipeline_stage)
+            .ok()
+            .flatten()
+            .map(|ts| naive_local_to_utc_iso(&ts))
+    } else {
+        None
+    };
+
+    let comments = match linear.list_comments(&task.linear_issue_id, after_iso.as_deref()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "warning: could not fetch Linear comments for {}: {e}",
+                task.linear_issue_id
+            );
+            return String::new();
+        }
+    };
+
+    if comments.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("## Linear Comments (recent updates)\n\n");
+    for (author, created_at, body) in &comments {
+        // Truncate timestamp to date+time for readability
+        let ts = created_at.get(..19).unwrap_or(created_at);
+        out.push_str(&format!("**{author}** ({ts}):\n{body}\n\n---\n\n"));
+    }
+    // Sanitize escaped newlines/tabs that may come from Linear comment bodies
+    out.replace("\\n", "\n").replace("\\t", "\t")
 }
 
 /// Run the next pending task in a tmux session.
@@ -300,7 +357,21 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     let prompt_file = logs_dir.join(format!("{task_id}-prompt.txt"));
     let exec_script = logs_dir.join(format!("{task_id}-exec.sh"));
 
-    let full_prompt = build_prompt(task, &effective_dir, werma_dir)?;
+    let mut full_prompt = build_prompt(task, &effective_dir, werma_dir)?;
+
+    // Late-inject Linear comments at execution time (not creation time)
+    // so agents see context updates posted after task was created.
+    if full_prompt.contains("{linear_comments}") {
+        let comments_text = if task.linear_issue_id.is_empty() {
+            String::new()
+        } else if let Ok(client) = crate::linear::LinearClient::new() {
+            fetch_linear_comments(&client, db, task)
+        } else {
+            eprintln!("warning: could not initialize Linear client, skipping comment fetch");
+            String::new()
+        };
+        full_prompt = full_prompt.replace("{linear_comments}", &comments_text);
+    }
 
     // Write prompt to file — never interpolated into shell
     std::fs::write(&prompt_file, &full_prompt)?;
@@ -516,6 +587,19 @@ fi
 
 SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
 
+# RIG-252: Detect error_max_turns — agent ran out of turns without completing.
+# Claude returns is_error=false for this, but the work is incomplete.
+SUBTYPE=$(echo "$RESULT_JSON" | jq -r '.subtype // empty' 2>/dev/null || echo "")
+if [ "$SUBTYPE" = "error_max_turns" ]; then
+    echo "$(date): MAX_TURNS_EXIT — agent hit max_turns (subtype=$SUBTYPE), marking failed" >> "$LOG_FILE"
+    # Still save output for inspection
+    if [ -n "$RESULT_TEXT" ]; then
+        echo "$RESULT_TEXT" > "$RESULT_FILE"
+    fi
+    werma fail "$TASK_ID"
+    exit 1
+fi
+
 # Guard: if truly empty (claude returned nothing), log and fail
 if [ -z "$(echo "$RESULT_TEXT" | tr -d '[:space:]')" ]; then
     echo "$(date): EMPTY OUTPUT — claude returned no parseable result" >> "$LOG_FILE"
@@ -670,6 +754,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -704,6 +790,8 @@ mod tests {
             context_files: vec!["ctx.txt".to_string()],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, dir.path(), dir.path()).unwrap();
@@ -736,6 +824,8 @@ mod tests {
             context_files: vec!["/nonexistent/file.txt".to_string()],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -776,6 +866,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -820,6 +912,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -855,6 +949,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -939,6 +1035,36 @@ mod tests {
         assert!(script.contains("werma fail \"$TASK_ID\""));
         // Claude exit code is logged
         assert!(script.contains("CLAUDE_EXIT"));
+    }
+
+    #[test]
+    fn exec_script_detects_max_turns_exit() {
+        // RIG-252: runner script must detect error_max_turns subtype and call werma fail
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "20260325-252",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Edit,Write,Bash",
+            max_turns: 30,
+            model: "claude-opus-4-6",
+            fallback_model: None,
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        assert!(
+            script.contains("error_max_turns"),
+            "script should check for error_max_turns subtype"
+        );
+        assert!(
+            script.contains("SUBTYPE"),
+            "script should extract SUBTYPE from JSON"
+        );
+        assert!(
+            script.contains("MAX_TURNS_EXIT"),
+            "script should log MAX_TURNS_EXIT marker"
+        );
     }
 
     #[test]
@@ -1168,5 +1294,95 @@ mod tests {
         assert!(result.contains("dep-000"));
         assert!(result.contains("dep-004"));
         assert!(!result.contains("dep-005")); // beyond limit
+    }
+
+    #[test]
+    fn naive_local_to_utc_iso_converts_correctly() {
+        // The output should be a valid RFC 3339 timestamp in UTC.
+        // We can't assert the exact value since it depends on the test machine's
+        // timezone, but we can verify it parses as RFC 3339 and the round-trip
+        // produces the same instant.
+        use chrono::{DateTime, Local, NaiveDateTime, Utc};
+
+        let local_ts = "2026-03-24T16:00:00";
+        let result = naive_local_to_utc_iso(local_ts);
+
+        // Should be valid RFC 3339
+        let parsed = DateTime::parse_from_rfc3339(&result);
+        assert!(
+            parsed.is_ok(),
+            "should produce valid RFC 3339, got: {result}"
+        );
+
+        // Round-trip: the UTC timestamp should represent the same instant
+        // as the original local timestamp interpreted in the local timezone
+        let expected = NaiveDateTime::parse_from_str(local_ts, "%Y-%m-%dT%H:%M:%S")
+            .unwrap()
+            .and_local_timezone(Local)
+            .single()
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(parsed.unwrap().with_timezone(&Utc), expected);
+    }
+
+    #[test]
+    fn naive_local_to_utc_iso_invalid_input_passthrough() {
+        // Invalid timestamps should pass through unchanged
+        assert_eq!(naive_local_to_utc_iso("not-a-timestamp"), "not-a-timestamp");
+        assert_eq!(naive_local_to_utc_iso(""), "");
+    }
+
+    #[test]
+    fn naive_local_to_utc_iso_already_rfc3339_passthrough() {
+        // RFC 3339 timestamps don't match the naive format, so pass through
+        let rfc = "2026-03-24T08:00:00+00:00";
+        assert_eq!(naive_local_to_utc_iso(rfc), rfc);
+    }
+
+    #[test]
+    fn fetch_linear_comments_sanitizes_escaped_newlines() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = crate::traits::fakes::FakeLinearApi::new();
+
+        // Set up comments with escaped newlines (as Linear sometimes returns)
+        linear.set_issue_comments(
+            "RIG-TEST",
+            vec![(
+                "Ar".to_string(),
+                "2026-03-24T14:00:00.000Z".to_string(),
+                "Line one\\nLine two\\tTabbed".to_string(),
+            )],
+        );
+
+        let task = Task {
+            linear_issue_id: "RIG-TEST".to_string(),
+            pipeline_stage: "engineer".to_string(),
+            ..Default::default()
+        };
+
+        let result = fetch_linear_comments(&linear, &db, &task);
+        assert!(
+            result.contains("Line one\nLine two\tTabbed"),
+            "should unescape \\n and \\t, got: {result}"
+        );
+        assert!(
+            !result.contains("\\n"),
+            "should not contain literal \\n, got: {result}"
+        );
+    }
+
+    #[test]
+    fn fetch_linear_comments_empty_when_no_comments() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = crate::traits::fakes::FakeLinearApi::new();
+
+        let task = Task {
+            linear_issue_id: "RIG-EMPTY".to_string(),
+            pipeline_stage: "engineer".to_string(),
+            ..Default::default()
+        };
+
+        let result = fetch_linear_comments(&linear, &db, &task);
+        assert!(result.is_empty(), "should be empty when no comments");
     }
 }

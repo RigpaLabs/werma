@@ -148,6 +148,8 @@ pub fn cmd_review(
         context_files: vec![diff_path.to_string_lossy().to_string()],
         repo_hash: crate::runtime_repo_hash(),
         estimate: 0,
+        retry_count: 0,
+        retry_after: None,
     };
 
     db.insert_task(&task)?;

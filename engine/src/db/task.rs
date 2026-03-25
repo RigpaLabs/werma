@@ -99,12 +99,14 @@ impl super::Db {
                 id, status, priority, created_at, started_at, finished_at,
                 type, prompt, output_path, working_dir, model, max_turns,
                 allowed_tools, session_id, linear_issue_id, linear_pushed,
-                pipeline_stage, depends_on, context_files, repo_hash, estimate
+                pipeline_stage, depends_on, context_files, repo_hash, estimate,
+                retry_count, retry_after
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
                 ?7, ?8, ?9, ?10, ?11, ?12,
                 ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20, ?21
+                ?17, ?18, ?19, ?20, ?21,
+                ?22, ?23
             )",
             params![
                 task.id,
@@ -128,6 +130,8 @@ impl super::Db {
                 context_files,
                 task.repo_hash,
                 task.estimate,
+                task.retry_count,
+                task.retry_after,
             ],
         )?;
         Ok(())
@@ -139,7 +143,8 @@ impl super::Db {
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate,
+                    retry_count, retry_after
              FROM tasks WHERE id = ?1",
             params![id],
             |row| Ok(task_from_row(row)),
@@ -161,7 +166,8 @@ impl super::Db {
                 "SELECT id, status, priority, created_at, started_at, finished_at,
                         type, prompt, output_path, working_dir, model, max_turns,
                         allowed_tools, session_id, linear_issue_id, linear_pushed,
-                        pipeline_stage, depends_on, context_files, repo_hash, estimate
+                        pipeline_stage, depends_on, context_files, repo_hash, estimate,
+                    retry_count, retry_after
                  FROM tasks WHERE status = ?1
                  ORDER BY priority ASC, created_at ASC",
             )?;
@@ -174,7 +180,8 @@ impl super::Db {
                 "SELECT id, status, priority, created_at, started_at, finished_at,
                         type, prompt, output_path, working_dir, model, max_turns,
                         allowed_tools, session_id, linear_issue_id, linear_pushed,
-                        pipeline_stage, depends_on, context_files, repo_hash, estimate
+                        pipeline_stage, depends_on, context_files, repo_hash, estimate,
+                    retry_count, retry_after
                  FROM tasks ORDER BY priority ASC, created_at ASC",
             )?;
             let rows = stmt.query_map([], |row| Ok(task_from_row(row)))?;
@@ -303,6 +310,8 @@ impl super::Db {
             "model",
             "repo_hash",
             "estimate",
+            "retry_count",
+            "retry_after",
         ];
         anyhow::ensure!(
             allowed.contains(&field),
@@ -315,14 +324,18 @@ impl super::Db {
     }
 
     /// Find next pending task with resolved dependencies.
+    /// Skips tasks whose retry_after is in the future.
     pub fn find_next_pending(&self) -> Result<Option<Task>> {
+        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
         let result = self.conn.query_row(
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate,
+                    retry_count, retry_after
              FROM tasks
              WHERE status = 'pending'
+               AND (retry_after IS NULL OR retry_after <= ?1)
                AND NOT EXISTS (
                  SELECT 1 FROM json_each(depends_on) AS dep
                  WHERE NOT EXISTS (
@@ -331,7 +344,7 @@ impl super::Db {
                )
              ORDER BY priority ASC, created_at ASC
              LIMIT 1",
-            [],
+            params![now],
             |row| Ok(task_from_row(row)),
         );
 
@@ -344,12 +357,15 @@ impl super::Db {
 
     /// Atomically find the next pending task and mark it as running.
     /// Uses BEGIN IMMEDIATE to prevent two callers from claiming the same task.
+    /// Skips tasks whose retry_after is in the future.
     pub fn claim_next_pending(&self) -> Result<Option<Task>> {
         self.conn.execute("BEGIN IMMEDIATE", [])?;
 
+        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
         let result = self.conn.query_row(
             "SELECT id FROM tasks
              WHERE status = 'pending'
+               AND (retry_after IS NULL OR retry_after <= ?1)
                AND NOT EXISTS (
                  SELECT 1 FROM json_each(depends_on) AS dep
                  WHERE NOT EXISTS (
@@ -372,7 +388,7 @@ impl super::Db {
                )
              ORDER BY priority ASC, created_at ASC
              LIMIT 1",
-            [],
+            params![now],
             |row| row.get::<_, String>(0),
         );
 
@@ -400,14 +416,18 @@ impl super::Db {
     }
 
     /// Find all pending tasks with resolved dependencies (for run-all wave execution).
+    /// Skips tasks whose retry_after is in the future.
     pub fn find_all_launchable(&self) -> Result<Vec<Task>> {
+        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
         let mut stmt = self.conn.prepare(
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate,
+                    retry_count, retry_after
              FROM tasks
              WHERE status = 'pending'
+               AND (retry_after IS NULL OR retry_after <= ?1)
                AND NOT EXISTS (
                  SELECT 1 FROM json_each(depends_on) AS dep
                  WHERE NOT EXISTS (
@@ -416,13 +436,44 @@ impl super::Db {
                )
              ORDER BY priority ASC, created_at ASC",
         )?;
-        let rows = stmt.query_map([], |row| Ok(task_from_row(row)))?;
+        let rows = stmt.query_map(params![now], |row| Ok(task_from_row(row)))?;
 
         let mut tasks = Vec::new();
         for row in rows {
             tasks.push(row??);
         }
         Ok(tasks)
+    }
+
+    /// Enqueue a failed task for retry: set status to Pending, increment retry_count,
+    /// set retry_after to now + delay_secs, and clear started_at/finished_at.
+    /// Atomically enqueue a task for retry. Returns `true` if the retry was applied,
+    /// `false` if another caller already incremented past `max_retries` (CAS guard).
+    pub fn enqueue_retry(&self, id: &str, delay_secs: u64, max_retries: u32) -> Result<bool> {
+        let retry_after = (chrono::Local::now() + chrono::Duration::seconds(delay_secs as i64))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+
+        let rows = self.conn.execute(
+            "UPDATE tasks SET status = 'pending',
+                              retry_count = retry_count + 1,
+                              retry_after = ?1,
+                              session_id = '',
+                              started_at = NULL,
+                              finished_at = NULL
+             WHERE id = ?2 AND retry_count < ?3",
+            params![retry_after, id, max_retries],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Reset retry_count and retry_after (used by manual `werma retry`).
+    pub fn reset_retry(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET retry_count = 0, retry_after = NULL WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
     }
 
     /// Delete completed tasks, return them.

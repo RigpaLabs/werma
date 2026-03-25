@@ -55,10 +55,35 @@ fn show_agents(db: &Db) -> Result<()> {
             } else {
                 format!(" [{}]", task.linear_issue_id)
             };
+            let retry_info = if task.retry_count > 0 {
+                format!(" (retry #{})", task.retry_count)
+            } else {
+                String::new()
+            };
             let prompt_preview = truncate_line(&task.prompt, 40);
             println!(
-                "   {} {}{} {}",
-                task.id, task.task_type, linear, prompt_preview
+                "   {} {}{}{} {}",
+                task.id, task.task_type, linear, retry_info, prompt_preview
+            );
+        }
+    }
+
+    // Show pending tasks waiting for retry
+    let pending = db.list_tasks(Some(Status::Pending))?;
+    let retry_pending: Vec<_> = pending.iter().filter(|t| t.retry_after.is_some()).collect();
+    if !retry_pending.is_empty() {
+        println!();
+        println!(" retry pending:");
+        for task in &retry_pending {
+            let linear = if task.linear_issue_id.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", task.linear_issue_id)
+            };
+            let after = task.retry_after.as_deref().unwrap_or("?");
+            println!(
+                "   {} {}{} retry #{} (after {})",
+                task.id, task.task_type, linear, task.retry_count, after
             );
         }
     }

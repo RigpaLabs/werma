@@ -65,6 +65,8 @@ pub fn cmd_add(db: &Db, p: AddParams) -> Result<()> {
         context_files: context_files.clone(),
         repo_hash: crate::runtime_repo_hash(),
         estimate: 0,
+        retry_count: 0,
+        retry_after: None,
     };
 
     db.insert_task(&task)?;

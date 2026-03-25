@@ -8,8 +8,8 @@ use super::loader::{load_default, resolve_prompt};
 use super::pr::{auto_create_pr, has_open_pr_for_issue, post_pr_comment, pr_title_from_url};
 use super::prompt::{build_vars, render_prompt};
 use super::verdict::{
-    extract_rejection_feedback, extract_review_body, is_heavy_track, parse_comments,
-    parse_estimate, parse_pr_url, parse_verdict,
+    extract_rejection_feedback, extract_review_body, is_heavy_track, is_max_turns_exit,
+    parse_comments, parse_estimate, parse_pr_url, parse_verdict,
 };
 use crate::db::Db;
 use crate::linear::LinearApi;
@@ -138,6 +138,24 @@ pub fn callback(
         return Ok(());
     }
 
+    // RIG-252: Detect error_max_turns in output — agent ran out of turns without completing.
+    if is_max_turns_exit(result) {
+        eprintln!(
+            "[CALLBACK] {linear_issue_id}: task {task_id} (stage={stage}) hit max_turns — \
+             marking as incomplete, no transition"
+        );
+        if let Err(e) = linear.comment(
+            linear_issue_id,
+            &format!(
+                "**Werma task `{task_id}`** (stage: {stage}) hit `max_turns` — agent ran out of \
+                 turns without completing. Task marked as failed. Will be retried."
+            ),
+        ) {
+            eprintln!("callback: failed to post max_turns comment on {linear_issue_id}: {e}");
+        }
+        return Ok(());
+    }
+
     let stage_cfg = if let Some(s) = config.stage(stage) {
         s
     } else {
@@ -187,7 +205,6 @@ pub fn callback(
             ""
         })
         .to_lowercase();
-
 
     // RIG-227: Fallback spec posting for analyst stage.
     // Post substantive plain-text output as a comment so the spec reaches Linear.
@@ -697,6 +714,8 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         context_files: vec![handoff_path.to_string_lossy().to_string()],
         repo_hash: crate::runtime_repo_hash(),
         estimate: p.estimate,
+        retry_count: 0,
+        retry_after: None,
     };
 
     db.insert_task(&task)?;
@@ -908,6 +927,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
         db.insert_task(&analyst_task).unwrap();
 
@@ -1544,6 +1565,8 @@ stages:
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
         db.insert_task(&task).unwrap();
 
@@ -1618,6 +1641,8 @@ stages:
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
         db.insert_task(&task).unwrap();
 
@@ -1647,6 +1672,137 @@ stages:
         assert!(
             db.is_callback_recently_fired("20260324-unk", 60).unwrap(),
             "callback_fired_at should be set for unknown verdict"
+        );
+    }
+
+    // ─── RIG-252: max_turns exit tests ──────────────────────────────────
+
+    #[test]
+    fn callback_max_turns_exit_does_not_transition() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-252a", "in_progress");
+
+        let mut task = crate::db::make_test_task("20260325-252a");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-252a".to_string();
+        task.pipeline_stage = "engineer".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Simulate output containing error_max_turns (raw JSON dumped as fallback)
+        let result = r#"{"type":"result","subtype":"error_max_turns","is_error":false,"result":"partial work"}"#;
+
+        callback(
+            &db,
+            "20260325-252a",
+            "engineer",
+            result,
+            "RIG-252a",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        // No status moves should happen
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves.is_empty(),
+            "max_turns exit should not trigger any status moves, got: {moves:?}"
+        );
+
+        // Should post a comment about max_turns
+        let comments = linear.comment_calls.borrow();
+        assert!(
+            comments
+                .iter()
+                .any(|(id, body)| id == "RIG-252a" && body.contains("max_turns")),
+            "should post max_turns warning comment, got: {comments:?}"
+        );
+    }
+
+    #[test]
+    fn callback_max_turns_in_text_output_does_not_transition() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-252b", "in_progress");
+
+        let mut task = crate::db::make_test_task("20260325-252b");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-252b".to_string();
+        task.pipeline_stage = "engineer".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Text output that mentions error_max_turns
+        let result = "Partial implementation done.\nerror_max_turns\nSome more text";
+
+        callback(
+            &db,
+            "20260325-252b",
+            "engineer",
+            result,
+            "RIG-252b",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves.is_empty(),
+            "max_turns text should not trigger moves, got: {moves:?}"
+        );
+    }
+
+    #[test]
+    fn callback_normal_engineer_done_still_works() {
+        // Sanity check: normal DONE output should NOT be caught by max_turns guard
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-252c", "in_progress");
+
+        let mut task = crate::db::make_test_task("20260325-252c");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-252c".to_string();
+        task.pipeline_stage = "engineer".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Normal success output — no max_turns indicator
+        cmd.push_success("main"); // for auto_create_pr branch check
+        let result = "All work done.\nPR_URL=https://github.com/org/repo/pull/1\nVERDICT=DONE";
+
+        callback(
+            &db,
+            "20260325-252c",
+            "engineer",
+            result,
+            "RIG-252c",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        // Should transition normally
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves
+                .iter()
+                .any(|(id, status)| id == "RIG-252c" && status == "review"),
+            "normal DONE should still move to review, got: {moves:?}"
         );
     }
 }
