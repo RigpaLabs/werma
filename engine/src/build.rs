@@ -263,8 +263,8 @@ mod tests {
             }
         ]);
 
-        let target = current_target();
-        let asset_name = format!("werma-{target}.tar.gz");
+        // Use a fixed target so the test is platform-independent
+        let asset_name = "werma-aarch64-apple-darwin.tar.gz";
 
         let releases: Vec<serde_json::Value> =
             serde_json::from_value(releases_json).expect("valid JSON");
