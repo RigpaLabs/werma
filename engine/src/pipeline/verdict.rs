@@ -543,6 +543,5 @@ mod tests {
         let body = extract_review_body(output).unwrap();
         assert!(body.contains("First finding."));
         assert!(body.contains("Second finding."));
-
     }
 }
