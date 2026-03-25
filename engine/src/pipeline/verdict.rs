@@ -168,6 +168,39 @@ pub fn parse_pr_url(result: &str) -> Option<String> {
     None
 }
 
+/// Extract the review body from reviewer output for posting as a PR comment.
+///
+/// Uses the `---COMMENT---` block if present (preferred — structured output).
+/// Falls back to extracting everything except the verdict line.
+pub fn extract_review_body(output: &str) -> Option<String> {
+    // Prefer structured comment blocks — reviewer is instructed to use them
+    let comments = parse_comments(output);
+    if !comments.is_empty() {
+        return Some(comments.join("\n\n---\n\n"));
+    }
+
+    // Fallback: strip verdict lines and return the rest (trimmed)
+    let body: String = output
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with("VERDICT=")
+                && !trimmed.starts_with("REVIEW_VERDICT=")
+                && !trimmed.starts_with("QA_VERDICT=")
+                && !trimmed.starts_with("DEPLOY_VERDICT=")
+                && !trimmed.starts_with("FIX_VERDICT=")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// Story point thresholds for track routing.
 const HEAVY_TRACK_THRESHOLD: i32 = 8;
 
@@ -401,5 +434,48 @@ mod tests {
         let output = "---COMMENT---\nLine one.\nLine two.\nLine three.\n---END COMMENT---";
         let comments = parse_comments(output);
         assert_eq!(comments, vec!["Line one.\nLine two.\nLine three."]);
+    }
+
+    // ─── extract_review_body ─────────────────────────────────────────────
+
+    #[test]
+    fn extract_review_body_from_comment_block() {
+        let output = "Some preamble.\n---COMMENT---\n## Review\n- blocker: no tests\n- nit: typo\n---END COMMENT---\nREVIEW_VERDICT=REJECTED";
+        let body = extract_review_body(output);
+        assert!(body.is_some());
+        let body = body.unwrap();
+        assert!(body.contains("blocker: no tests"));
+        assert!(body.contains("nit: typo"));
+    }
+
+    #[test]
+    fn extract_review_body_fallback_strips_verdict() {
+        let output = "## Review\nLooks good, minor issues only.\nREVIEW_VERDICT=APPROVED";
+        let body = extract_review_body(output);
+        assert!(body.is_some());
+        let body = body.unwrap();
+        assert!(body.contains("Looks good"));
+        assert!(
+            !body.contains("REVIEW_VERDICT="),
+            "verdict line should be stripped"
+        );
+    }
+
+    #[test]
+    fn extract_review_body_empty_output() {
+        assert!(extract_review_body("").is_none());
+    }
+
+    #[test]
+    fn extract_review_body_only_verdict() {
+        assert!(extract_review_body("REVIEW_VERDICT=APPROVED").is_none());
+    }
+
+    #[test]
+    fn extract_review_body_multiple_comment_blocks() {
+        let output = "---COMMENT---\nFirst finding.\n---END COMMENT---\n---COMMENT---\nSecond finding.\n---END COMMENT---\nREVIEW_VERDICT=REJECTED";
+        let body = extract_review_body(output).unwrap();
+        assert!(body.contains("First finding."));
+        assert!(body.contains("Second finding."));
     }
 }

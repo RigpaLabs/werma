@@ -21,12 +21,12 @@ pub fn load_max_concurrent() -> usize {
         .unwrap_or(config::DEFAULT_GLOBAL_MAX_CONCURRENT as usize)
 }
 
-/// Load the launch stagger delay from pipeline config.
+/// Load the launch stagger delay (seconds between batch task launches).
 /// Falls back to the compiled-in default if config loading fails.
 pub fn load_launch_stagger_secs() -> u64 {
     loader::load_default()
-        .map(|c| c.launch_stagger_secs)
-        .unwrap_or(config::DEFAULT_LAUNCH_STAGGER_SECS)
+        .map(|c| u64::from(c.launch_stagger_secs))
+        .unwrap_or(u64::from(config::DEFAULT_LAUNCH_STAGGER_SECS))
 }
 
 // ─── Research pipeline (unchanged from old pipeline.rs) ──────────────────────
@@ -439,5 +439,13 @@ mod tests {
         let max = load_max_concurrent();
         assert!(max >= 1);
         assert!(max <= 20); // reasonable upper bound
+    }
+
+    // ─── load_launch_stagger_secs ────────────────────────────────────────
+
+    #[test]
+    fn load_launch_stagger_secs_returns_value() {
+        let stagger = load_launch_stagger_secs();
+        assert!(stagger <= 30); // reasonable upper bound
     }
 }

@@ -1,9 +1,7 @@
 pipeline: default
 description: Standard dev pipeline (analyst → engineer → reviewer)
-max_concurrent: 5
-max_retries: 1
-retry_delay_secs: 30
-launch_stagger_secs: 3
+max_concurrent: 8
+launch_stagger_secs: 4
 
 templates:
   verdict_instruction: "Output your verdict on the LAST line of your response"
@@ -17,8 +15,6 @@ stages:
     fallback: sonnet
     max_turns: 25
     manual: skip
-    max_retries: 2
-    retry_delay_secs: 30
     prompt: prompts/analyst.md
     transitions:
       done:

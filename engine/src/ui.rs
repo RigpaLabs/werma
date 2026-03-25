@@ -13,6 +13,20 @@ pub struct StatusBuckets<'a> {
     pub completed: &'a [Task],
     pub failed: &'a [Task],
     pub canceled: &'a [Task],
+    /// Total counts for terminal statuses (may differ from slice len when limited).
+    /// (completed_total, failed_total, canceled_total)
+    pub terminal_counts: Option<(usize, usize, usize)>,
+}
+
+impl StatusBuckets<'_> {
+    /// Get total counts for completed/failed/canceled, using terminal_counts if available.
+    fn totals(&self) -> (usize, usize, usize) {
+        self.terminal_counts.unwrap_or((
+            self.completed.len(),
+            self.failed.len(),
+            self.canceled.len(),
+        ))
+    }
 }
 
 // ─── ANSI color helpers (for String buffers) ─────────────────────────────────
@@ -237,6 +251,7 @@ pub fn render_status_buf(
         completed,
         failed,
         canceled,
+        ..
     } = buckets;
     let mut buf = String::new();
 
@@ -285,22 +300,20 @@ pub fn render_status_buf(
     }
 
     // Completed + Failed + Canceled
+    let (total_completed, total_failed, total_canceled) = buckets.totals();
     let _ = writeln!(
         buf,
         " {} {}     {} {}     {} {}",
         dimmed("✓"),
-        dimmed(&format!("completed ({})", completed.len())),
+        dimmed(&format!("completed ({total_completed})")),
         red("✗"),
-        red(&format!("failed ({})", failed.len())),
+        red(&format!("failed ({total_failed})")),
         dimmed("⊘"),
-        dimmed(&format!("canceled ({})", canceled.len())),
+        dimmed(&format!("canceled ({total_canceled})")),
     );
 
-    let recent: Vec<&Task> = completed.iter().rev().take(10).collect();
-    let failed_recent: Vec<&Task> = failed.iter().rev().take(5).collect();
-    let canceled_recent: Vec<&Task> = canceled.iter().rev().take(5).collect();
-
-    for task in &recent {
+    // Data is already sorted by finished_at DESC and limited by the caller
+    for task in *completed {
         let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
@@ -308,7 +321,7 @@ pub fn render_status_buf(
         write_task_line(&mut buf, task, &dur, 45);
     }
 
-    for task in &failed_recent {
+    for task in *failed {
         let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
@@ -316,7 +329,7 @@ pub fn render_status_buf(
         write_task_line(&mut buf, task, &dur, 45);
     }
 
-    for task in &canceled_recent {
+    for task in *canceled {
         let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
@@ -348,6 +361,7 @@ pub fn render_compact_buf(
         completed,
         failed,
         canceled,
+        ..
     } = buckets;
     let mut buf = String::new();
 
@@ -412,8 +426,8 @@ pub fn render_compact_buf(
         let _ = writeln!(buf, " {sep}");
     }
 
-    let recent: Vec<&Task> = completed.iter().rev().take(5).collect();
-    for task in &recent {
+    // Data is already sorted by finished_at DESC and limited by the caller
+    for task in *completed {
         let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
@@ -430,8 +444,7 @@ pub fn render_compact_buf(
         );
     }
 
-    let failed_recent: Vec<&Task> = failed.iter().rev().take(5).collect();
-    for task in &failed_recent {
+    for task in *failed {
         let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
@@ -448,8 +461,7 @@ pub fn render_compact_buf(
         );
     }
 
-    let canceled_recent: Vec<&Task> = canceled.iter().rev().take(5).collect();
-    for task in &canceled_recent {
+    for task in *canceled {
         let dur = match (task.started_at.as_deref(), task.finished_at.as_deref()) {
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
@@ -473,12 +485,13 @@ pub fn render_compact_buf(
     } else {
         String::new()
     };
+    let (total_completed, total_failed, total_canceled) = buckets.totals();
     let _ = writeln!(
         buf,
         " {} done  {} fail  {} canceled{}",
-        dimmed(&completed.len().to_string()),
-        red(&failed.len().to_string()),
-        dimmed(&canceled.len().to_string()),
+        dimmed(&total_completed.to_string()),
+        red(&total_failed.to_string()),
+        dimmed(&total_canceled.to_string()),
         dimmed(&refresh_str),
     );
 
@@ -586,6 +599,7 @@ mod tests {
             completed: &[],
             failed: &[],
             canceled: &[],
+            terminal_counts: None,
         };
         let buf = render_status_buf(&buckets, Some(3), 80, 0);
         assert!(buf.contains("running (0)"));
@@ -603,6 +617,7 @@ mod tests {
             completed: &[],
             failed: &[],
             canceled: &[],
+            terminal_counts: None,
         };
         let buf = render_compact_buf(&buckets, Some(5), 80, 0);
         // ANSI codes wrap the numbers, so check for the text without exact formatting

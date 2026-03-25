@@ -139,9 +139,19 @@ fn main() -> anyhow::Result<()> {
             compact,
             plain,
             interval,
+            all,
         } => {
             let db = open_db()?;
-            commands::task::cmd_status(&db, watch, compact, plain, interval)?;
+            let cfg = config::UserConfig::load();
+            commands::task::cmd_status(
+                &db,
+                watch,
+                compact,
+                plain,
+                interval,
+                all,
+                cfg.resolved_completed_limit(),
+            )?;
         }
 
         cli::Commands::View { id } => {
@@ -285,6 +295,10 @@ fn main() -> anyhow::Result<()> {
             let wdir = werma_dir()?;
             commands::review::cmd_review(&db, &wdir, target.as_deref(), dir.as_deref(), force)?;
         }
+
+        cli::Commands::Config { action } => match action {
+            cli::ConfigAction::Show => commands::config_cmd::cmd_config_show()?,
+        },
 
         cli::Commands::Dash => {
             let db = open_db()?;
@@ -438,11 +452,13 @@ mod tests {
                     compact,
                     plain,
                     interval,
+                    all,
                 } => {
                     assert!(!watch);
                     assert!(!compact);
                     assert!(!plain);
                     assert_eq!(interval, 3);
+                    assert!(!all);
                 }
                 other => panic!("expected Status, got {other:?}"),
             }
@@ -464,11 +480,13 @@ mod tests {
                     compact,
                     plain,
                     interval,
+                    all,
                 } => {
                     assert!(watch);
                     assert!(compact);
                     assert!(!plain);
                     assert_eq!(interval, 5);
+                    assert!(!all);
                 }
                 other => panic!("expected Status, got {other:?}"),
             }
@@ -482,11 +500,23 @@ mod tests {
                     compact,
                     plain,
                     interval,
+                    all,
                 } => {
                     assert!(!watch);
                     assert!(!compact);
                     assert!(plain);
                     assert_eq!(interval, 3);
+                    assert!(!all);
+                }
+                other => panic!("expected Status, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_status_all_flag() {
+            match parse(&["st", "--all"]) {
+                Commands::Status { all, .. } => {
+                    assert!(all);
                 }
                 other => panic!("expected Status, got {other:?}"),
             }

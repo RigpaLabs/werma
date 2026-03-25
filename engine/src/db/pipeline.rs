@@ -162,6 +162,22 @@ impl super::Db {
         Ok(count > 0)
     }
 
+    /// Check if any pipeline task is currently running for this issue (any stage).
+    ///
+    /// Used to prevent cross-stage races: e.g. don't launch engineer while
+    /// reviewer's tmux session is still alive (RIG-296).
+    pub fn has_running_pipeline_task_for_issue(&self, issue_id: &str) -> Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE linear_issue_id = ?1
+               AND pipeline_stage != ''
+               AND status = 'running'",
+            params![issue_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Check if callback was recently fired for a task (within `window_secs` seconds).
     pub fn is_callback_recently_fired(&self, task_id: &str, window_secs: i64) -> Result<bool> {
         let fired_at: String = self
@@ -209,6 +225,17 @@ impl super::Db {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    /// Increment callback_attempts counter for a task. Returns the new count.
+    /// Uses UPDATE ... RETURNING for atomicity (SQLite 3.35+).
+    pub fn increment_callback_attempts(&self, id: &str) -> Result<i32> {
+        let count: i32 = self.conn.query_row(
+            "UPDATE tasks SET callback_attempts = COALESCE(callback_attempts, 0) + 1 WHERE id = ?1 RETURNING callback_attempts",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
     }
 
     // --- PR Reviewed ---
@@ -644,5 +671,55 @@ mod tests {
 
         let unpushed = db.unpushed_linear_tasks().unwrap();
         assert!(unpushed.is_empty());
+    }
+
+    // ─── RIG-296: cross-stage race guard ─────────────────────────────
+
+    #[test]
+    fn has_running_pipeline_task_for_issue_empty() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(!db.has_running_pipeline_task_for_issue("RIG-296").unwrap());
+    }
+
+    #[test]
+    fn has_running_pipeline_task_for_issue_detects_running() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut task = make_test_task("20260325-001");
+        task.linear_issue_id = "RIG-296".to_string();
+        task.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&task).unwrap();
+        db.set_task_status("20260325-001", Status::Running).unwrap();
+
+        assert!(db.has_running_pipeline_task_for_issue("RIG-296").unwrap());
+        // Different issue → not blocked
+        assert!(!db.has_running_pipeline_task_for_issue("RIG-999").unwrap());
+    }
+
+    #[test]
+    fn has_running_pipeline_task_ignores_completed() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut task = make_test_task("20260325-002");
+        task.linear_issue_id = "RIG-296".to_string();
+        task.pipeline_stage = "reviewer".to_string();
+        task.status = Status::Completed;
+        db.insert_task(&task).unwrap();
+
+        assert!(!db.has_running_pipeline_task_for_issue("RIG-296").unwrap());
+    }
+
+    #[test]
+    fn has_running_pipeline_task_ignores_non_pipeline() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Non-pipeline task (empty pipeline_stage) should not block
+        let mut task = make_test_task("20260325-003");
+        task.linear_issue_id = "RIG-296".to_string();
+        task.pipeline_stage = String::new();
+        db.insert_task(&task).unwrap();
+        db.set_task_status("20260325-003", Status::Running).unwrap();
+
+        assert!(!db.has_running_pipeline_task_for_issue("RIG-296").unwrap());
     }
 }

@@ -1,11 +1,10 @@
+pub mod fakes;
 mod pipeline;
 mod schedule;
 mod task;
 mod usage;
 
-#[allow(unused_imports)]
 pub use schedule::ScheduleRepository;
-#[allow(unused_imports)]
 pub use task::TaskRepository;
 
 use anyhow::{Context, Result};
@@ -20,6 +19,10 @@ const MIGRATION_003_SQL: &str = include_str!("../../migrations/003_estimate.sql"
 const MIGRATION_004_SQL: &str = include_str!("../../migrations/004_normalize_linear_ids.sql");
 const MIGRATION_005_SQL: &str = include_str!("../../migrations/005_callback_fired_at.sql");
 const MIGRATION_006_SQL: &str = include_str!("../../migrations/006_add_canceled_status.sql");
+const MIGRATION_007_SQL: &str =
+    include_str!("../../migrations/007_callback_attempts_and_indexes.sql");
+const MIGRATION_008_SQL: &str = include_str!("../../migrations/008_retry.sql");
+
 pub struct Db {
     pub(super) conn: Connection,
 }
@@ -98,21 +101,20 @@ impl Db {
                 .execute_batch(MIGRATION_006_SQL)
                 .context("migration 006_add_canceled_status")?;
         }
-        // 007: add retry_count and retry_after columns (each idempotent — ignore "duplicate column")
-        if let Err(e) = self
-            .conn
-            .execute_batch("ALTER TABLE tasks ADD COLUMN retry_count INTEGER DEFAULT 0;")
-        {
-            if !e.to_string().contains("duplicate column") {
-                return Err(e).context("migration 007_retry_count");
+        // 007: add callback_attempts column + performance indexes.
+        // ALTER TABLE is idempotent — ignore "duplicate column" error.
+        // CREATE INDEX uses IF NOT EXISTS, so re-running is always safe.
+        if let Err(e) = self.conn.execute_batch(MIGRATION_007_SQL) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(e).context("migration 007_callback_attempts_and_indexes");
             }
         }
-        if let Err(e) = self
-            .conn
-            .execute_batch("ALTER TABLE tasks ADD COLUMN retry_after TEXT;")
-        {
-            if !e.to_string().contains("duplicate column") {
-                return Err(e).context("migration 007_retry_after");
+        // 008: add retry_count and retry_after columns for auto-retry.
+        if let Err(e) = self.conn.execute_batch(MIGRATION_008_SQL) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(e).context("migration 008_retry");
             }
         }
         Ok(())
@@ -152,7 +154,7 @@ pub(super) fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         repo_hash: row.get(19)?,
         estimate: row.get(20).unwrap_or(0),
         retry_count: row.get(21).unwrap_or(0),
-        retry_after: row.get(22).unwrap_or(None),
+        retry_after: row.get(22).ok(),
     })
 }
 
@@ -226,122 +228,7 @@ mod tests {
 
     // ─── Fake repository tests ──────────────────────────────────────────
 
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-
-    /// In-memory fake implementing TaskRepository for testing consumers
-    /// without touching SQLite.
-    struct FakeTaskRepo {
-        tasks: RefCell<HashMap<String, crate::models::Task>>,
-    }
-
-    impl FakeTaskRepo {
-        fn new() -> Self {
-            Self {
-                tasks: RefCell::new(HashMap::new()),
-            }
-        }
-    }
-
-    impl TaskRepository for FakeTaskRepo {
-        fn insert_task(&self, task: &crate::models::Task) -> anyhow::Result<()> {
-            self.tasks
-                .borrow_mut()
-                .insert(task.id.clone(), task.clone());
-            Ok(())
-        }
-
-        fn task(&self, id: &str) -> anyhow::Result<Option<crate::models::Task>> {
-            Ok(self.tasks.borrow().get(id).cloned())
-        }
-
-        fn list_tasks(
-            &self,
-            status: Option<crate::models::Status>,
-        ) -> anyhow::Result<Vec<crate::models::Task>> {
-            let tasks = self.tasks.borrow();
-            let iter = tasks.values();
-            match status {
-                Some(s) => Ok(iter.filter(|t| t.status == s).cloned().collect()),
-                None => Ok(iter.cloned().collect()),
-            }
-        }
-
-        fn set_task_status(&self, id: &str, status: crate::models::Status) -> anyhow::Result<()> {
-            if let Some(task) = self.tasks.borrow_mut().get_mut(id) {
-                task.status = status;
-            }
-            Ok(())
-        }
-
-        fn find_next_pending(&self) -> anyhow::Result<Option<crate::models::Task>> {
-            let tasks = self.tasks.borrow();
-            Ok(tasks
-                .values()
-                .filter(|t| t.status == crate::models::Status::Pending)
-                .min_by_key(|t| t.priority)
-                .cloned())
-        }
-
-        fn update_task_field(&self, id: &str, field: &str, value: &str) -> anyhow::Result<()> {
-            if let Some(task) = self.tasks.borrow_mut().get_mut(id) {
-                match field {
-                    "session_id" => task.session_id = value.to_string(),
-                    _ => {}
-                }
-            }
-            Ok(())
-        }
-    }
-
-    /// In-memory fake implementing ScheduleRepository.
-    struct FakeScheduleRepo {
-        schedules: RefCell<HashMap<String, crate::models::Schedule>>,
-    }
-
-    impl FakeScheduleRepo {
-        fn new() -> Self {
-            Self {
-                schedules: RefCell::new(HashMap::new()),
-            }
-        }
-    }
-
-    impl ScheduleRepository for FakeScheduleRepo {
-        fn insert_schedule(&self, sched: &crate::models::Schedule) -> anyhow::Result<()> {
-            self.schedules
-                .borrow_mut()
-                .insert(sched.id.clone(), sched.clone());
-            Ok(())
-        }
-
-        fn list_schedules(&self) -> anyhow::Result<Vec<crate::models::Schedule>> {
-            Ok(self.schedules.borrow().values().cloned().collect())
-        }
-
-        fn schedule(&self, id: &str) -> anyhow::Result<Option<crate::models::Schedule>> {
-            Ok(self.schedules.borrow().get(id).cloned())
-        }
-
-        fn delete_schedule(&self, id: &str) -> anyhow::Result<()> {
-            self.schedules.borrow_mut().remove(id);
-            Ok(())
-        }
-
-        fn set_schedule_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<()> {
-            if let Some(sched) = self.schedules.borrow_mut().get_mut(id) {
-                sched.enabled = enabled;
-            }
-            Ok(())
-        }
-
-        fn set_schedule_last_enqueued(&self, id: &str, timestamp: &str) -> anyhow::Result<()> {
-            if let Some(sched) = self.schedules.borrow_mut().get_mut(id) {
-                sched.last_enqueued = timestamp.to_string();
-            }
-            Ok(())
-        }
-    }
+    use super::fakes::{FakeScheduleRepo, FakeTaskRepo};
 
     #[test]
     fn fake_task_repo_insert_and_get() {

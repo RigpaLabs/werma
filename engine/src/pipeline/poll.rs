@@ -21,6 +21,7 @@ pub fn is_research_issue(labels: &[&str]) -> bool {
 /// Poll Linear for issues at pipeline-relevant statuses and create tasks.
 pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<()> {
     let config = load_default()?;
+    let user_cfg = crate::config::UserConfig::load();
 
     let mut total_created = 0;
     let mut total_skipped = 0;
@@ -63,7 +64,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             continue;
         }
 
-        let working_dir = crate::linear::infer_working_dir(title, &labels);
+        let working_dir = crate::linear::infer_working_dir(title, &labels, &user_cfg);
         if crate::linear::validate_working_dir(&working_dir).is_none() {
             eprintln!(
                 "  ! skipping {identifier} [{title}]: working dir '{working_dir}' does not exist"
@@ -184,13 +185,24 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     continue;
                 }
 
+                // RIG-296: cross-stage guard — skip if another pipeline task is running
+                // for this issue. Prevents spawning engineer while reviewer is still active.
+                if db.has_running_pipeline_task_for_issue(identifier)? {
+                    eprintln!(
+                        "  ~ skipping {identifier} stage={stage_name}: \
+                         another pipeline task is running for this issue"
+                    );
+                    total_skipped += 1;
+                    continue;
+                }
+
                 // Manual issues: skip execution stages (skip_manual=true)
                 if crate::linear::is_manual_issue(&labels) && stage_cfg.skip_manual() {
                     total_skipped += 1;
                     continue;
                 }
 
-                let working_dir = crate::linear::infer_working_dir(title, &labels);
+                let working_dir = crate::linear::infer_working_dir(title, &labels, &user_cfg);
                 if crate::linear::validate_working_dir(&working_dir).is_none() {
                     eprintln!(
                         "  ! skipping {identifier} [{title}] stage={stage_name}: working dir '{working_dir}' does not exist"
@@ -340,6 +352,17 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
+            // RIG-296: cross-stage guard (label path) — skip if another pipeline
+            // task is running for this issue.
+            if db.has_running_pipeline_task_for_issue(identifier)? {
+                eprintln!(
+                    "  ~ skipping {identifier} stage={stage_name}: \
+                     another pipeline task is running for this issue (label path)"
+                );
+                total_skipped += 1;
+                continue;
+            }
+
             // RIG-274: Skip analyst if spec is already done (has spec:done or {label}:done).
             // This prevents re-running analyst on issues that already have a completed spec,
             // even if the trigger label is re-added (e.g., after failed label removal).
@@ -376,7 +399,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 }
             }
 
-            let working_dir = crate::linear::infer_working_dir(title, &labels);
+            let working_dir = crate::linear::infer_working_dir(title, &labels, &user_cfg);
             if crate::linear::validate_working_dir(&working_dir).is_none() {
                 eprintln!(
                     "  ! skipping {identifier} [{title}] stage={stage_name}: working dir '{working_dir}' does not exist"
@@ -774,5 +797,89 @@ stages:
             "only active issue should spawn engineer task"
         );
         assert_eq!(engineer_tasks[0].linear_issue_id, "RIG-303");
+    }
+
+    /// RIG-296: poller should NOT create an engineer task if a reviewer task
+    /// is still running for the same issue.
+    #[test]
+    fn poll_skips_engineer_when_reviewer_running_for_same_issue() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Reviewer is running for RIG-296
+        let mut reviewer = crate::db::make_test_task("20260325-rev");
+        reviewer.status = crate::models::Status::Running;
+        reviewer.linear_issue_id = "RIG-296".to_string();
+        reviewer.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&reviewer).unwrap();
+        db.set_task_status("20260325-rev", crate::models::Status::Running)
+            .unwrap();
+
+        // Issue is in "In Progress" (e.g., after callback moved it but reviewer lingers)
+        let issue = serde_json::json!({
+            "id": "uuid-296",
+            "identifier": "RIG-296",
+            "title": "Test werma issue",
+            "description": "Fix race condition",
+            "state": {"type": "started"},
+            "estimate": 3,
+            "labels": {
+                "nodes": [{"name": "repo:werma"}]
+            }
+        });
+        linear.set_issues_for_status("in_progress", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // Should NOT create an engineer task — reviewer is still running
+        let engineer_tasks = db
+            .tasks_by_linear_issue("RIG-296", Some("engineer"), false)
+            .unwrap();
+        assert!(
+            engineer_tasks.is_empty(),
+            "should not create engineer task while reviewer is running"
+        );
+    }
+
+    /// RIG-296: poller should create engineer task once reviewer completes.
+    #[test]
+    fn poll_creates_engineer_after_reviewer_completes() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Reviewer completed and pushed (cycle done)
+        let mut reviewer = crate::db::make_test_task("20260325-rev");
+        reviewer.status = crate::models::Status::Completed;
+        reviewer.linear_issue_id = "RIG-296".to_string();
+        reviewer.pipeline_stage = "reviewer".to_string();
+        reviewer.linear_pushed = true;
+        db.insert_task(&reviewer).unwrap();
+
+        let issue = serde_json::json!({
+            "id": "uuid-296",
+            "identifier": "RIG-296",
+            "title": "Test werma issue",
+            "description": "Fix race condition",
+            "state": {"type": "started"},
+            "estimate": 3,
+            "labels": {
+                "nodes": [{"name": "repo:werma"}]
+            }
+        });
+        linear.set_issues_for_status("in_progress", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // Should create an engineer task — reviewer is done
+        let engineer_tasks = db
+            .tasks_by_linear_issue("RIG-296", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(
+            engineer_tasks.len(),
+            1,
+            "should create engineer task after reviewer completes"
+        );
     }
 }
