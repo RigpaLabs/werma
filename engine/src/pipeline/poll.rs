@@ -371,17 +371,20 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
-            // RIG-274: Skip analyst if spec is already done (has spec:done or {label}:done).
-            // This prevents re-running analyst on issues that already have a completed spec,
-            // even if the trigger label is re-added (e.g., after failed label removal).
+            // RIG-274/RIG-300: Skip analyst if already processed (has spec:done,
+            // {label}:done, or {label}:blocked). Prevents re-running analyst on
+            // issues that were already analyzed or blocked.
             if *stage_name == "analyst" {
                 let done_label = format!("{label}:done");
-                let has_done = labels.iter().any(|l| {
-                    l.eq_ignore_ascii_case("spec:done") || l.eq_ignore_ascii_case(&done_label)
+                let blocked_label = format!("{label}:blocked");
+                let has_result = labels.iter().any(|l| {
+                    l.eq_ignore_ascii_case("spec:done")
+                        || l.eq_ignore_ascii_case(&done_label)
+                        || l.eq_ignore_ascii_case(&blocked_label)
                 });
-                if has_done {
+                if has_result {
                     eprintln!(
-                        "  ~ skipping analyst for {identifier}: spec already done (has done label)"
+                        "  ~ skipping analyst for {identifier}: already processed (has result label)"
                     );
                     // Clean up the stale trigger label
                     if let Err(e) = linear.remove_label(issue_id, &label) {
@@ -664,6 +667,41 @@ stages:
         assert!(
             tasks.is_empty(),
             "should not create analyst task when analyze:done present"
+        );
+    }
+
+    #[test]
+    fn poll_skips_analyst_when_analyze_blocked_label_present() {
+        // RIG-300: issues with analyze:blocked label should be skipped
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        let issue = fake_issue(
+            "uuid-blocked",
+            "RIG-300",
+            "Test werma issue",
+            &["analyze", "analyze:blocked", "repo:werma"],
+        );
+        linear.set_issues_for_label("analyze", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        let tasks = db
+            .tasks_by_linear_issue("RIG-300", Some("analyst"), false)
+            .unwrap();
+        assert!(
+            tasks.is_empty(),
+            "should not create analyst task when analyze:blocked present"
+        );
+
+        // The stale "analyze" trigger label should be removed
+        let removes = linear.remove_label_calls.borrow();
+        assert!(
+            removes
+                .iter()
+                .any(|(id, label)| id == "uuid-blocked" && label == "analyze"),
+            "should remove stale 'analyze' label when analyze:blocked present, got: {removes:?}"
         );
     }
 

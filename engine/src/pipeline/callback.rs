@@ -289,16 +289,23 @@ pub fn callback(
             return Err(e);
         }
 
-        // Analyst label swap: remove trigger label, add "analyze:done" + "spec:done"
+        // RIG-300: Analyst label swap — remove trigger label, add verdict-specific label.
+        // done/already_done → "analyze:done" + "spec:done"
+        // blocked → "analyze:blocked" (no spec:done — spec wasn't completed)
         if stage == "analyst" {
             if let Some(ref label) = stage_cfg.linear_label {
                 if let Err(e) = linear.remove_label(linear_issue_id, label) {
                     eprintln!("callback: failed to remove '{label}' from {linear_issue_id}: {e}");
                 }
-                let done_label = format!("{label}:done");
-                if let Err(e) = linear.add_label(linear_issue_id, &done_label) {
+                let suffix = if verdict_str == "blocked" {
+                    "blocked"
+                } else {
+                    "done"
+                };
+                let result_label = format!("{label}:{suffix}");
+                if let Err(e) = linear.add_label(linear_issue_id, &result_label) {
                     eprintln!(
-                        "callback: failed to add '{done_label}' label to {linear_issue_id}: {e}"
+                        "callback: failed to add '{result_label}' label to {linear_issue_id}: {e}"
                     );
                 }
             }
@@ -1494,8 +1501,9 @@ stages:
     }
 
     #[test]
-    fn callback_analyst_blocked_does_not_add_spec_done() {
-        // RIG-274: BLOCKED verdict should NOT add spec:done label
+    fn callback_analyst_blocked_adds_analyze_blocked_not_spec_done() {
+        // RIG-300: BLOCKED verdict should add analyze:blocked (not analyze:done)
+        // and should NOT add spec:done
         let db = crate::db::Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
@@ -1530,6 +1538,30 @@ stages:
                 .iter()
                 .any(|(id, label)| id == "RIG-274b" && label == "spec:done"),
             "BLOCKED should NOT add 'spec:done' label, got: {adds:?}"
+        );
+
+        // RIG-300: should add analyze:blocked label
+        assert!(
+            adds.iter()
+                .any(|(id, label)| id == "RIG-274b" && label == "analyze:blocked"),
+            "BLOCKED should add 'analyze:blocked' label, got: {adds:?}"
+        );
+
+        // RIG-300: should NOT add analyze:done label
+        assert!(
+            !adds
+                .iter()
+                .any(|(id, label)| id == "RIG-274b" && label == "analyze:done"),
+            "BLOCKED should NOT add 'analyze:done' label, got: {adds:?}"
+        );
+
+        // Trigger label should be removed
+        let removes = linear.remove_label_calls.borrow();
+        assert!(
+            removes
+                .iter()
+                .any(|(id, label)| id == "RIG-274b" && label == "analyze"),
+            "BLOCKED should remove 'analyze' trigger label, got: {removes:?}"
         );
     }
 

@@ -1053,10 +1053,11 @@ fn callback_analyst_adds_done_label() {
     );
 }
 
-// ─── Test 20c: callback_analyst_blocked_also_adds_done_label ─────────────────
+// ─── Test 20c: callback_analyst_blocked_adds_blocked_label ───────────────────
 
 #[test]
-fn callback_analyst_blocked_also_adds_done_label() {
+fn callback_analyst_blocked_adds_blocked_label() {
+    // RIG-300: BLOCKED verdict should add analyze:blocked (not analyze:done)
     let db = Db::open_in_memory().unwrap();
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
@@ -1082,12 +1083,29 @@ fn callback_analyst_blocked_also_adds_done_label() {
     )
     .unwrap();
 
-    // analyze:done label should be added even for BLOCKED verdict
+    // RIG-300: analyze:blocked label should be added for BLOCKED verdict
     let adds = linear.add_label_calls.borrow();
     assert!(
         adds.iter()
+            .any(|(id, label)| id == "RIG-219B" && label == "analyze:blocked"),
+        "analyst BLOCKED callback should add 'analyze:blocked' label, got: {adds:?}"
+    );
+
+    // Should NOT add analyze:done for blocked verdict
+    assert!(
+        !adds
+            .iter()
             .any(|(id, label)| id == "RIG-219B" && label == "analyze:done"),
-        "analyst BLOCKED callback should also add 'analyze:done' label, got: {adds:?}"
+        "analyst BLOCKED callback should NOT add 'analyze:done' label, got: {adds:?}"
+    );
+
+    // Trigger label should be removed
+    let removes = linear.remove_label_calls.borrow();
+    assert!(
+        removes
+            .iter()
+            .any(|(id, label)| id == "RIG-219B" && label == "analyze"),
+        "analyst BLOCKED callback should remove 'analyze' trigger label, got: {removes:?}"
     );
 }
 
