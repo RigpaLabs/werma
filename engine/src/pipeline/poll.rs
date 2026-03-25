@@ -228,6 +228,47 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     continue;
                 }
 
+                // RIG-309: Circuit breaker — cap total reviewer spawns per issue to prevent
+                // infinite loops when reviewer produces empty results (no verdict → issue stays
+                // in Review → poller spawns another reviewer → repeat).
+                if stage_name == "reviewer" {
+                    let max_rounds = stage_cfg
+                        .review_round_limit()
+                        .unwrap_or(super::callback::DEFAULT_MAX_REVIEW_ROUNDS)
+                        as i64;
+                    let total_reviewer_tasks =
+                        db.count_all_tasks_for_issue_stage(identifier, "reviewer")?;
+                    if total_reviewer_tasks >= max_rounds * 2 {
+                        eprintln!(
+                            "  ! {identifier} circuit breaker: {total_reviewer_tasks} total reviewer \
+                             tasks (limit: {}), skipping spawn",
+                            max_rounds * 2
+                        );
+                        if total_reviewer_tasks == max_rounds * 2 {
+                            // Only move to backlog on first trigger, not every poll
+                            if let Err(e) = linear.move_issue_by_name(issue_id, "backlog") {
+                                eprintln!(
+                                    "  ! circuit breaker: failed to move {identifier} to backlog: {e}"
+                                );
+                            }
+                            if let Err(e) = linear.comment(
+                                identifier,
+                                &format!(
+                                    "**Reviewer circuit breaker triggered** — {total_reviewer_tasks} \
+                                     reviewer tasks spawned without resolution. Moving to Backlog. \
+                                     Manual intervention required."
+                                ),
+                            ) {
+                                eprintln!(
+                                    "  ! circuit breaker: failed to post comment on {identifier}: {e}"
+                                );
+                            }
+                        }
+                        total_skipped += 1;
+                        continue;
+                    }
+                }
+
                 // For reviewer stage: skip if PR is already merged (manual merge while in Review)
                 // RIG-306: Only skip if merged AND no open PR exists (re-worked issues have both)
                 if stage_name == "reviewer"
@@ -430,6 +471,25 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             if *stage_name == "reviewer" && db.has_any_review_task_for_issue(identifier)? {
                 total_skipped += 1;
                 continue;
+            }
+
+            // RIG-309: Circuit breaker (label-based path) — same logic as status-based path.
+            if *stage_name == "reviewer" {
+                let max_rounds = stage_cfg
+                    .review_round_limit()
+                    .unwrap_or(super::callback::DEFAULT_MAX_REVIEW_ROUNDS)
+                    as i64;
+                let total_reviewer_tasks =
+                    db.count_all_tasks_for_issue_stage(identifier, "reviewer")?;
+                if total_reviewer_tasks >= max_rounds * 2 {
+                    eprintln!(
+                        "  ! {identifier} circuit breaker: {total_reviewer_tasks} total reviewer \
+                         tasks (limit: {}), skipping spawn (label path)",
+                        max_rounds * 2
+                    );
+                    total_skipped += 1;
+                    continue;
+                }
             }
 
             // For reviewer stage: skip if PR is already merged
@@ -744,6 +804,47 @@ stages:
             "analyst task must have linear_issue_id set"
         );
         assert_eq!(tasks[0].pipeline_stage, "analyst");
+    }
+
+    #[test]
+    fn poll_circuit_breaker_blocks_excessive_reviewer_spawns() {
+        // RIG-309: after max_review_rounds * 2 reviewer tasks, poller should stop spawning
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Insert 6 completed+pushed reviewer tasks (max_review_rounds=3, limit=3*2=6)
+        for i in 0..6 {
+            let mut task = crate::db::make_test_task(&format!("20260326-rev{i}"));
+            task.status = crate::models::Status::Completed;
+            task.linear_issue_id = "RIG-309".to_string();
+            task.pipeline_stage = "reviewer".to_string();
+            task.linear_pushed = true;
+            db.insert_task(&task).unwrap();
+        }
+
+        // Issue in Review status
+        let issue = serde_json::json!({
+            "id": "uuid-309",
+            "identifier": "RIG-309",
+            "title": "Fix reviewer",
+            "description": "Fix it",
+            "state": {"type": "started"},
+            "estimate": 3,
+            "labels": {"nodes": [{"name": "repo:werma"}]}
+        });
+        linear.set_issues_for_status("review", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // No new reviewer task should be created
+        let tasks = db
+            .tasks_by_linear_issue("RIG-309", Some("reviewer"), true)
+            .unwrap();
+        assert!(
+            tasks.is_empty(),
+            "circuit breaker should prevent spawning new reviewer task"
+        );
     }
 
     #[test]

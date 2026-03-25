@@ -231,6 +231,74 @@ pub(crate) fn post_pr_comment(
     Ok(true)
 }
 
+/// Check the latest review state on the open PR for a given issue.
+///
+/// Uses `gh pr view` to get the latest review decision. Returns the verdict
+/// string ("APPROVED" or "REJECTED") if a review was posted, or None if no
+/// review exists or no PR is found.
+///
+/// This is used as a fallback when the reviewer agent produces empty `result`
+/// (RIG-309): the agent may have posted a review via tool calls but the final
+/// text was empty, so we check GitHub directly.
+pub(crate) fn get_pr_review_verdict(
+    cmd: &dyn CommandRunner,
+    working_dir: &str,
+    identifier: &str,
+) -> Option<String> {
+    let working_dir = resolve_home(working_dir);
+
+    // Find open PR for this issue
+    let pr_output = cmd
+        .run(
+            "gh",
+            &[
+                "pr",
+                "list",
+                "--search",
+                identifier,
+                "--state",
+                "open",
+                "--json",
+                "number,headRefName,reviewDecision",
+                "--limit",
+                "5",
+            ],
+            Some(&working_dir),
+        )
+        .ok()?;
+
+    if !pr_output.success {
+        return None;
+    }
+
+    let text = pr_output.stdout_str();
+    let prs: Vec<serde_json::Value> = serde_json::from_str(&text).ok()?;
+    let identifier_lower = identifier.to_lowercase();
+
+    // Find the PR whose branch matches the issue identifier
+    for pr in &prs {
+        let branch_matches = pr["headRefName"]
+            .as_str()
+            .map(|b| b.to_lowercase().contains(&identifier_lower))
+            .unwrap_or(true); // fallback: assume match if no branch info
+
+        if !branch_matches {
+            continue;
+        }
+
+        // reviewDecision can be: "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", or null
+        if let Some(decision) = pr["reviewDecision"].as_str() {
+            return match decision {
+                "APPROVED" => Some("APPROVED".to_string()),
+                "CHANGES_REQUESTED" => Some("REJECTED".to_string()),
+                _ => None, // REVIEW_REQUIRED or other states = no actionable verdict
+            };
+        }
+    }
+
+    None
+}
+
 /// Derive a short title from a GitHub PR URL (e.g. "PR #42").
 pub(crate) fn pr_title_from_url(url: &str) -> String {
     url.rsplit('/')
@@ -376,6 +444,72 @@ mod tests {
 
         let result = post_pr_comment(&cmd, "/tmp", "Review text").unwrap();
         assert!(!result, "should return false when no PR found");
+    }
+
+    // ─── RIG-309: get_pr_review_verdict ────────────────────────────────
+
+    #[test]
+    fn get_pr_review_verdict_approved() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success(
+            r#"[{"number":42,"headRefName":"feat/rig-309-fix-reviewer","reviewDecision":"APPROVED"}]"#,
+        );
+
+        let verdict = get_pr_review_verdict(&cmd, "/tmp", "RIG-309");
+        assert_eq!(verdict, Some("APPROVED".to_string()));
+    }
+
+    #[test]
+    fn get_pr_review_verdict_changes_requested() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success(
+            r#"[{"number":42,"headRefName":"feat/rig-309-fix","reviewDecision":"CHANGES_REQUESTED"}]"#,
+        );
+
+        let verdict = get_pr_review_verdict(&cmd, "/tmp", "RIG-309");
+        assert_eq!(verdict, Some("REJECTED".to_string()));
+    }
+
+    #[test]
+    fn get_pr_review_verdict_no_review() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success(
+            r#"[{"number":42,"headRefName":"feat/rig-309-fix","reviewDecision":"REVIEW_REQUIRED"}]"#,
+        );
+
+        let verdict = get_pr_review_verdict(&cmd, "/tmp", "RIG-309");
+        assert_eq!(verdict, None);
+    }
+
+    #[test]
+    fn get_pr_review_verdict_null_decision() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success(
+            r#"[{"number":42,"headRefName":"feat/rig-309-fix","reviewDecision":null}]"#,
+        );
+
+        let verdict = get_pr_review_verdict(&cmd, "/tmp", "RIG-309");
+        assert_eq!(verdict, None);
+    }
+
+    #[test]
+    fn get_pr_review_verdict_no_matching_pr() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success(
+            r#"[{"number":42,"headRefName":"feat/rig-999-other","reviewDecision":"APPROVED"}]"#,
+        );
+
+        let verdict = get_pr_review_verdict(&cmd, "/tmp", "RIG-309");
+        assert_eq!(verdict, None);
+    }
+
+    #[test]
+    fn get_pr_review_verdict_no_prs() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("[]");
+
+        let verdict = get_pr_review_verdict(&cmd, "/tmp", "RIG-309");
+        assert_eq!(verdict, None);
     }
 
     #[test]
