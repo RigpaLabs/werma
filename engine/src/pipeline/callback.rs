@@ -5,7 +5,10 @@ use anyhow::{Result, anyhow};
 use super::config::PipelineConfig;
 use super::helpers::{infer_working_dir_from_issue, truncate_lines};
 use super::loader::{load_default, resolve_prompt};
-use super::pr::{auto_create_pr, has_open_pr_for_issue, post_pr_comment, pr_title_from_url};
+use super::pr::{
+    auto_create_pr, find_pr_number_for_issue, has_open_pr_for_issue, merge_pr, post_pr_comment,
+    pr_title_from_url,
+};
 use super::prompt::{build_vars, render_prompt};
 use super::verdict::{
     extract_rejection_feedback, extract_review_body, is_heavy_track, parse_comments,
@@ -341,6 +344,68 @@ pub fn callback(
                             "[CALLBACK] {linear_issue_id}: failed to post review as PR comment: {e}"
                         );
                     }
+                }
+            }
+        }
+
+        // RIG-281: Deployer DONE → engine merges PR (agent no longer calls gh pr merge)
+        if stage == "deployer" && verdict_str == "done" {
+            if let Some(pr_num) = find_pr_number_for_issue(cmd, working_dir, linear_issue_id) {
+                match merge_pr(cmd, working_dir, &pr_num) {
+                    Ok(true) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: PR #{pr_num} merge initiated \
+                             (task {task_id})"
+                        );
+                        if let Err(e) = linear.comment(
+                            linear_issue_id,
+                            &format!(
+                                "**Deploy: PR #{pr_num} merge initiated** (task: `{task_id}`). \
+                                 Squash merge with `--auto` — waiting for CI."
+                            ),
+                        ) {
+                            eprintln!(
+                                "callback: failed to post merge comment on {linear_issue_id}: {e}"
+                            );
+                        }
+                    }
+                    Ok(false) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: PR #{pr_num} merge failed \
+                             (task {task_id})"
+                        );
+                        if let Err(e) = linear.comment(
+                            linear_issue_id,
+                            &format!(
+                                "**Deploy: PR #{pr_num} merge failed** (task: `{task_id}`). \
+                                 Check CI status and conflicts."
+                            ),
+                        ) {
+                            eprintln!(
+                                "callback: failed to post merge-fail comment on \
+                                 {linear_issue_id}: {e}"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: merge_pr error for PR #{pr_num}: {e}"
+                        );
+                    }
+                }
+            } else {
+                eprintln!(
+                    "[CALLBACK] {linear_issue_id}: deployer DONE but no open PR found \
+                     (task {task_id})"
+                );
+                if let Err(e) = linear.comment(
+                    linear_issue_id,
+                    &format!(
+                        "**Deploy: no open PR found** (task: `{task_id}`). \
+                         Issue may already be merged or PR was not created."
+                    ),
+                ) {
+                    eprintln!("callback: failed to post no-PR comment on {linear_issue_id}: {e}");
                 }
             }
         }
@@ -1563,6 +1628,133 @@ stages:
         assert!(
             db.is_callback_recently_fired("20260324-unk", 60).unwrap(),
             "callback_fired_at should be set for unknown verdict"
+        );
+    }
+
+    // ─── deployer callback: engine merges PR (RIG-281) ──────────────────
+
+    #[test]
+    fn deployer_done_triggers_engine_merge() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let notifier = FakeNotifier::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+
+        // Seed a deployer task
+        let task = Task {
+            id: "20260325-dep".to_string(),
+            status: Status::Running,
+            task_type: "pipeline-deployer".to_string(),
+            linear_issue_id: "RIG-300".to_string(),
+            pipeline_stage: "deployer".to_string(),
+            working_dir: "/tmp".to_string(),
+            ..Default::default()
+        };
+        db.insert_task(&task).unwrap();
+
+        // Setup command responses:
+        // 1. find_pr_number_for_issue → gh pr list returns PR #42
+        cmd.push_success(r#"[{"number":42,"headRefName":"feat/rig-300-deploy"}]"#);
+        // 2. merge_pr → gh pr merge succeeds
+        cmd.push_success("Merged");
+
+        let result = "Deploy checks passed. Everything looks good.\nVERDICT=DONE";
+
+        callback(
+            &db,
+            "20260325-dep",
+            "deployer",
+            result,
+            "RIG-300",
+            "/tmp",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        // Verify merge was called
+        let calls = cmd.calls.borrow();
+        // Should have 2 calls: find PR + merge PR
+        assert!(
+            calls.len() >= 2,
+            "expected at least 2 gh calls, got {}",
+            calls.len()
+        );
+        // Second call should be gh pr merge
+        assert!(
+            calls[1].1.contains(&"merge".to_string()),
+            "second call should be gh pr merge"
+        );
+        assert!(
+            calls[1].1.contains(&"42".to_string()),
+            "merge should target PR #42"
+        );
+        assert!(
+            calls[1].1.contains(&"--auto".to_string()),
+            "must use --auto, never --admin"
+        );
+
+        // Verify Linear was notified
+        let comments = linear.comment_calls.borrow();
+        assert!(
+            comments
+                .iter()
+                .any(|(_, body)| body.contains("merge initiated")),
+            "should post merge comment to Linear"
+        );
+    }
+
+    #[test]
+    fn deployer_done_no_pr_found() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let notifier = FakeNotifier::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+
+        let task = Task {
+            id: "20260325-dep2".to_string(),
+            status: Status::Running,
+            task_type: "pipeline-deployer".to_string(),
+            linear_issue_id: "RIG-301".to_string(),
+            pipeline_stage: "deployer".to_string(),
+            working_dir: "/tmp".to_string(),
+            ..Default::default()
+        };
+        db.insert_task(&task).unwrap();
+
+        // find_pr_number_for_issue → empty list
+        cmd.push_success("[]");
+
+        let result = "All checks done.\nVERDICT=DONE";
+
+        callback(
+            &db,
+            "20260325-dep2",
+            "deployer",
+            result,
+            "RIG-301",
+            "/tmp",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        // Should still move to Done (transition happens regardless of merge outcome)
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves.iter().any(|(_, status)| status == "done"),
+            "deployer DONE should move to done status"
+        );
+
+        // Should post "no open PR found" comment
+        let comments = linear.comment_calls.borrow();
+        assert!(
+            comments
+                .iter()
+                .any(|(_, body)| body.contains("no open PR found")),
+            "should notify about missing PR"
         );
     }
 }

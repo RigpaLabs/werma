@@ -231,6 +231,96 @@ pub(crate) fn post_pr_comment(
     Ok(true)
 }
 
+/// Find the open PR number for a given Linear issue identifier.
+///
+/// Returns `Some(number)` if an open PR is found whose branch contains the identifier.
+pub(crate) fn find_pr_number_for_issue(
+    cmd: &dyn CommandRunner,
+    working_dir: &str,
+    identifier: &str,
+) -> Option<String> {
+    let working_dir = resolve_home(working_dir);
+
+    let output = cmd.run(
+        "gh",
+        &[
+            "pr",
+            "list",
+            "--search",
+            identifier,
+            "--state",
+            "open",
+            "--json",
+            "number,headRefName",
+            "--limit",
+            "10",
+        ],
+        Some(&working_dir),
+    );
+
+    match output {
+        Ok(o) if o.success => {
+            let text = o.stdout_str();
+            if text == "[]" || text.is_empty() {
+                return None;
+            }
+            let identifier_lower = identifier.to_lowercase();
+            if let Ok(prs) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
+                prs.iter().find_map(|pr| {
+                    let matches = match pr["headRefName"].as_str() {
+                        Some(branch) => branch.to_lowercase().contains(&identifier_lower),
+                        None => true,
+                    };
+                    if matches {
+                        pr["number"].as_i64().map(|n| n.to_string())
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Merge a PR by number using squash merge with branch deletion.
+///
+/// Uses `gh pr merge --squash --delete-branch --auto` to wait for CI.
+/// Returns Ok(true) if merge succeeded, Ok(false) if merge failed (e.g., conflicts).
+pub(crate) fn merge_pr(
+    cmd: &dyn CommandRunner,
+    working_dir: &str,
+    pr_number: &str,
+) -> Result<bool> {
+    let working_dir = resolve_home(working_dir);
+
+    let result = cmd
+        .run(
+            "gh",
+            &[
+                "pr",
+                "merge",
+                pr_number,
+                "--squash",
+                "--delete-branch",
+                "--auto",
+            ],
+            Some(&working_dir),
+        )
+        .context("gh pr merge")?;
+
+    if result.success {
+        eprintln!("[DEPLOY] PR #{pr_number} merge initiated (--auto, waiting for CI)");
+        Ok(true)
+    } else {
+        let stderr = result.stderr_str();
+        eprintln!("[DEPLOY] PR #{pr_number} merge failed: {stderr}");
+        Ok(false)
+    }
+}
+
 /// Derive a short title from a GitHub PR URL (e.g. "PR #42").
 pub(crate) fn pr_title_from_url(url: &str) -> String {
     url.rsplit('/')
@@ -346,5 +436,77 @@ mod tests {
 
         let result = post_pr_comment(&cmd, "/tmp", "Review text").unwrap();
         assert!(!result, "should return false on empty PR number");
+    }
+
+    // ─── find_pr_number_for_issue ───────────────────────────────────────
+
+    #[test]
+    fn find_pr_number_matches_branch() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success(r#"[{"number":42,"headRefName":"feat/rig-100-my-feature"}]"#);
+
+        let result = find_pr_number_for_issue(&cmd, "/tmp", "RIG-100");
+        assert_eq!(result, Some("42".to_string()));
+    }
+
+    #[test]
+    fn find_pr_number_no_match() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success(r#"[{"number":99,"headRefName":"feat/rig-999-other"}]"#);
+
+        let result = find_pr_number_for_issue(&cmd, "/tmp", "RIG-100");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_pr_number_empty_list() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("[]");
+
+        let result = find_pr_number_for_issue(&cmd, "/tmp", "RIG-100");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_pr_number_fallback_no_branch() {
+        let cmd = FakeCommandRunner::new();
+        // No headRefName → fallback to match
+        cmd.push_success(r#"[{"number":7}]"#);
+
+        let result = find_pr_number_for_issue(&cmd, "/tmp", "RIG-100");
+        assert_eq!(result, Some("7".to_string()));
+    }
+
+    // ─── merge_pr ───────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_pr_success() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("Merged");
+
+        let result = merge_pr(&cmd, "/tmp", "42").unwrap();
+        assert!(result, "should return true on successful merge");
+
+        let calls = cmd.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "gh");
+        assert!(calls[0].1.contains(&"merge".to_string()));
+        assert!(calls[0].1.contains(&"42".to_string()));
+        assert!(calls[0].1.contains(&"--squash".to_string()));
+        assert!(calls[0].1.contains(&"--auto".to_string()));
+        // Must never use --admin
+        assert!(
+            !calls[0].1.contains(&"--admin".to_string()),
+            "merge must use --auto, never --admin"
+        );
+    }
+
+    #[test]
+    fn merge_pr_failure() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_failure("merge conflicts");
+
+        let result = merge_pr(&cmd, "/tmp", "42").unwrap();
+        assert!(!result, "should return false on merge failure");
     }
 }

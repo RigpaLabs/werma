@@ -12,6 +12,22 @@ const MAX_CONTEXT_LINES: usize = 200;
 const MAX_DEPENDENCY_OUTPUT_LINES: usize = 50;
 const MAX_DEPENDENCY_OUTPUTS: usize = 5;
 
+/// Return disallowed tool patterns for a task type.
+///
+/// Pipeline agents must not call `gh` directly — the engine callback handles
+/// all GitHub mutations (PR creation, commenting, merging) based on agent output.
+/// This uses Claude Code's `--disallowedTools "Bash(gh:*)"` to enforce the rule
+/// at the tool level, not just via prompt instructions.
+pub fn disallowed_tools_for_type(task_type: &str) -> String {
+    match task_type {
+        // Pipeline agents: block all gh commands via Bash
+        "pipeline-engineer" | "pipeline-reviewer" | "pipeline-qa" | "pipeline-deployer" => {
+            "Bash(gh:*)".to_string()
+        }
+        _ => String::new(),
+    }
+}
+
 /// Map task type to allowed tools (matching aq bash patterns).
 pub fn tools_for_type(task_type: &str, has_output: bool) -> String {
     const SLACK_READ: &str = "mcp__plugin_slack_slack__slack_read_channel,\
@@ -294,6 +310,7 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
         task.allowed_tools.clone()
     };
 
+    let disallowed_tools = disallowed_tools_for_type(&task.task_type);
     let model = model_flag(&task.model);
     let fallback_model = resolve_fallback_model(task);
     let log_file = logs_dir.join(format!("{task_id}.log"));
@@ -319,6 +336,7 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
         output: &output,
         working_dir: &effective_dir,
         tools: &tools,
+        disallowed_tools: &disallowed_tools,
         max_turns: task.max_turns,
         model,
         fallback_model: fallback_model.as_deref(),
@@ -400,6 +418,7 @@ struct ExecScriptParams<'a> {
     output: &'a str,
     working_dir: &'a Path,
     tools: &'a str,
+    disallowed_tools: &'a str,
     max_turns: i32,
     model: &'a str,
     fallback_model: Option<&'a str>,
@@ -417,6 +436,7 @@ fn generate_exec_script(params: &ExecScriptParams<'_>) -> String {
     let task_id = params.task_id;
     let output = params.output;
     let tools = params.tools;
+    let disallowed_tools = params.disallowed_tools;
     let max_turns = params.max_turns;
     let model = params.model;
     let fallback_model = params.fallback_model.unwrap_or("");
@@ -445,6 +465,7 @@ PROMPT_FILE='{prompt_file_str}'
 OUTPUT='{output}'
 WORKING_DIR='{working_dir_str}'
 ALLOWED_TOOLS='{tools}'
+DISALLOWED_TOOLS='{disallowed_tools}'
 MAX_TURNS='{max_turns}'
 MODEL='{model}'
 FALLBACK_MODEL='{fallback_model}'
@@ -454,7 +475,7 @@ RESULT_FILE="${{LOG_FILE%.log}}-output.md"
 # Redirect all stderr to log from the start, so setup errors are captured
 exec 2>> "$LOG_FILE"
 
-echo "$(date): EXEC_START task=$TASK_ID model=$MODEL tools=$ALLOWED_TOOLS" >> "$LOG_FILE"
+echo "$(date): EXEC_START task=$TASK_ID model=$MODEL tools=$ALLOWED_TOOLS disallowed=$DISALLOWED_TOOLS" >> "$LOG_FILE"
 
 cd "$WORKING_DIR" || {{
     echo "$(date): FAILED — cd to $WORKING_DIR failed" >> "$LOG_FILE"
@@ -468,8 +489,13 @@ echo "$(date): CLAUDE_START pid=$$" >> "$LOG_FILE"
 
 run_claude() {{
     local use_model="$1"
+    local disallow_flag=()
+    if [ -n "$DISALLOWED_TOOLS" ]; then
+        disallow_flag=(--disallowedTools "$DISALLOWED_TOOLS")
+    fi
     claude -p "$PROMPT" \
         --allowedTools "$ALLOWED_TOOLS" \
+        "${{disallow_flag[@]+"${{disallow_flag[@]}}"}}" \
         --max-turns "$MAX_TURNS" \
         --model "$use_model" \
         --output-format json
@@ -871,6 +897,7 @@ mod tests {
             output: "",
             working_dir: Path::new("/home/user/project"),
             tools: "Read,Grep,Glob",
+            disallowed_tools: "",
             max_turns: 15,
             model: "claude-sonnet-4-6",
             fallback_model: None,
@@ -890,6 +917,7 @@ mod tests {
             output: "/tmp/output.md",
             working_dir: Path::new("/home/user/project"),
             tools: "Read,Grep,Glob",
+            disallowed_tools: "",
             max_turns: 15,
             model: "claude-sonnet-4-6",
             fallback_model: None,
@@ -921,6 +949,7 @@ mod tests {
             output: "",
             working_dir: Path::new("/tmp"),
             tools: "Read",
+            disallowed_tools: "",
             max_turns: 10,
             model: "claude-sonnet-4-6",
             fallback_model: None,
@@ -949,6 +978,7 @@ mod tests {
             output: "",
             working_dir: Path::new("/home/user/project/.trees/feat--RIG-177"),
             tools: "Read,Edit,Write,Bash",
+            disallowed_tools: "",
             max_turns: 15,
             model: "claude-sonnet-4-6",
             fallback_model: None,
@@ -968,6 +998,7 @@ mod tests {
             output: "",
             working_dir: Path::new("/tmp"),
             tools: "Read,Edit,Write,Bash",
+            disallowed_tools: "",
             max_turns: 15,
             model: "claude-opus-4-6",
             fallback_model: Some("claude-sonnet-4-6"),
@@ -991,6 +1022,7 @@ mod tests {
             output: "",
             working_dir: Path::new("/tmp"),
             tools: "Read",
+            disallowed_tools: "",
             max_turns: 10,
             model: "claude-sonnet-4-6",
             fallback_model: None,
@@ -1009,6 +1041,7 @@ mod tests {
             output: "",
             working_dir: Path::new("/home/user/project"),
             tools: "Read,Grep,Glob",
+            disallowed_tools: "",
             max_turns: 15,
             model: "claude-sonnet-4-6",
             fallback_model: None,
@@ -1168,5 +1201,85 @@ mod tests {
         assert!(result.contains("dep-000"));
         assert!(result.contains("dep-004"));
         assert!(!result.contains("dep-005")); // beyond limit
+    }
+
+    // ─── disallowed_tools_for_type ──────────────────────────────────────
+
+    #[test]
+    fn disallowed_tools_blocks_gh_for_pipeline_agents() {
+        let engineer = disallowed_tools_for_type("pipeline-engineer");
+        assert!(
+            engineer.contains("gh"),
+            "pipeline-engineer must block gh commands"
+        );
+
+        let reviewer = disallowed_tools_for_type("pipeline-reviewer");
+        assert!(
+            reviewer.contains("gh"),
+            "pipeline-reviewer must block gh commands"
+        );
+
+        let deployer = disallowed_tools_for_type("pipeline-deployer");
+        assert!(
+            deployer.contains("gh"),
+            "pipeline-deployer must block gh commands"
+        );
+
+        let qa = disallowed_tools_for_type("pipeline-qa");
+        assert!(qa.contains("gh"), "pipeline-qa must block gh commands");
+    }
+
+    #[test]
+    fn disallowed_tools_empty_for_non_pipeline() {
+        assert!(disallowed_tools_for_type("research").is_empty());
+        assert!(disallowed_tools_for_type("code").is_empty());
+        assert!(disallowed_tools_for_type("full").is_empty());
+    }
+
+    #[test]
+    fn exec_script_includes_disallowed_tools_for_pipeline() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "20260325-001",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp/.trees/feat--RIG-281"),
+            tools: "Read,Edit,Write,Bash,Glob,Grep,Skill",
+            disallowed_tools: "Bash(gh:*)",
+            max_turns: 100,
+            model: "claude-opus-4-6",
+            fallback_model: None,
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: true,
+        });
+
+        assert!(
+            script.contains("DISALLOWED_TOOLS='Bash(gh:*)'"),
+            "exec script must set DISALLOWED_TOOLS variable"
+        );
+        assert!(
+            script.contains("--disallowedTools"),
+            "exec script must pass --disallowedTools to claude CLI"
+        );
+    }
+
+    #[test]
+    fn exec_script_no_disallowed_tools_when_empty() {
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "20260325-002",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Grep,Glob",
+            disallowed_tools: "",
+            max_turns: 10,
+            model: "claude-sonnet-4-6",
+            fallback_model: None,
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        assert!(script.contains("DISALLOWED_TOOLS=''"));
+        // When empty, the conditional in run_claude should not add the flag
+        assert!(script.contains("if [ -n \"$DISALLOWED_TOOLS\" ]"));
     }
 }
