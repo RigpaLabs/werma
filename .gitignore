@@ -7,3 +7,5 @@ engine/target/
 .claude/
 CHANGELOG.md
 .idea/
+engine/pipelines/evals/.promptfoo/
+engine/pipelines/evals/*-results.json

@@ -125,6 +125,40 @@ RIG-XX feat!: or BREAKING CHANGE: → minor bump (pre-1.0)
 - **Hotfix only:** `cargo build --release` from `engine/` — when CI/pipeline is broken
 - **macOS:** after ANY binary copy, run `codesign --force --sign -` to re-sign (macOS SIGKILL's binaries with invalidated adhoc signatures after `cp`)
 
+## Prompt Evaluation (PromptFoo)
+
+Pipeline prompts are tested with [PromptFoo](https://promptfoo.dev/) to catch regressions in verdict parsing and agent behavior.
+
+```bash
+# Install (once)
+npm install -g promptfoo
+
+# Run all evals
+cd engine/pipelines/evals && promptfoo eval
+
+# Run verdict parsing only (fast, no LLM calls)
+cd engine/pipelines/evals && promptfoo eval -c verdict-parsing.yaml
+
+# Run golden dataset (requires ANTHROPIC_API_KEY)
+cd engine/pipelines/evals && promptfoo eval -c promptfooconfig.yaml
+
+# View results in browser
+cd engine/pipelines/evals && promptfoo view
+```
+
+**Structure:**
+- `engine/pipelines/evals/verdict-parsing.yaml` — deterministic verdict format tests (echo provider, no LLM)
+- `engine/pipelines/evals/promptfooconfig.yaml` — golden dataset eval (LLM-as-judge)
+- `engine/pipelines/evals/tests/golden-dataset.yaml` — test cases per stage (analyst, engineer, reviewer, deployer)
+- `engine/pipelines/evals/prompts/` — eval prompt wrappers (adapted from `engine/pipelines/prompts/`)
+
+**CI:** `.github/workflows/prompt-eval.yml` runs on PRs that touch pipeline prompts or eval configs. Verdict parsing must pass 100%. Golden dataset must pass 80% (LLM evals are non-deterministic). Golden dataset eval requires `prompt-eval` label on the PR to run.
+
+**Adding test cases:** Add new entries to `engine/pipelines/evals/tests/golden-dataset.yaml` with:
+- `vars` — template variables (`issue_id`, `issue_title`, `issue_description`, etc.)
+- `assert` — `contains`, `not-contains`, `regex`, `llm-rubric` assertions
+- `options.prompts` — which stage prompt to test (`analyst`, `engineer`, `reviewer`, `deployer`)
+
 ## Conventions
 
 - All communication in English (technical context)

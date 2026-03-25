@@ -1,0 +1,183 @@
+# Verdict parsing eval — deterministic tests (no LLM calls)
+# Tests that simulated agent outputs produce correct verdicts when parsed.
+# Uses echo provider to pass through test input, then asserts on format.
+#
+# Run: promptfoo eval -c verdict-parsing.yaml
+
+description: Verdict parsing format compliance
+
+providers:
+  - id: echo
+
+prompts:
+  - "{{agent_output}}"
+
+tests:
+  # ─── Explicit verdict markers ──────────────────────────────────────────
+
+  - description: "VERDICT=DONE is parseable"
+    vars:
+      agent_output: |
+        Implementation complete. All tests pass.
+        VERDICT=DONE
+    assert:
+      - type: regex
+        value: "VERDICT=DONE"
+
+  - description: "REVIEW_VERDICT=APPROVED is parseable"
+    vars:
+      agent_output: |
+        Code looks clean. No blockers found.
+        ---COMMENT---
+        Approved. Clean implementation with tests.
+        ---END COMMENT---
+        REVIEW_VERDICT=APPROVED
+    assert:
+      - type: regex
+        value: "REVIEW_VERDICT=APPROVED"
+      - type: contains
+        value: "---COMMENT---"
+      - type: contains
+        value: "---END COMMENT---"
+
+  - description: "REVIEW_VERDICT=REJECTED with feedback"
+    vars:
+      agent_output: |
+        Found critical issues.
+        ---COMMENT---
+        ## Blockers
+        - db/task.rs:50 — SQL injection via string interpolation
+        ---END COMMENT---
+        REVIEW_VERDICT=REJECTED
+    assert:
+      - type: regex
+        value: "REVIEW_VERDICT=REJECTED"
+      - type: contains
+        value: "---COMMENT---"
+
+  - description: "VERDICT=BLOCKED with questions"
+    vars:
+      agent_output: |
+        Requirements are unclear.
+        ---COMMENT---
+        Questions:
+        1. What specific command is slow?
+        2. What is the acceptable latency threshold?
+        ---END COMMENT---
+        VERDICT=BLOCKED
+    assert:
+      - type: regex
+        value: "VERDICT=BLOCKED"
+
+  - description: "VERDICT=CONFLICTS for deployer"
+    vars:
+      agent_output: |
+        PR has merge conflicts in engine/src/main.rs.
+        ---COMMENT---
+        Merge conflicts detected. Returning to engineer.
+        ---END COMMENT---
+        VERDICT=CONFLICTS
+    assert:
+      - type: regex
+        value: "VERDICT=CONFLICTS"
+
+  - description: "VERDICT=ALREADY_DONE for analyst"
+    vars:
+      agent_output: |
+        PR #42 was already merged to main on 2026-03-20.
+        The feature is live and verified.
+        VERDICT=ALREADY_DONE
+    assert:
+      - type: regex
+        value: "VERDICT=ALREADY_DONE"
+
+  # ─── Last-line requirement ─────────────────────────────────────────────
+
+  - description: "verdict on last line (correct placement)"
+    vars:
+      agent_output: |
+        All work completed.
+        VERDICT=DONE
+    assert:
+      - type: regex
+        value: "VERDICT=DONE$"
+
+  - description: "verdict with trailing whitespace is still valid"
+    vars:
+      agent_output: "All done.\nVERDICT=DONE  "
+    assert:
+      - type: contains
+        value: "VERDICT=DONE"
+
+  # ─── Comment block structure ───────────────────────────────────────────
+
+  - description: "well-formed comment block"
+    vars:
+      agent_output: |
+        ---COMMENT---
+        ## Implementation Spec
+        - Add --json flag to CLI
+        - Serialize tasks via serde_json
+        ## Acceptance Criteria
+        - `werma st --json` outputs valid JSON
+        ---END COMMENT---
+        VERDICT=DONE
+    assert:
+      - type: regex
+        value: "---COMMENT---[\\s\\S]+---END COMMENT---"
+      - type: contains
+        value: "VERDICT=DONE"
+
+  - description: "multiple comment blocks"
+    vars:
+      agent_output: |
+        ---COMMENT---
+        First comment: spec overview.
+        ---END COMMENT---
+        Some analysis...
+        ---COMMENT---
+        Second comment: risks identified.
+        ---END COMMENT---
+        VERDICT=DONE
+    assert:
+      - type: contains
+        value: "First comment"
+      - type: contains
+        value: "Second comment"
+
+  # ─── PR URL extraction ────────────────────────────────────────────────
+
+  - description: "PR_URL= marker is present"
+    vars:
+      agent_output: |
+        Branch pushed. PR created.
+        PR_URL=https://github.com/RigpaLabs/werma/pull/42
+        VERDICT=DONE
+    assert:
+      - type: regex
+        value: "PR_URL=https://github\\.com/.+/pull/\\d+"
+
+  # ─── Estimate extraction ──────────────────────────────────────────────
+
+  - description: "ESTIMATE= is parseable"
+    vars:
+      agent_output: |
+        This is a moderate task.
+        ESTIMATE=5
+        VERDICT=DONE
+    assert:
+      - type: regex
+        value: "ESTIMATE=\\d+"
+
+  # ─── Anti-patterns (should NOT appear) ─────────────────────────────────
+
+  - description: "no gh pr create in engineer output"
+    vars:
+      agent_output: |
+        Implementation complete. Pushed to branch.
+        VERDICT=DONE
+    assert:
+      - type: not-contains
+        value: "gh pr create"
+      - type: not-contains
+        value: "gh pr merge"
