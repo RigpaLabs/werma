@@ -138,20 +138,62 @@ pub fn callback(
         return Ok(());
     }
 
-    // RIG-252: Detect error_max_turns in output — agent ran out of turns without completing.
+    // RIG-252 + RIG-202: Detect error_max_turns — agent ran out of turns without completing.
+    // After repeated soft failures for the same issue+stage, escalate to blocked
+    // to prevent infinite retry loops (observed: RIG-186 had 5 consecutive reviewer failures).
     if is_max_turns_exit(result) {
-        eprintln!(
-            "[CALLBACK] {linear_issue_id}: task {task_id} (stage={stage}) hit max_turns — \
-             marking as incomplete, no transition"
-        );
-        if let Err(e) = linear.comment(
-            linear_issue_id,
-            &format!(
-                "**Werma task `{task_id}`** (stage: {stage}) hit `max_turns` — agent ran out of \
-                 turns without completing. Task marked as failed. Will be retried."
-            ),
-        ) {
-            eprintln!("callback: failed to post max_turns comment on {linear_issue_id}: {e}");
+        let failed_count = db
+            .count_failed_tasks_for_issue_stage(linear_issue_id, stage)
+            .unwrap_or(0);
+        let max_soft_failures = config
+            .stage(stage)
+            .and_then(super::config::StageConfig::review_round_limit)
+            .unwrap_or(DEFAULT_MAX_REVIEW_ROUNDS) as i64;
+
+        if failed_count >= max_soft_failures {
+            // Escalate: too many max_turns failures → move to blocked
+            let escalation_status = config
+                .stage(stage)
+                .and_then(|s| s.transition_for("blocked"))
+                .map(|t| t.status.as_str())
+                .unwrap_or("backlog");
+            eprintln!(
+                "[CALLBACK] {linear_issue_id}: task {task_id} (stage={stage}) hit max_turns — \
+                 {failed_count} prior failures >= limit {max_soft_failures}, escalating to {escalation_status}"
+            );
+            if let Err(e) = move_with_retry(linear, linear_issue_id, escalation_status) {
+                eprintln!(
+                    "[CALLBACK] {linear_issue_id}: escalation move to '{escalation_status}' failed: {e}"
+                );
+            }
+            if let Err(e) = linear.comment(
+                linear_issue_id,
+                &format!(
+                    "**max_turns failure limit reached** ({failed_count} failures, stage: {stage}). \
+                     Moving to {escalation_status} — manual intervention required.\n\n\
+                     Task `{task_id}` was the latest attempt."
+                ),
+            ) {
+                eprintln!("callback: failed to post escalation comment on {linear_issue_id}: {e}");
+            }
+            if let Err(e) = db.set_callback_fired_at(task_id) {
+                eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
+            }
+        } else {
+            eprintln!(
+                "[CALLBACK] {linear_issue_id}: task {task_id} (stage={stage}) hit max_turns — \
+                 soft failure ({failed_count}/{max_soft_failures}), no transition"
+            );
+            if let Err(e) = linear.comment(
+                linear_issue_id,
+                &format!(
+                    "**Werma task `{task_id}`** (stage: {stage}) hit `max_turns` — agent ran out of \
+                     turns without completing. Soft failure ({}/{max_soft_failures}). Will be retried.",
+                    failed_count + 1,
+                ),
+            ) {
+                eprintln!("callback: failed to post max_turns comment on {linear_issue_id}: {e}");
+            }
         }
         return Ok(());
     }
@@ -1835,6 +1877,136 @@ stages:
                 .iter()
                 .any(|(id, status)| id == "RIG-252c" && status == "review"),
             "normal DONE should still move to review, got: {moves:?}"
+        );
+    }
+
+    // ─── RIG-202: max_turns escalation after N soft failures ─────────────
+
+    #[test]
+    fn callback_max_turns_escalates_after_repeated_failures() {
+        // RIG-202: After N failed reviewer tasks for the same issue,
+        // max_turns exit should escalate to blocked instead of allowing retry.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-202a", "review");
+
+        // Insert 3 prior failed reviewer tasks (at the limit per default.yaml max_review_rounds=3)
+        for i in 0..3 {
+            let mut prev = crate::db::make_test_task(&format!("20260326-f{i}"));
+            prev.status = Status::Completed; // insert first, then mark failed
+            prev.linear_issue_id = "RIG-202a".to_string();
+            prev.pipeline_stage = "reviewer".to_string();
+            db.insert_task(&prev).unwrap();
+            db.set_task_status(&format!("20260326-f{i}"), Status::Failed)
+                .unwrap();
+        }
+
+        // Current task hits max_turns
+        let mut task = crate::db::make_test_task("20260326-202a");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-202a".to_string();
+        task.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&task).unwrap();
+
+        let result = r#"Partial review done.
+error_max_turns"#;
+
+        callback(
+            &db,
+            "20260326-202a",
+            "reviewer",
+            result,
+            "RIG-202a",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        // Should escalate to backlog (reviewer blocked transition in default.yaml)
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves
+                .iter()
+                .any(|(id, status)| id == "RIG-202a" && status == "backlog"),
+            "should escalate to backlog after repeated max_turns failures, got: {moves:?}"
+        );
+
+        // Should post escalation comment
+        let comments = linear.comment_calls.borrow();
+        assert!(
+            comments
+                .iter()
+                .any(|(id, body)| id == "RIG-202a" && body.contains("failure limit reached")),
+            "should post escalation comment, got: {comments:?}"
+        );
+
+        // callback_fired_at should be set
+        assert!(
+            db.is_callback_recently_fired("20260326-202a", 60).unwrap(),
+            "callback_fired_at should be set after escalation"
+        );
+    }
+
+    #[test]
+    fn callback_max_turns_soft_failure_below_limit() {
+        // RIG-202: Below the failure limit, max_turns exit should be a soft failure
+        // (no escalation, no status move).
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        linear.set_issue_status("RIG-202b", "review");
+
+        // Insert only 1 prior failed reviewer task (below limit of 3)
+        let mut prev = crate::db::make_test_task("20260326-f0b");
+        prev.status = Status::Completed;
+        prev.linear_issue_id = "RIG-202b".to_string();
+        prev.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&prev).unwrap();
+        db.set_task_status("20260326-f0b", Status::Failed).unwrap();
+
+        // Current task hits max_turns
+        let mut task = crate::db::make_test_task("20260326-202b");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-202b".to_string();
+        task.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&task).unwrap();
+
+        let result = "Partial review.\nerror_max_turns";
+
+        callback(
+            &db,
+            "20260326-202b",
+            "reviewer",
+            result,
+            "RIG-202b",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        // Should NOT move the issue — soft failure, will be retried
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves.is_empty(),
+            "soft failure below limit should not move issue, got: {moves:?}"
+        );
+
+        // Should post a soft failure comment
+        let comments = linear.comment_calls.borrow();
+        assert!(
+            comments
+                .iter()
+                .any(|(id, body)| id == "RIG-202b" && body.contains("Soft failure")),
+            "should post soft failure comment, got: {comments:?}"
         );
     }
 }

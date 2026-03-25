@@ -83,6 +83,19 @@ impl super::Db {
         )?)
     }
 
+    /// Count failed tasks for a given Linear issue and pipeline stage.
+    /// Used to detect repeated soft failures (e.g. max_turns exits) and escalate.
+    pub fn count_failed_tasks_for_issue_stage(&self, issue_id: &str, stage: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE linear_issue_id = ?1
+               AND pipeline_stage = ?2
+               AND status = 'failed'",
+            params![issue_id, stage],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Get the most recent `finished_at` timestamp for any completed task
     /// on the given Linear issue, excluding the current stage.
     /// Used to filter Linear comments to only those posted after the previous stage completed.
@@ -746,6 +759,47 @@ mod tests {
         );
         assert_eq!(
             db.count_completed_tasks_for_issue_stage("issue-999", "reviewer")
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn count_failed_for_issue_stage() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut t1 = make_test_task("20260312-010");
+        t1.linear_issue_id = "issue-1".to_string();
+        t1.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&t1).unwrap();
+        db.set_task_status("20260312-010", Status::Failed).unwrap();
+
+        let mut t2 = make_test_task("20260312-011");
+        t2.linear_issue_id = "issue-1".to_string();
+        t2.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&t2).unwrap();
+        db.set_task_status("20260312-011", Status::Failed).unwrap();
+
+        // Completed task should NOT be counted
+        let mut t3 = make_test_task("20260312-012");
+        t3.linear_issue_id = "issue-1".to_string();
+        t3.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&t3).unwrap();
+        db.set_task_status("20260312-012", Status::Completed)
+            .unwrap();
+
+        assert_eq!(
+            db.count_failed_tasks_for_issue_stage("issue-1", "reviewer")
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.count_failed_tasks_for_issue_stage("issue-1", "engineer")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.count_failed_tasks_for_issue_stage("issue-999", "reviewer")
                 .unwrap(),
             0
         );
