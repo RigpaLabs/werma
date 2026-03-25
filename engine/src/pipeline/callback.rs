@@ -5,11 +5,11 @@ use anyhow::{Result, anyhow};
 use super::config::PipelineConfig;
 use super::helpers::{infer_working_dir_from_issue, truncate_lines};
 use super::loader::{load_default, resolve_prompt};
-use super::pr::{auto_create_pr, has_open_pr_for_issue, pr_title_from_url};
+use super::pr::{auto_create_pr, has_open_pr_for_issue, post_pr_comment, pr_title_from_url};
 use super::prompt::{build_vars, render_prompt};
 use super::verdict::{
-    extract_rejection_feedback, is_heavy_track, parse_comments, parse_estimate, parse_pr_url,
-    parse_verdict,
+    extract_rejection_feedback, extract_review_body, is_heavy_track, parse_comments,
+    parse_estimate, parse_pr_url, parse_verdict,
 };
 use crate::db::Db;
 use crate::linear::LinearApi;
@@ -320,6 +320,31 @@ pub fn callback(
             None
         };
 
+        // RIG-281: Post reviewer's review as a PR comment (engine-side, not agent-side).
+        // Agents no longer call `gh pr comment` directly — the engine handles it.
+        if stage == "reviewer" {
+            if let Some(review_body) = extract_review_body(result) {
+                match post_pr_comment(cmd, working_dir, &review_body) {
+                    Ok(true) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: posted review as PR comment (task {task_id})"
+                        );
+                    }
+                    Ok(false) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: no open PR found for review comment \
+                             (task {task_id})"
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: failed to post review as PR comment: {e}"
+                        );
+                    }
+                }
+            }
+        }
+
         // Post a comment — non-critical, don't fail the callback if this errors.
         let comment = format_callback_comment(
             task_id,
@@ -343,16 +368,27 @@ pub fn callback(
                     .review_round_limit()
                     .unwrap_or(DEFAULT_MAX_REVIEW_ROUNDS) as i64;
                 if review_count >= max_rounds {
+                    // Use the pipeline config's blocked transition target status
+                    // (e.g. "backlog"), falling back to "backlog" if not configured.
+                    let escalation_status = stage_cfg
+                        .transition_for("blocked")
+                        .map(|t| t.status.as_str())
+                        .unwrap_or("backlog");
                     eprintln!(
                         "review cycle limit ({max_rounds}) reached for issue {linear_issue_id}, \
-                             escalating to blocked"
+                             escalating to {escalation_status}"
                     );
-                    move_with_retry(linear, linear_issue_id, "blocked")?;
+                    if let Err(e) = move_with_retry(linear, linear_issue_id, escalation_status) {
+                        eprintln!(
+                            "callback: escalation move to '{escalation_status}' failed for \
+                                 {linear_issue_id}: {e} — marking callback as fired to prevent retry loop"
+                        );
+                    }
                     if let Err(e) = linear.comment(
                         linear_issue_id,
                         &format!(
                             "**Review cycle limit reached** ({max_rounds} rounds). \
-                                 Moving to Blocked — manual review required."
+                                 Moving to {escalation_status} — manual review required."
                         ),
                     ) {
                         eprintln!(
@@ -1389,6 +1425,144 @@ stages:
                 .iter()
                 .any(|(id, label)| id == "RIG-274b" && label == "spec:done"),
             "BLOCKED should NOT add 'spec:done' label, got: {adds:?}"
+        );
+    }
+
+    #[test]
+    fn review_cycle_escalation_uses_config_status() {
+        // When review cycle limit is reached, the callback should use the
+        // pipeline config's blocked transition target (backlog), not hardcode "blocked".
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        // Insert a reviewer task for the issue
+        let task = Task {
+            id: "20260324-esc".to_string(),
+            status: Status::Completed,
+            priority: 1,
+            created_at: "2026-03-24T10:00:00".to_string(),
+            started_at: None,
+            finished_at: None,
+            task_type: "pipeline-reviewer".to_string(),
+            prompt: "review issue".to_string(),
+            output_path: String::new(),
+            working_dir: "~/projects/rigpa/werma".to_string(),
+            model: "opus".to_string(),
+            max_turns: 50,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: "RIG-ESC".to_string(),
+            linear_pushed: false,
+            pipeline_stage: "reviewer".to_string(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: String::new(),
+            estimate: 0,
+        };
+        db.insert_task(&task).unwrap();
+
+        // Simulate 3 completed reviewer tasks (at the limit)
+        for i in 0..3 {
+            let mut prev = task.clone();
+            prev.id = format!("20260324-prev{i}");
+            prev.status = Status::Completed;
+            prev.linear_pushed = true;
+            db.insert_task(&prev).unwrap();
+        }
+
+        let result = "Code needs changes.\nVERDICT=REJECTED";
+
+        callback(
+            &db,
+            "20260324-esc",
+            "reviewer",
+            result,
+            "RIG-ESC",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        // Verify it moved to "backlog" (from config), not "blocked"
+        let moves = linear.move_calls.borrow();
+        // First move is the "review" status from the rejected transition,
+        // but escalation should override to "backlog"
+        let has_backlog = moves.iter().any(|(_, status)| status == "backlog");
+        let has_blocked = moves.iter().any(|(_, status)| status == "blocked");
+        assert!(
+            has_backlog,
+            "escalation should move to 'backlog' (from config), got: {moves:?}"
+        );
+        assert!(
+            !has_blocked,
+            "escalation should NOT move to 'blocked' (hardcoded), got: {moves:?}"
+        );
+    }
+
+    #[test]
+    fn callback_no_transition_sets_fired_at() {
+        // When a verdict has no matching transition, callback should still
+        // set callback_fired_at to prevent re-processing.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        let task = Task {
+            id: "20260324-unk".to_string(),
+            status: Status::Completed,
+            priority: 1,
+            created_at: "2026-03-24T10:00:00".to_string(),
+            started_at: None,
+            finished_at: None,
+            task_type: "pipeline-reviewer".to_string(),
+            prompt: "review issue".to_string(),
+            output_path: String::new(),
+            working_dir: "~/projects/rigpa/werma".to_string(),
+            model: "opus".to_string(),
+            max_turns: 50,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: "RIG-UNK".to_string(),
+            linear_pushed: false,
+            pipeline_stage: "reviewer".to_string(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: String::new(),
+            estimate: 0,
+        };
+        db.insert_task(&task).unwrap();
+
+        let result = "Something unusual happened.\nVERDICT=UNKNOWN_VERDICT_XYZ";
+
+        callback(
+            &db,
+            "20260324-unk",
+            "reviewer",
+            result,
+            "RIG-UNK",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        )
+        .unwrap();
+
+        // No moves should have been made
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves.is_empty(),
+            "unknown verdict should not trigger any moves, got: {moves:?}"
+        );
+
+        // callback_fired_at should be set to prevent re-processing
+        assert!(
+            db.is_callback_recently_fired("20260324-unk", 60).unwrap(),
+            "callback_fired_at should be set for unknown verdict"
         );
     }
 }

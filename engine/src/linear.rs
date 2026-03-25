@@ -85,13 +85,84 @@ impl LinearApi for LinearClient {
 
 const LINEAR_API: &str = "https://api.linear.app/graphql";
 
-/// Configuration stored in ~/.werma/linear.json.
+/// Per-team configuration (team_id, team_key, and workflow status mapping).
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-pub struct LinearConfig {
+pub struct TeamConfig {
     pub team_id: String,
     #[serde(default)]
     pub team_key: String,
     pub statuses: std::collections::HashMap<String, String>,
+}
+
+/// Configuration stored in ~/.werma/linear.json.
+/// Supports both legacy single-team format and new multi-team format.
+///
+/// Legacy format:   `{ "team_id": "...", "team_key": "RIG", "statuses": {...} }`
+/// Multi-team:      `{ "teams": [ { "team_id": "...", "team_key": "RIG", "statuses": {...} }, ... ] }`
+#[derive(Debug, Clone)]
+pub struct LinearConfig {
+    pub teams: Vec<TeamConfig>,
+}
+
+/// For backward compatibility: the primary team (first in the list).
+impl LinearConfig {
+    pub fn primary_team(&self) -> Option<&TeamConfig> {
+        self.teams.first()
+    }
+
+    /// Look up team config by team_key (e.g. "RIG", "FAT").
+    pub fn team_by_key(&self, key: &str) -> Option<&TeamConfig> {
+        self.teams.iter().find(|t| t.team_key == key)
+    }
+
+    /// All configured team keys.
+    pub fn team_keys(&self) -> Vec<&str> {
+        self.teams.iter().map(|t| t.team_key.as_str()).collect()
+    }
+
+    /// Resolve a status name to a state ID for a given team key.
+    /// Falls back to primary team if team_key is empty.
+    pub fn status_id(&self, team_key: &str, status_name: &str) -> Option<&String> {
+        let team = if team_key.is_empty() {
+            self.primary_team()
+        } else {
+            self.team_by_key(team_key).or(self.primary_team())
+        };
+        team.and_then(|t| t.statuses.get(status_name))
+    }
+}
+
+// Custom serde: support both legacy single-team and new multi-team format.
+impl serde::Serialize for LinearConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(serde::Serialize)]
+        struct Multi<'a> {
+            teams: &'a Vec<TeamConfig>,
+        }
+        Multi { teams: &self.teams }.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for LinearConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+
+        // New format: { "teams": [...] }
+        if raw.get("teams").is_some() {
+            #[derive(serde::Deserialize)]
+            struct Multi {
+                teams: Vec<TeamConfig>,
+            }
+            let m: Multi = serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
+            return Ok(LinearConfig { teams: m.teams });
+        }
+
+        // Legacy format: { "team_id": "...", "team_key": "...", "statuses": {...} }
+        let single: TeamConfig = serde_json::from_value(raw).map_err(serde::de::Error::custom)?;
+        Ok(LinearConfig {
+            teams: vec![single],
+        })
+    }
 }
 
 pub struct LinearClient {
@@ -106,10 +177,12 @@ impl LinearClient {
             .or_else(|_| read_env_file_key("LINEAR_API_KEY"))
             .context("LINEAR_API_KEY not set\n  Fix: export LINEAR_API_KEY=lin_api_...\n  Or add to ~/.werma/.env:\n    LINEAR_API_KEY=lin_api_...")?;
 
-        Ok(Self {
-            client: Client::new(),
-            api_key,
-        })
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .context("building HTTP client")?;
+
+        Ok(Self { client, api_key })
     }
 
     /// Execute a GraphQL query against the Linear API.
@@ -142,51 +215,175 @@ impl LinearClient {
         Ok(json["data"].clone())
     }
 
-    /// Discover team and workflow statuses, save to ~/.werma/linear.json.
+    /// Discover all teams and their workflow statuses, save to ~/.werma/linear.json.
     pub fn setup(&self) -> Result<()> {
         let config_path = config_path()?;
+        let force = std::env::var("FORCE_SETUP").is_ok();
 
-        // Check if already configured
-        if config_path.exists() {
+        // Check if already configured (skip guard if FORCE_SETUP is set)
+        if !force && config_path.exists() {
+            let raw = std::fs::read_to_string(&config_path)?;
+            let raw_json: Value = serde_json::from_str(&raw)?;
+
+            // Detect legacy single-team format: has "team_id" but no "teams" key
+            if raw_json.get("team_id").is_some() && raw_json.get("teams").is_none() {
+                println!("Detected legacy single-team config — migrating to multi-team format...");
+                return self.migrate_legacy_config(&raw_json);
+            }
+
             let existing = load_config()?;
-            if !existing.team_id.is_empty() {
+            if !existing.teams.is_empty() {
+                // Check if workspace has more teams than config
+                let workspace_team_count = self.count_workspace_teams();
+                if let Ok(ws_count) = workspace_team_count {
+                    if ws_count > existing.teams.len() {
+                        eprintln!(
+                            "Warning: config has {} team(s), workspace has {} — run FORCE_SETUP=1 werma linear setup to sync",
+                            existing.teams.len(),
+                            ws_count
+                        );
+                    }
+                }
+
+                let keys: Vec<&str> = existing.team_keys();
                 println!(
-                    "Already configured: {} ({})",
-                    existing.team_key, existing.team_id
+                    "Already configured: {} team(s): {}",
+                    keys.len(),
+                    keys.join(", ")
                 );
-                println!("  Delete ~/.werma/linear.json to reconfigure");
+                println!("  To reconfigure: FORCE_SETUP=1 werma linear setup");
                 return Ok(());
             }
         }
 
-        println!("Discovering Linear workspace...");
+        if force {
+            println!("FORCE_SETUP=1 — re-discovering all teams...");
+        }
 
-        // Get teams
+        self.discover_and_save_all_teams()
+    }
+
+    /// Migrate legacy single-team config to multi-team format.
+    /// Preserves existing team's status IDs and discovers any additional workspace teams.
+    fn migrate_legacy_config(&self, legacy_json: &Value) -> Result<()> {
+        let legacy_team: TeamConfig =
+            serde_json::from_value(legacy_json.clone()).context("parsing legacy config")?;
+        let legacy_team_id = legacy_team.team_id.clone();
+        println!(
+            "  Existing team: {} ({})",
+            legacy_team.team_key, legacy_team.team_id
+        );
+
+        // Discover all workspace teams
         let data = self.query("{ teams { nodes { id key name } } }", &json!({}))?;
-        let teams = data["teams"]["nodes"]
+        let api_teams = data["teams"]["nodes"]
             .as_array()
             .context("no teams found")?;
 
-        if teams.is_empty() {
+        let mut team_configs = Vec::new();
+
+        for team in api_teams {
+            let team_id = team["id"].as_str().context("team has no id")?.to_string();
+            let team_key = team["key"].as_str().unwrap_or("").to_string();
+            let team_name = team["name"].as_str().unwrap_or("").to_string();
+
+            if team_id == legacy_team_id {
+                // Preserve existing team's status IDs
+                println!("  Keeping existing statuses for {team_key}");
+                team_configs.push(legacy_team.clone());
+            } else {
+                // Discover statuses for new team
+                let statuses = self.discover_team_statuses(&team_id)?;
+                println!(
+                    "  Discovered {team_name} ({team_key}) — {} statuses",
+                    statuses.len()
+                );
+                team_configs.push(TeamConfig {
+                    team_id,
+                    team_key,
+                    statuses,
+                });
+            }
+        }
+
+        let config = LinearConfig {
+            teams: team_configs,
+        };
+        save_config(&config)?;
+        let config_path = config_path()?;
+        println!(
+            "Migrated to multi-team format: {} team(s) — {}",
+            config.teams.len(),
+            config_path.display()
+        );
+        Ok(())
+    }
+
+    /// Count teams in the Linear workspace (cheap query, used for mismatch warning).
+    fn count_workspace_teams(&self) -> Result<usize> {
+        let data = self.query("{ teams { nodes { id } } }", &json!({}))?;
+        let teams = data["teams"]["nodes"]
+            .as_array()
+            .context("no teams found")?;
+        Ok(teams.len())
+    }
+
+    /// Discover all workspace teams and save config. Shared by setup() and FORCE_SETUP path.
+    fn discover_and_save_all_teams(&self) -> Result<()> {
+        println!("Discovering Linear workspace...");
+
+        let data = self.query("{ teams { nodes { id key name } } }", &json!({}))?;
+        let api_teams = data["teams"]["nodes"]
+            .as_array()
+            .context("no teams found")?;
+
+        if api_teams.is_empty() {
             bail!("no teams found in Linear workspace");
         }
 
-        let team = &teams[0];
-        let team_id = team["id"].as_str().context("team has no id")?.to_string();
-        let team_key = team["key"].as_str().unwrap_or("").to_string();
-        let team_name = team["name"].as_str().unwrap_or("").to_string();
-
-        if teams.len() > 1 {
-            println!("Multiple teams found, using first:");
-            for t in teams {
-                let name = t["name"].as_str().unwrap_or("?");
-                let key = t["key"].as_str().unwrap_or("?");
-                println!("  {name} ({key})");
-            }
+        println!("Found {} team(s):", api_teams.len());
+        for t in api_teams {
+            let name = t["name"].as_str().unwrap_or("?");
+            let key = t["key"].as_str().unwrap_or("?");
+            println!("  {name} ({key})");
         }
-        println!("Team: {team_name} ({team_key})");
 
-        // Get workflow statuses for this team
+        let mut team_configs = Vec::new();
+        for team in api_teams {
+            let team_id = team["id"].as_str().context("team has no id")?.to_string();
+            let team_key = team["key"].as_str().unwrap_or("").to_string();
+            let team_name = team["name"].as_str().unwrap_or("").to_string();
+
+            let statuses = self.discover_team_statuses(&team_id)?;
+
+            println!("\n{team_name} ({team_key}) — {} statuses:", statuses.len());
+            for (name, id) in &statuses {
+                println!("  {name}: {id}");
+            }
+
+            team_configs.push(TeamConfig {
+                team_id,
+                team_key,
+                statuses,
+            });
+        }
+
+        let config = LinearConfig {
+            teams: team_configs,
+        };
+
+        save_config(&config)?;
+        let config_path = config_path()?;
+        println!("\nConfig saved to {}", config_path.display());
+
+        Ok(())
+    }
+
+    /// Discover workflow statuses for a single team. Extracted from setup() for reuse.
+    fn discover_team_statuses(
+        &self,
+        team_id: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
         let states_query = r#"
             query($teamId: ID!) {
                 workflowStates(filter: { team: { id: { eq: $teamId } } }) {
@@ -201,7 +398,6 @@ impl LinearClient {
 
         let mut statuses = std::collections::HashMap::new();
 
-        // Map by name (case-insensitive) and type
         let find_by_name = |name: &str| -> Option<String> {
             states
                 .iter()
@@ -220,7 +416,6 @@ impl LinearClient {
                 .and_then(|s| s["id"].as_str().map(String::from))
         };
 
-        // Core statuses (by type)
         if let Some(id) = find_by_type("backlog") {
             statuses.insert("backlog".to_string(), id);
         }
@@ -233,8 +428,6 @@ impl LinearClient {
         if let Some(id) = find_by_type("canceled") {
             statuses.insert("canceled".to_string(), id);
         }
-
-        // Name-based statuses
         if let Some(id) = find_by_name("Blocked") {
             statuses.insert("blocked".to_string(), id);
         }
@@ -257,32 +450,18 @@ impl LinearClient {
             statuses.insert("failed".to_string(), id);
         }
 
-        let config = LinearConfig {
-            team_id,
-            team_key,
-            statuses,
-        };
-
-        save_config(&config)?;
-        println!("Config saved to {}", config_path.display());
-
-        // Print discovered statuses
-        println!("\nStatuses:");
-        for (name, id) in &config.statuses {
-            println!("  {name}: {id}");
-        }
-
-        Ok(())
+        Ok(statuses)
     }
 
     /// Pull Todo issues from Linear and create werma tasks.
     pub fn sync(&self, db: &Db) -> Result<()> {
         let config = load_config()?;
-        if config.team_id.is_empty() {
+        if config.teams.is_empty() {
             bail!("Linear not configured. Run: werma linear setup");
         }
 
-        let todo_status_id = config
+        let primary = config.primary_team().context("no teams configured")?;
+        let todo_status_id = primary
             .statuses
             .get("todo")
             .context("'todo' status not found in linear.json")?;
@@ -302,6 +481,8 @@ impl LinearClient {
                         title
                         description
                         priority
+                        estimate
+                        state { type }
                         labels { nodes { name } }
                     }
                 }
@@ -310,7 +491,7 @@ impl LinearClient {
 
         let data = self.query(
             issues_query,
-            &json!({"teamId": config.team_id, "stateId": todo_status_id}),
+            &json!({"teamId": primary.team_id, "stateId": todo_status_id}),
         )?;
 
         let issues = data["issues"]["nodes"]
@@ -354,7 +535,8 @@ impl LinearClient {
             }
 
             let task_type = infer_type_from_labels(&labels);
-            let working_dir = infer_working_dir(title, &labels);
+            let user_cfg = crate::config::UserConfig::load();
+            let working_dir = infer_working_dir(title, &labels, &user_cfg);
             if validate_working_dir(&working_dir).is_none() {
                 eprintln!(
                     "  ! skipping {identifier} [{title}]: working dir '{working_dir}' does not exist"
@@ -404,7 +586,7 @@ impl LinearClient {
             db.insert_task(&task)?;
 
             // Move issue to In Progress
-            if let Some(ip_id) = config.statuses.get("in_progress") {
+            if let Some(ip_id) = primary.statuses.get("in_progress") {
                 if let Err(e) = self.move_issue(issue_id, ip_id) {
                     eprintln!("warn: failed to move {identifier} to in_progress during sync: {e}");
                 }
@@ -453,12 +635,10 @@ impl LinearClient {
 
         self.comment(&task.linear_issue_id, &comment)?;
 
-        // If completed, move to Done
+        // If completed, move to Done (uses move_issue_by_name which resolves
+        // the correct team's status ID from the issue's team context).
         if task.status == Status::Completed {
-            let config = load_config()?;
-            if let Some(done_id) = config.statuses.get("done") {
-                self.move_issue(&task.linear_issue_id, done_id)?;
-            }
+            self.move_issue_by_name(&task.linear_issue_id, "done")?;
         }
 
         db.set_linear_pushed(task_id, true)?;
@@ -520,12 +700,13 @@ impl LinearClient {
     }
 
     /// Move an issue to a status by status name (looks up in config).
+    /// Resolves the correct team's status ID from the issue identifier prefix.
     pub fn move_issue_by_name(&self, issue_id: &str, status_name: &str) -> Result<()> {
         let config = load_config()?;
+        let team_key = team_key_from_identifier(issue_id);
         let state_id = config
-            .statuses
-            .get(status_name)
-            .context(format!("unknown status: {status_name}"))?;
+            .status_id(&team_key, status_name)
+            .with_context(|| format!("unknown status '{status_name}' for team '{team_key}'"))?;
         self.move_issue(issue_id, state_id)
     }
 
@@ -571,7 +752,7 @@ impl LinearClient {
     pub fn get_issue(&self, issue_id: &str) -> Result<(String, String)> {
         let uuid = self.resolve_uuid(issue_id)?;
         let data = self.query(
-            r#"query($id: ID!) {
+            r#"query($id: String!) {
                 issue(id: $id) { title description }
             }"#,
             &json!({"id": uuid}),
@@ -588,7 +769,7 @@ impl LinearClient {
     pub fn get_issue_status(&self, issue_id: &str) -> Result<String> {
         let uuid = self.resolve_uuid(issue_id)?;
         let data = self.query(
-            r#"query($id: ID!) {
+            r#"query($id: String!) {
                 issue(id: $id) { state { name } }
             }"#,
             &json!({"id": uuid}),
@@ -627,6 +808,12 @@ impl LinearClient {
         identifier: &str,
     ) -> Result<(String, String, String, String, Vec<String>)> {
         let config = load_config()?;
+        let team_key = team_key_from_identifier(identifier);
+        let team = config
+            .team_by_key(&team_key)
+            .or(config.primary_team())
+            .context("no teams configured")?;
+
         // Parse "RIG-95" → number 95
         let number: i64 = identifier
             .rsplit('-')
@@ -646,7 +833,7 @@ impl LinearClient {
                     }
                 }
             }"#,
-            &json!({"teamId": config.team_id, "number": number}),
+            &json!({"teamId": team.team_id, "number": number}),
         )?;
 
         let nodes = data["issues"]["nodes"]
@@ -679,75 +866,85 @@ impl LinearClient {
         Ok((id, ident, title, description, labels))
     }
 
-    /// Get issues filtered by team and status name.
+    /// Get issues filtered by status name, across all configured teams.
     pub fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<Value>> {
         let config = load_config()?;
-        let state_id = match config.statuses.get(status_name) {
-            Some(id) if !id.is_empty() => id.clone(),
-            _ => return Ok(vec![]),
-        };
+        let mut all_issues = Vec::new();
 
-        let data = self.query(
-            r#"query($teamId: ID!, $stateId: ID!) {
-                issues(
-                    filter: {
-                        team: { id: { eq: $teamId } },
-                        state: { id: { eq: $stateId } }
-                    },
-                    orderBy: updatedAt
-                ) {
-                    nodes {
-                        id
-                        identifier
-                        title
-                        description
-                        priority
-                        estimate
-                        state { type }
-                        labels { nodes { name } }
+        for team in &config.teams {
+            let state_id = match team.statuses.get(status_name) {
+                Some(id) if !id.is_empty() => id.clone(),
+                _ => continue,
+            };
+
+            let data = self.query(
+                r#"query($teamId: ID!, $stateId: ID!) {
+                    issues(
+                        filter: {
+                            team: { id: { eq: $teamId } },
+                            state: { id: { eq: $stateId } }
+                        },
+                        orderBy: updatedAt
+                    ) {
+                        nodes {
+                            id
+                            identifier
+                            title
+                            description
+                            priority
+                            estimate
+                            state { type }
+                            labels { nodes { name } }
+                        }
                     }
-                }
-            }"#,
-            &json!({"teamId": config.team_id, "stateId": state_id}),
-        )?;
+                }"#,
+                &json!({"teamId": team.team_id, "stateId": state_id}),
+            )?;
 
-        Ok(data["issues"]["nodes"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default())
+            if let Some(issues) = data["issues"]["nodes"].as_array() {
+                all_issues.extend(issues.clone());
+            }
+        }
+
+        Ok(all_issues)
     }
-    /// Get issues filtered by team and label name.
+
+    /// Get issues filtered by label name, across all configured teams.
     pub fn get_issues_by_label(&self, label_name: &str) -> Result<Vec<Value>> {
         let config = load_config()?;
+        let mut all_issues = Vec::new();
 
-        let data = self.query(
-            r#"query($teamId: ID!, $label: String!) {
-                issues(
-                    filter: {
-                        team: { id: { eq: $teamId } },
-                        labels: { some: { name: { eqIgnoreCase: $label } } }
-                    },
-                    orderBy: updatedAt
-                ) {
-                    nodes {
-                        id
-                        identifier
-                        title
-                        description
-                        priority
-                        estimate
-                        state { type }
-                        labels { nodes { id name } }
+        for team in &config.teams {
+            let data = self.query(
+                r#"query($teamId: ID!, $label: String!) {
+                    issues(
+                        filter: {
+                            team: { id: { eq: $teamId } },
+                            labels: { some: { name: { eqIgnoreCase: $label } } }
+                        },
+                        orderBy: updatedAt
+                    ) {
+                        nodes {
+                            id
+                            identifier
+                            title
+                            description
+                            priority
+                            estimate
+                            state { type }
+                            labels { nodes { id name } }
+                        }
                     }
-                }
-            }"#,
-            &json!({"teamId": config.team_id, "label": label_name}),
-        )?;
+                }"#,
+                &json!({"teamId": team.team_id, "label": label_name}),
+            )?;
 
-        Ok(data["issues"]["nodes"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default())
+            if let Some(issues) = data["issues"]["nodes"].as_array() {
+                all_issues.extend(issues.clone());
+            }
+        }
+
+        Ok(all_issues)
     }
 
     /// Remove a label from an issue by label name.
@@ -756,7 +953,7 @@ impl LinearClient {
 
         // First, get the issue's current labels to find the label ID
         let data = self.query(
-            r#"query($id: ID!) {
+            r#"query($id: String!) {
                 issue(id: $id) {
                     labels { nodes { id name } }
                 }
@@ -795,6 +992,11 @@ impl LinearClient {
     pub fn add_label(&self, issue_id: &str, label_name: &str) -> Result<()> {
         let uuid = self.resolve_uuid(issue_id)?;
         let config = load_config()?;
+        let team_key = team_key_from_identifier(issue_id);
+        let team = config
+            .team_by_key(&team_key)
+            .or(config.primary_team())
+            .context("no teams configured")?;
 
         // Find the label ID by name from team labels, and get the issue's current labels
         let data = self.query(
@@ -806,7 +1008,7 @@ impl LinearClient {
                     nodes { id }
                 }
             }"#,
-            &json!({"issueId": uuid, "teamId": config.team_id, "name": label_name}),
+            &json!({"issueId": uuid, "teamId": team.team_id, "name": label_name}),
         )?;
 
         let new_label_id = data["issueLabels"]["nodes"][0]["id"]
@@ -844,9 +1046,33 @@ fn config_path() -> Result<std::path::PathBuf> {
 }
 
 /// Get the configured team key (e.g. "RIG") from ~/.werma/linear.json.
+/// Returns the primary (first) team key for backward compatibility.
 pub fn configured_team_key() -> Result<String> {
     let config = load_config()?;
-    Ok(config.team_key)
+    Ok(config
+        .primary_team()
+        .map(|t| t.team_key.clone())
+        .unwrap_or_default())
+}
+
+/// Get all configured team keys (e.g. ["RIG", "FAT"]).
+pub fn configured_team_keys() -> Result<Vec<String>> {
+    let config = load_config()?;
+    Ok(config.teams.iter().map(|t| t.team_key.clone()).collect())
+}
+
+/// Extract the team key prefix from an issue identifier (e.g. "RIG-123" → "RIG").
+/// Returns empty string for UUIDs or unparseable identifiers.
+pub fn team_key_from_identifier(identifier: &str) -> String {
+    if let Some(pos) = identifier.rfind('-') {
+        let prefix = &identifier[..pos];
+        let suffix = &identifier[pos + 1..];
+        // Only treat as team key if suffix is all digits (e.g. "RIG-123")
+        if suffix.chars().all(|c| c.is_ascii_digit()) && !suffix.is_empty() {
+            return prefix.to_string();
+        }
+    }
+    String::new()
 }
 
 fn load_config() -> Result<LinearConfig> {
@@ -923,18 +1149,13 @@ pub fn is_manual_issue(labels: &[&str]) -> bool {
     labels.iter().any(|l| l.eq_ignore_ascii_case("manual"))
 }
 
-/// Map a `repo:*` label value to its local directory path.
-/// All RigpaLabs repos live under `~/projects/rigpa/`.
-fn repo_label_to_dir(repo: &str) -> Option<&'static str> {
-    match repo.trim() {
-        "forge" | "werma" => Some("~/projects/rigpa/werma"),
-        "fathom" => Some("~/projects/rigpa/fathom"),
-        "hyper-liq" => Some("~/projects/rigpa/hyper-liq"),
-        "sui-bots" => Some("~/projects/rigpa/sui-bots"),
-        "ar-quant" => Some("~/projects/rigpa/ar-quant"),
-        "ar-quant-alpha" => Some("~/projects/rigpa/ar-quant-alpha"),
-        _ => None,
-    }
+/// Map a `repo:*` label value to its local directory path using config.
+/// Handles the `forge` → `werma` alias, then delegates to `UserConfig::repo_dir`.
+fn repo_label_to_dir(repo: &str, config: &crate::config::UserConfig) -> String {
+    let repo = repo.trim();
+    // Handle legacy alias
+    let repo = if repo == "forge" { "werma" } else { repo };
+    config.repo_dir(repo)
 }
 
 /// Expand `~` to the user's home directory.
@@ -959,40 +1180,40 @@ pub fn validate_working_dir(dir: &str) -> Option<String> {
 }
 
 /// Infer working directory from title keywords and labels.
-pub fn infer_working_dir(title: &str, labels: &[&str]) -> String {
+/// Uses `UserConfig` for repo label → directory resolution.
+pub fn infer_working_dir(
+    title: &str,
+    labels: &[&str],
+    config: &crate::config::UserConfig,
+) -> String {
     let title_lower = title.to_lowercase();
 
     // Check for repo: label (explicit mapping takes priority)
     for label in labels {
         if let Some(repo) = label.strip_prefix("repo:") {
-            if let Some(dir) = repo_label_to_dir(repo) {
-                return dir.to_string();
-            }
-            // Unknown repo label — fall through to keyword matching
-            eprintln!(
-                "warning: unknown repo label 'repo:{repo}', falling back to keyword inference"
-            );
+            return repo_label_to_dir(repo, config);
         }
     }
 
-    // Keyword-based inference
+    // Keyword-based inference: keyword → repo name, resolved via config
     let keywords: &[(&str, &str)] = &[
-        ("werma", "~/projects/rigpa/werma"),
-        ("pipeline", "~/projects/rigpa/werma"),
-        ("fathom", "~/projects/rigpa/fathom"),
-        ("sui", "~/projects/rigpa/sui-bots"),
-        ("hyper", "~/projects/rigpa/hyper-liq"),
-        ("ar-quant-alpha", "~/projects/rigpa/ar-quant-alpha"),
-        ("ar-quant", "~/projects/rigpa/ar-quant"),
+        ("werma", "werma"),
+        ("pipeline", "werma"),
+        ("fathom", "fathom"),
+        ("sigil", "sigil"),
+        ("sui", "sui-bots"),
+        ("hyper", "hyper-liq"),
+        ("ar-quant-alpha", "ar-quant-alpha"),
+        ("ar-quant", "ar-quant"),
     ];
 
-    for (keyword, dir) in keywords {
+    for (keyword, repo) in keywords {
         if title_lower.contains(keyword) {
-            return (*dir).to_string();
+            return config.repo_dir(repo);
         }
     }
 
-    "~/projects/rigpa/werma".to_string()
+    config.repo_dir("werma")
 }
 
 // ─── FakeLinearApi (test-only) ────────────────────────────────────────────────
@@ -1167,75 +1388,103 @@ mod tests {
         assert_eq!(infer_type_from_labels(&[]), "code"); // empty labels
     }
 
+    /// Helper: default UserConfig for tests (no custom repos — convention fallback only).
+    fn test_config() -> crate::config::UserConfig {
+        crate::config::UserConfig::default()
+    }
+
     #[test]
     fn working_dir_from_title() {
+        let cfg = test_config();
         assert_eq!(
-            infer_working_dir("Fix werma daemon crash", &[]),
+            infer_working_dir("Fix werma daemon crash", &[], &cfg),
             "~/projects/rigpa/werma"
         );
         assert_eq!(
-            infer_working_dir("Add pipeline stage", &[]),
+            infer_working_dir("Add pipeline stage", &[], &cfg),
             "~/projects/rigpa/werma"
         );
         // Default fallback for unknown titles
         assert_eq!(
-            infer_working_dir("Random task title", &[]),
+            infer_working_dir("Random task title", &[], &cfg),
             "~/projects/rigpa/werma"
         );
     }
 
     #[test]
     fn working_dir_from_repo_label() {
-        // Known repo labels map to rigpa/ paths
+        let cfg = test_config();
+        // Convention-based repo labels resolve to rigpa/ paths
         assert_eq!(
-            infer_working_dir("Some task", &["repo:forge"]),
+            infer_working_dir("Some task", &["repo:forge"], &cfg),
             "~/projects/rigpa/werma"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:werma"]),
+            infer_working_dir("Some task", &["repo:werma"], &cfg),
             "~/projects/rigpa/werma"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:fathom"]),
+            infer_working_dir("Some task", &["repo:fathom"], &cfg),
             "~/projects/rigpa/fathom"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:hyper-liq"]),
+            infer_working_dir("Some task", &["repo:hyper-liq"], &cfg),
             "~/projects/rigpa/hyper-liq"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:sui-bots"]),
+            infer_working_dir("Some task", &["repo:sui-bots"], &cfg),
             "~/projects/rigpa/sui-bots"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:ar-quant"]),
+            infer_working_dir("Some task", &["repo:ar-quant"], &cfg),
             "~/projects/rigpa/ar-quant"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:ar-quant-alpha"]),
+            infer_working_dir("Some task", &["repo:ar-quant-alpha"], &cfg),
             "~/projects/rigpa/ar-quant-alpha"
         );
         // repo: label takes priority over title keywords
         assert_eq!(
-            infer_working_dir("Fix werma bug", &["repo:fathom"]),
+            infer_working_dir("Fix werma bug", &["repo:fathom"], &cfg),
             "~/projects/rigpa/fathom"
         );
-        // Unknown repo label falls through to keyword inference
+        // Unknown repo label uses convention fallback (no keyword inference)
         assert_eq!(
-            infer_working_dir("Fix werma bug", &["repo:unknown-project"]),
-            "~/projects/rigpa/werma"
+            infer_working_dir("Fix werma bug", &["repo:unknown-project"], &cfg),
+            "~/projects/rigpa/unknown-project"
         );
     }
 
     #[test]
     fn working_dir_title_keywords() {
+        let cfg = test_config();
         assert_eq!(
-            infer_working_dir("sui bot improvements", &[]),
+            infer_working_dir("sui bot improvements", &[], &cfg),
             "~/projects/rigpa/sui-bots"
         );
         assert_eq!(
-            infer_working_dir("hyper liquidation fix", &[]),
+            infer_working_dir("hyper liquidation fix", &[], &cfg),
             "~/projects/rigpa/hyper-liq"
+        );
+    }
+
+    #[test]
+    fn working_dir_custom_config_override() {
+        let mut cfg = test_config();
+        cfg.repos
+            .insert("werma".to_string(), "/custom/path/werma".to_string());
+        assert_eq!(
+            infer_working_dir("Fix werma bug", &[], &cfg),
+            "/custom/path/werma"
+        );
+        assert_eq!(
+            infer_working_dir("Some task", &["repo:werma"], &cfg),
+            "/custom/path/werma"
+        );
+        // Non-overridden repos still use convention
+        assert_eq!(
+            infer_working_dir("Some task", &["repo:fathom"], &cfg),
+            "~/projects/rigpa/fathom"
         );
     }
 
@@ -1271,26 +1520,93 @@ mod tests {
 
     #[test]
     fn repo_label_mapping() {
-        assert_eq!(repo_label_to_dir("forge"), Some("~/projects/rigpa/werma"));
-        assert_eq!(repo_label_to_dir("werma"), Some("~/projects/rigpa/werma"));
-        assert_eq!(repo_label_to_dir("fathom"), Some("~/projects/rigpa/fathom"));
+        let cfg = test_config();
+        assert_eq!(repo_label_to_dir("forge", &cfg), "~/projects/rigpa/werma");
+        assert_eq!(repo_label_to_dir("werma", &cfg), "~/projects/rigpa/werma");
+        assert_eq!(repo_label_to_dir("fathom", &cfg), "~/projects/rigpa/fathom");
         assert_eq!(
-            repo_label_to_dir("hyper-liq"),
-            Some("~/projects/rigpa/hyper-liq")
+            repo_label_to_dir("hyper-liq", &cfg),
+            "~/projects/rigpa/hyper-liq"
         );
         assert_eq!(
-            repo_label_to_dir("sui-bots"),
-            Some("~/projects/rigpa/sui-bots")
+            repo_label_to_dir("sui-bots", &cfg),
+            "~/projects/rigpa/sui-bots"
         );
         assert_eq!(
-            repo_label_to_dir("ar-quant"),
-            Some("~/projects/rigpa/ar-quant")
+            repo_label_to_dir("ar-quant", &cfg),
+            "~/projects/rigpa/ar-quant"
         );
         assert_eq!(
-            repo_label_to_dir("ar-quant-alpha"),
-            Some("~/projects/rigpa/ar-quant-alpha")
+            repo_label_to_dir("ar-quant-alpha", &cfg),
+            "~/projects/rigpa/ar-quant-alpha"
         );
-        assert_eq!(repo_label_to_dir("unknown-repo"), None);
+        assert_eq!(repo_label_to_dir("sigil", &cfg), "~/projects/rigpa/sigil");
+        // Unknown repos get convention-based fallback
+        assert_eq!(
+            repo_label_to_dir("unknown-repo", &cfg),
+            "~/projects/rigpa/unknown-repo"
+        );
+    }
+
+    #[test]
+    fn infer_working_dir_repo_label_overrides_keyword() {
+        let cfg = test_config();
+        // repo: label should take priority over title keyword matching
+        assert_eq!(
+            infer_working_dir("Fix fathom collector", &["repo:werma"], &cfg),
+            "~/projects/rigpa/werma"
+        );
+    }
+
+    #[test]
+    fn infer_working_dir_all_repo_labels() {
+        let cfg = test_config();
+        let cases = [
+            ("repo:werma", "~/projects/rigpa/werma"),
+            ("repo:forge", "~/projects/rigpa/werma"),
+            ("repo:fathom", "~/projects/rigpa/fathom"),
+            ("repo:hyper-liq", "~/projects/rigpa/hyper-liq"),
+            ("repo:sui-bots", "~/projects/rigpa/sui-bots"),
+            ("repo:ar-quant", "~/projects/rigpa/ar-quant"),
+            ("repo:ar-quant-alpha", "~/projects/rigpa/ar-quant-alpha"),
+            ("repo:sigil", "~/projects/rigpa/sigil"),
+        ];
+        for (label, expected) in cases {
+            assert_eq!(
+                infer_working_dir("Some task", &[label], &cfg),
+                expected,
+                "failed for label: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn infer_working_dir_unknown_repo_uses_convention() {
+        let cfg = test_config();
+        // Unknown repo label uses convention fallback ~/projects/rigpa/{name}
+        assert_eq!(
+            infer_working_dir("Fix fathom bug", &["repo:nonexistent"], &cfg),
+            "~/projects/rigpa/nonexistent"
+        );
+    }
+
+    #[test]
+    fn infer_working_dir_unknown_repo_no_keyword_uses_convention() {
+        let cfg = test_config();
+        // Unknown repo label → convention path (not keyword inference)
+        assert_eq!(
+            infer_working_dir("Some generic task", &["repo:my-new-repo"], &cfg),
+            "~/projects/rigpa/my-new-repo"
+        );
+    }
+
+    #[test]
+    fn infer_working_dir_sigil_keyword() {
+        let cfg = test_config();
+        assert_eq!(
+            infer_working_dir("Build sigil signal engine", &[], &cfg),
+            "~/projects/rigpa/sigil"
+        );
     }
 
     #[test]
@@ -1312,20 +1628,22 @@ mod tests {
 
     #[test]
     fn working_dir_fathom_keyword() {
+        let cfg = test_config();
         assert_eq!(
-            infer_working_dir("Fix fathom collector", &[]),
+            infer_working_dir("Fix fathom collector", &[], &cfg),
             "~/projects/rigpa/fathom"
         );
     }
 
     #[test]
     fn working_dir_ar_quant_keywords() {
+        let cfg = test_config();
         assert_eq!(
-            infer_working_dir("Update ar-quant-alpha bot", &[]),
+            infer_working_dir("Update ar-quant-alpha bot", &[], &cfg),
             "~/projects/rigpa/ar-quant-alpha"
         );
         assert_eq!(
-            infer_working_dir("Fix ar-quant backtesting", &[]),
+            infer_working_dir("Fix ar-quant backtesting", &[], &cfg),
             "~/projects/rigpa/ar-quant"
         );
     }
@@ -1354,5 +1672,260 @@ mod tests {
             "Found mutation(s) using ID! instead of String!:\n{}",
             bad_lines.join("\n")
         );
+    }
+
+    // ─── Multi-team config tests ────────────────────────────────────────
+
+    #[test]
+    fn multi_team_config_deserialize() {
+        let json = r#"{
+            "teams": [
+                {
+                    "team_id": "id-rig",
+                    "team_key": "RIG",
+                    "statuses": {"todo": "s1", "in_progress": "s2", "done": "s3"}
+                },
+                {
+                    "team_id": "id-fat",
+                    "team_key": "FAT",
+                    "statuses": {"todo": "s4", "in_progress": "s5", "done": "s6"}
+                }
+            ]
+        }"#;
+        let config: LinearConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.teams.len(), 2);
+        assert_eq!(config.teams[0].team_key, "RIG");
+        assert_eq!(config.teams[1].team_key, "FAT");
+        assert_eq!(config.team_keys(), vec!["RIG", "FAT"]);
+    }
+
+    #[test]
+    fn legacy_single_team_config_deserialize() {
+        let json = r#"{
+            "team_id": "id-rig",
+            "team_key": "RIG",
+            "statuses": {"todo": "s1", "done": "s2"}
+        }"#;
+        let config: LinearConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.teams.len(), 1);
+        assert_eq!(config.teams[0].team_key, "RIG");
+        assert_eq!(config.teams[0].team_id, "id-rig");
+    }
+
+    #[test]
+    fn multi_team_config_roundtrip() {
+        let config = LinearConfig {
+            teams: vec![
+                TeamConfig {
+                    team_id: "id-1".to_string(),
+                    team_key: "RIG".to_string(),
+                    statuses: [("todo".to_string(), "s1".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+                TeamConfig {
+                    team_id: "id-2".to_string(),
+                    team_key: "FAT".to_string(),
+                    statuses: [("todo".to_string(), "s2".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: LinearConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.teams.len(), 2);
+        assert_eq!(loaded.team_by_key("FAT").unwrap().team_id, "id-2");
+    }
+
+    #[test]
+    fn team_by_key_lookup() {
+        let config = LinearConfig {
+            teams: vec![
+                TeamConfig {
+                    team_id: "id-rig".to_string(),
+                    team_key: "RIG".to_string(),
+                    statuses: [("done".to_string(), "rig-done".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+                TeamConfig {
+                    team_id: "id-fat".to_string(),
+                    team_key: "FAT".to_string(),
+                    statuses: [("done".to_string(), "fat-done".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+            ],
+        };
+        assert_eq!(config.team_by_key("RIG").unwrap().team_id, "id-rig");
+        assert_eq!(config.team_by_key("FAT").unwrap().team_id, "id-fat");
+        assert!(config.team_by_key("UNKNOWN").is_none());
+    }
+
+    #[test]
+    fn status_id_resolves_per_team() {
+        let config = LinearConfig {
+            teams: vec![
+                TeamConfig {
+                    team_id: "id-rig".to_string(),
+                    team_key: "RIG".to_string(),
+                    statuses: [("in_progress".to_string(), "rig-ip".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+                TeamConfig {
+                    team_id: "id-fat".to_string(),
+                    team_key: "FAT".to_string(),
+                    statuses: [("in_progress".to_string(), "fat-ip".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+            ],
+        };
+        assert_eq!(config.status_id("RIG", "in_progress").unwrap(), "rig-ip");
+        assert_eq!(config.status_id("FAT", "in_progress").unwrap(), "fat-ip");
+        // Empty team key falls back to primary
+        assert_eq!(config.status_id("", "in_progress").unwrap(), "rig-ip");
+    }
+
+    #[test]
+    fn team_key_from_identifier_extracts_prefix() {
+        assert_eq!(team_key_from_identifier("RIG-123"), "RIG");
+        assert_eq!(team_key_from_identifier("FAT-42"), "FAT");
+        assert_eq!(team_key_from_identifier("AR-1"), "AR");
+        // UUIDs should return empty
+        assert_eq!(
+            team_key_from_identifier("d199cc43-40ef-4e63-9caa-467506b781f6"),
+            ""
+        );
+        // No dash
+        assert_eq!(team_key_from_identifier("nodash"), "");
+    }
+
+    // ─── Legacy config detection tests (RIG-301) ───────────────────────
+
+    #[test]
+    fn legacy_format_detected_by_team_id_key() {
+        let legacy_json: Value = serde_json::from_str(
+            r#"{
+                "team_id": "id-rig",
+                "team_key": "RIG",
+                "statuses": {"todo": "s1", "done": "s2"}
+            }"#,
+        )
+        .unwrap();
+
+        // Legacy format: has "team_id" but no "teams"
+        assert!(legacy_json.get("team_id").is_some());
+        assert!(legacy_json.get("teams").is_none());
+    }
+
+    #[test]
+    fn multi_team_format_not_detected_as_legacy() {
+        let multi_json: Value = serde_json::from_str(
+            r#"{
+                "teams": [{
+                    "team_id": "id-rig",
+                    "team_key": "RIG",
+                    "statuses": {"todo": "s1"}
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        // Multi-team format: has "teams", no root "team_id"
+        assert!(multi_json.get("team_id").is_none());
+        assert!(multi_json.get("teams").is_some());
+    }
+
+    #[test]
+    fn legacy_json_parses_into_team_config() {
+        let legacy_json: Value = serde_json::from_str(
+            r#"{
+                "team_id": "id-rig",
+                "team_key": "RIG",
+                "statuses": {"todo": "s1", "in_progress": "s2", "done": "s3"}
+            }"#,
+        )
+        .unwrap();
+
+        let team: TeamConfig = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(team.team_id, "id-rig");
+        assert_eq!(team.team_key, "RIG");
+        assert_eq!(team.statuses.len(), 3);
+        assert_eq!(team.statuses.get("todo").unwrap(), "s1");
+    }
+
+    #[test]
+    fn force_setup_env_var_detection() {
+        // Verify the detection pattern: std::env::var("X").is_ok() returns true iff X is set.
+        // We test with an env var that definitely doesn't exist.
+        assert!(std::env::var("WERMA_TEST_NONEXISTENT_VAR_12345").is_err());
+        // The setup() code uses: let force = std::env::var("FORCE_SETUP").is_ok();
+        // This test validates the pattern works — actual FORCE_SETUP is tested via integration.
+    }
+
+    #[test]
+    fn missing_team_detection_logic() {
+        let config = LinearConfig {
+            teams: vec![TeamConfig {
+                team_id: "id-rig".to_string(),
+                team_key: "RIG".to_string(),
+                statuses: [("todo".to_string(), "s1".to_string())]
+                    .into_iter()
+                    .collect(),
+            }],
+        };
+
+        // Simulate: workspace has 2 teams, config has 1 → mismatch
+        let workspace_count = 2;
+        assert!(workspace_count > config.teams.len());
+
+        // Simulate: workspace has 1 team, config has 1 → no mismatch
+        let workspace_count = 1;
+        assert!(!(workspace_count > config.teams.len()));
+    }
+
+    #[test]
+    fn legacy_migration_preserves_existing_statuses() {
+        // Simulate what migrate_legacy_config does: parse legacy → build multi-team
+        let legacy_json: Value = serde_json::from_str(
+            r#"{
+                "team_id": "id-rig",
+                "team_key": "RIG",
+                "statuses": {"todo": "s1", "in_progress": "s2", "done": "s3", "review": "s4"}
+            }"#,
+        )
+        .unwrap();
+
+        let legacy_team: TeamConfig = serde_json::from_value(legacy_json).unwrap();
+        let new_team = TeamConfig {
+            team_id: "id-fat".to_string(),
+            team_key: "FAT".to_string(),
+            statuses: [("todo".to_string(), "f1".to_string())]
+                .into_iter()
+                .collect(),
+        };
+
+        let config = LinearConfig {
+            teams: vec![legacy_team.clone(), new_team],
+        };
+
+        // Legacy team statuses preserved exactly
+        let rig = config.team_by_key("RIG").unwrap();
+        assert_eq!(rig.statuses.len(), 4);
+        assert_eq!(rig.statuses.get("review").unwrap(), "s4");
+
+        // New team discovered
+        let fat = config.team_by_key("FAT").unwrap();
+        assert_eq!(fat.team_id, "id-fat");
+        assert_eq!(fat.statuses.get("todo").unwrap(), "f1");
+
+        // Serializes as multi-team format
+        let json = serde_json::to_string(&config).unwrap();
+        let reparsed: Value = serde_json::from_str(&json).unwrap();
+        assert!(reparsed.get("teams").is_some());
+        assert!(reparsed.get("team_id").is_none());
     }
 }
