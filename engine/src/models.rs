@@ -73,6 +73,12 @@ pub struct Task {
     pub repo_hash: String,
     #[serde(default)]
     pub estimate: i32,
+    /// How many times this task has been auto-retried after failure.
+    #[serde(default)]
+    pub retry_count: i32,
+    /// ISO timestamp: task won't be re-launched until this time passes.
+    #[serde(default)]
+    pub retry_after: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

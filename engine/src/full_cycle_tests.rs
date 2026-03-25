@@ -6,10 +6,7 @@
 #[cfg(test)]
 mod tests {
     use crate::db::{Db, make_test_task};
-    use crate::linear::LinearApi;
     use crate::models::Status;
-    use crate::pipeline::callback::NextStageParams;
-    use crate::pipeline::callback::create_next_stage_task;
     use crate::pipeline::executor::{callback, poll};
     use crate::pipeline::loader::load_from_str;
     use crate::traits::fakes::{FakeCommandRunner, FakeNotifier, StatefulFakeLinearApi};

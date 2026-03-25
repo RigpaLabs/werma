@@ -169,6 +169,8 @@ fn parse_task(v: &serde_json::Value) -> Task {
         context_files: parse_string_array(&v["context_files"]),
         repo_hash: v["repo_hash"].as_str().unwrap_or("").to_string(),
         estimate: v["estimate"].as_i64().unwrap_or(0) as i32,
+        retry_count: 0,
+        retry_after: None,
     }
 }
 

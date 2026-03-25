@@ -581,6 +581,8 @@ impl LinearClient {
                 context_files: vec![],
                 repo_hash: crate::runtime_repo_hash(),
                 estimate,
+                retry_count: 0,
+                retry_after: None,
             };
 
             db.insert_task(&task)?;

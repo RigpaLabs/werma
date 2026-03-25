@@ -683,6 +683,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -717,6 +719,8 @@ mod tests {
             context_files: vec!["ctx.txt".to_string()],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, dir.path(), dir.path()).unwrap();
@@ -749,6 +753,8 @@ mod tests {
             context_files: vec!["/nonexistent/file.txt".to_string()],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -789,6 +795,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -833,6 +841,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -868,6 +878,8 @@ mod tests {
             context_files: vec![],
             repo_hash: String::new(),
             estimate: 0,
+            retry_count: 0,
+            retry_after: None,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
