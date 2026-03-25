@@ -126,7 +126,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
         let tick_start = Instant::now();
 
         if let Ok(db) = Db::open(&db_path) {
-            if let Err(e) = cron::check_schedules(&db, werma_dir) {
+            if let Err(e) = cron::check_schedules(&db, &db, werma_dir) {
                 log_daemon(&log_path, &format!("schedule check error: {e}"));
             }
 
