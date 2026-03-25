@@ -139,7 +139,6 @@ pub fn callback(
     }
 
     // RIG-252: Detect error_max_turns in output — agent ran out of turns without completing.
-    // This is a safety net in case the runner script didn't catch it (old binary, manual complete).
     if is_max_turns_exit(result) {
         eprintln!(
             "[CALLBACK] {linear_issue_id}: task {task_id} (stage={stage}) hit max_turns — \
@@ -157,6 +156,13 @@ pub fn callback(
         return Ok(());
     }
 
+    let stage_cfg = if let Some(s) = config.stage(stage) {
+        s
+    } else {
+        eprintln!("unknown pipeline stage: {stage}");
+        return Ok(());
+    };
+
     // Post any comment blocks from agent output (non-critical)
     let comments = parse_comments(result);
     for comment_body in &comments {
@@ -164,13 +170,6 @@ pub fn callback(
             eprintln!("[CALLBACK] {linear_issue_id}: failed to post comment: {e}");
         }
     }
-
-    let stage_cfg = if let Some(s) = config.stage(stage) {
-        s
-    } else {
-        eprintln!("unknown pipeline stage: {stage}");
-        return Ok(());
-    };
 
     let verdict = parse_verdict(result);
 
@@ -196,7 +195,8 @@ pub fn callback(
         return Ok(());
     }
 
-    // For engineer/analyst: default verdict is "done" if none found
+    // Compute effective verdict once — analyst/engineer default to "done" when missing.
+    // Used for both fallback spec posting and transition routing.
     let verdict_str = verdict
         .as_deref()
         .unwrap_or(if stage == "engineer" || stage == "analyst" {
@@ -205,6 +205,25 @@ pub fn callback(
             ""
         })
         .to_lowercase();
+
+    // RIG-227: Fallback spec posting for analyst stage.
+    // Post substantive plain-text output as a comment so the spec reaches Linear.
+    // Only fire for "done" — ALREADY_DONE means no new spec was written,
+    // and BLOCKED shouldn't post a partial spec.
+    // When COMMENT blocks were posted, require substantial plain-text content
+    // (>= 5 lines) to avoid posting trivial preamble alongside proper blocks.
+    if stage == "analyst" && verdict_str == "done" {
+        let spec_body = extract_spec_from_output(result);
+        let min_lines = if comments.is_empty() { 1 } else { 5 };
+        if spec_body.lines().count() >= min_lines {
+            let truncated = truncate_lines(&spec_body, 200);
+            if let Err(e) = linear.comment(linear_issue_id, &truncated) {
+                eprintln!(
+                    "[CALLBACK] {linear_issue_id}: failed to post fallback spec comment: {e}"
+                );
+            }
+        }
+    }
 
     // Parse estimate from analyst output for adaptive track routing
     let estimate = if stage == "analyst" {
@@ -490,6 +509,69 @@ pub(crate) fn format_callback_comment(
             )
         }
     }
+}
+
+pub(crate) fn extract_spec_from_output(output: &str) -> String {
+    let mut lines = Vec::new();
+    let mut in_comment_block = false;
+    let mut unclosed_block_start = 0;
+
+    for (idx, line) in output.lines().enumerate() {
+        let trimmed = line.trim();
+
+        // Skip ---COMMENT---/---END COMMENT--- blocks (already posted)
+        if trimmed == "---COMMENT---" {
+            in_comment_block = true;
+            unclosed_block_start = idx;
+            continue;
+        }
+        if trimmed == "---END COMMENT---" {
+            in_comment_block = false;
+            continue;
+        }
+        if in_comment_block {
+            continue;
+        }
+
+        // Skip verdict and estimate metadata lines
+        let upper = trimmed.to_uppercase();
+        if upper.starts_with("VERDICT=") || upper.starts_with("ESTIMATE=") {
+            continue;
+        }
+
+        lines.push(line);
+    }
+
+    // If a ---COMMENT--- was never closed, treat it as plain text.
+    // This handles non-conforming agent output where markers are malformed.
+    if in_comment_block {
+        lines.clear();
+        for (idx, line) in output.lines().enumerate() {
+            if idx < unclosed_block_start {
+                let trimmed = line.trim();
+                let upper = trimmed.to_uppercase();
+                if upper.starts_with("VERDICT=") || upper.starts_with("ESTIMATE=") {
+                    continue;
+                }
+                lines.push(line);
+            } else {
+                // Include unclosed block content as-is (skip the marker line itself)
+                if idx == unclosed_block_start {
+                    continue;
+                }
+                let trimmed = line.trim();
+                let upper = trimmed.to_uppercase();
+                if upper.starts_with("VERDICT=") || upper.starts_with("ESTIMATE=") {
+                    continue;
+                }
+                lines.push(line);
+            }
+        }
+    }
+
+    // Trim leading/trailing blank lines
+    let result = lines.join("\n");
+    result.trim().to_string()
 }
 
 /// Parameters for creating the next pipeline stage task.
