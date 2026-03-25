@@ -11,7 +11,7 @@ use crate::linear::LinearApi;
 use crate::models::{Status, Task};
 use crate::traits::CommandRunner;
 
-use super::pr::is_pr_merged_for_issue;
+use super::pr::{has_open_pr_for_issue, is_pr_merged_for_issue};
 
 /// Check if an issue is a research issue (has `research` label).
 pub fn is_research_issue(labels: &[&str]) -> bool {
@@ -227,7 +227,10 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 }
 
                 // For reviewer stage: skip if PR is already merged (manual merge while in Review)
-                if stage_name == "reviewer" && is_pr_merged_for_issue(cmd, &working_dir, identifier)
+                // RIG-306: Only skip if merged AND no open PR exists (re-worked issues have both)
+                if stage_name == "reviewer"
+                    && is_pr_merged_for_issue(cmd, &working_dir, identifier)
+                    && !has_open_pr_for_issue(cmd, &working_dir, identifier)
                 {
                     println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
                     if let Err(e) = linear.move_issue_by_name(issue_id, "done") {
@@ -426,7 +429,11 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             }
 
             // For reviewer stage: skip if PR is already merged
-            if *stage_name == "reviewer" && is_pr_merged_for_issue(cmd, &working_dir, identifier) {
+            // RIG-306: Only skip if merged AND no open PR exists (re-worked issues have both)
+            if *stage_name == "reviewer"
+                && is_pr_merged_for_issue(cmd, &working_dir, identifier)
+                && !has_open_pr_for_issue(cmd, &working_dir, identifier)
+            {
                 println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
                 if let Err(e) = linear.move_issue_by_name(issue_id, "done") {
                     eprintln!("  ! failed to move {identifier} to done: {e}");

@@ -306,6 +306,46 @@ mod tests {
         assert!(!found);
     }
 
+    // ─── RIG-306: merged + open PR interaction ─────────────────────────
+
+    #[test]
+    fn merged_pr_exists_but_open_pr_also_exists_should_not_skip() {
+        let cmd = FakeCommandRunner::new();
+        // is_pr_merged_for_issue: returns merged PR
+        cmd.push_success(r#"[{"number":155,"headRefName":"feat/rig-281-old-work"}]"#);
+        // has_open_pr_for_issue: returns open PR (re-work)
+        cmd.push_success(r#"[{"number":160,"headRefName":"feat/rig-281-new-work"}]"#);
+
+        let merged = is_pr_merged_for_issue(&cmd, "/tmp", "RIG-281");
+        let has_open = has_open_pr_for_issue(&cmd, "/tmp", "RIG-281");
+        // Logic: merged && !has_open → should NOT skip to Done
+        assert!(merged);
+        assert!(has_open);
+        assert!(
+            !(merged && !has_open),
+            "should not skip when open PR exists alongside merged PR"
+        );
+    }
+
+    #[test]
+    fn merged_pr_exists_and_no_open_pr_should_skip() {
+        let cmd = FakeCommandRunner::new();
+        // is_pr_merged_for_issue: returns merged PR
+        cmd.push_success(r#"[{"number":155,"headRefName":"feat/rig-281-old-work"}]"#);
+        // has_open_pr_for_issue: no open PRs
+        cmd.push_success("[]");
+
+        let merged = is_pr_merged_for_issue(&cmd, "/tmp", "RIG-281");
+        let has_open = has_open_pr_for_issue(&cmd, "/tmp", "RIG-281");
+        // Logic: merged && !has_open → should skip to Done
+        assert!(merged);
+        assert!(!has_open);
+        assert!(
+            merged && !has_open,
+            "should skip to Done when only merged PR exists"
+        );
+    }
+
     // ─── post_pr_comment ─────────────────────────────────────────────────
 
     #[test]
