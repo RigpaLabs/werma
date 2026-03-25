@@ -20,8 +20,11 @@ const MIGRATION_003_SQL: &str = include_str!("../../migrations/003_estimate.sql"
 const MIGRATION_004_SQL: &str = include_str!("../../migrations/004_normalize_linear_ids.sql");
 const MIGRATION_005_SQL: &str = include_str!("../../migrations/005_callback_fired_at.sql");
 const MIGRATION_006_SQL: &str = include_str!("../../migrations/006_add_canceled_status.sql");
-const MIGRATION_007_SQL: &str =
-    include_str!("../../migrations/007_callback_attempts_and_indexes.sql");
+const MIGRATION_007_ALTER_SQL: &str =
+    "ALTER TABLE tasks ADD COLUMN callback_attempts INTEGER DEFAULT 0";
+const MIGRATION_007_INDEXES_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_tasks_linear_issue ON tasks(linear_issue_id);
+     CREATE INDEX IF NOT EXISTS idx_tasks_linear_stage ON tasks(linear_issue_id, pipeline_stage, status);";
 
 pub struct Db {
     pub(super) conn: Connection,
@@ -101,13 +104,17 @@ impl Db {
                 .execute_batch(MIGRATION_006_SQL)
                 .context("migration 006_add_canceled_status")?;
         }
-        // 007: add callback_attempts column + indexes (idempotent — ignore "duplicate column")
-        if let Err(e) = self.conn.execute_batch(MIGRATION_007_SQL) {
+        // 007: add callback_attempts column (idempotent — ignore "duplicate column")
+        if let Err(e) = self.conn.execute_batch(MIGRATION_007_ALTER_SQL) {
             let msg = e.to_string();
             if !msg.contains("duplicate column") {
-                return Err(e).context("migration 007_callback_attempts_and_indexes");
+                return Err(e).context("migration 007_callback_attempts (alter)");
             }
         }
+        // 007b: performance indexes (always run — IF NOT EXISTS handles idempotency)
+        self.conn
+            .execute_batch(MIGRATION_007_INDEXES_SQL)
+            .context("migration 007_callback_attempts (indexes)")?;
         Ok(())
     }
 }

@@ -62,9 +62,12 @@ pub fn check_zombie_tasks(
                     f.write_all(diag_entry.as_bytes())
                 })
             {
-                eprintln!(
-                    "[ZOMBIE] failed to write diagnostic log for {}: {e}",
-                    task.id
+                log_daemon(
+                    &log_path,
+                    &format!(
+                        "[ZOMBIE] failed to write diagnostic log for {}: {e}",
+                        task.id
+                    ),
                 );
             }
 
@@ -73,7 +76,10 @@ pub fn check_zombie_tasks(
                 .args(["kill-session", "-t", &session_name])
                 .output()
             {
-                eprintln!("[ZOMBIE] failed to kill tmux session {session_name}: {e}");
+                log_daemon(
+                    &log_path,
+                    &format!("[ZOMBIE] failed to kill tmux session {session_name}: {e}"),
+                );
             }
 
             mark_zombie(
@@ -103,11 +109,17 @@ fn mark_zombie(
     );
 
     if let Err(e) = db.set_task_status(&task.id, crate::models::Status::Failed) {
-        eprintln!("[ZOMBIE] failed to set status for {}: {e}", task.id);
+        log_daemon(
+            log_path,
+            &format!("[ZOMBIE] failed to set status for {}: {e}", task.id),
+        );
     }
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     if let Err(e) = db.update_task_field(&task.id, "finished_at", &now) {
-        eprintln!("[ZOMBIE] failed to set finished_at for {}: {e}", task.id);
+        log_daemon(
+            log_path,
+            &format!("[ZOMBIE] failed to set finished_at for {}: {e}", task.id),
+        );
     }
 
     let label =

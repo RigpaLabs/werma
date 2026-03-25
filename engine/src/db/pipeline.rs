@@ -212,13 +212,10 @@ impl super::Db {
     }
 
     /// Increment callback_attempts counter for a task. Returns the new count.
+    /// Uses UPDATE ... RETURNING for atomicity (SQLite 3.35+).
     pub fn increment_callback_attempts(&self, id: &str) -> Result<i32> {
-        self.conn.execute(
-            "UPDATE tasks SET callback_attempts = COALESCE(callback_attempts, 0) + 1 WHERE id = ?1",
-            params![id],
-        )?;
         let count: i32 = self.conn.query_row(
-            "SELECT COALESCE(callback_attempts, 0) FROM tasks WHERE id = ?1",
+            "UPDATE tasks SET callback_attempts = COALESCE(callback_attempts, 0) + 1 WHERE id = ?1 RETURNING callback_attempts",
             params![id],
             |row| row.get(0),
         )?;

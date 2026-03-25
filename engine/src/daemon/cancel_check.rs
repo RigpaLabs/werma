@@ -139,14 +139,25 @@ pub fn check_canceled_and_stuck(
                             .args(["kill-session", "-t", &session_name])
                             .output()
                         {
-                            eprintln!("[CANCEL] failed to kill tmux session {session_name}: {e}");
+                            log_daemon(
+                                &log_path,
+                                &format!(
+                                    "[CANCEL] failed to kill tmux session {session_name}: {e}"
+                                ),
+                            );
                         }
                         if let Err(e) = db.set_task_status(&task.id, Status::Failed) {
-                            eprintln!("[CANCEL] failed to set status for {}: {e}", task.id);
+                            log_daemon(
+                                &log_path,
+                                &format!("[CANCEL] failed to set status for {}: {e}", task.id),
+                            );
                         }
                         let now_str = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
                         if let Err(e) = db.update_task_field(&task.id, "finished_at", &now_str) {
-                            eprintln!("[CANCEL] failed to set finished_at for {}: {e}", task.id);
+                            log_daemon(
+                                &log_path,
+                                &format!("[CANCEL] failed to set finished_at for {}: {e}", task.id),
+                            );
                         }
                     }
                 }
@@ -174,16 +185,25 @@ fn cancel_task(
             .args(["kill-session", "-t", &session_name])
             .output()
         {
-            eprintln!("[CANCEL] failed to kill tmux session {session_name}: {e}");
+            log_daemon(
+                log_path,
+                &format!("[CANCEL] failed to kill tmux session {session_name}: {e}"),
+            );
         }
     }
 
     if let Err(e) = db.set_task_status(&task.id, Status::Canceled) {
-        eprintln!("[CANCEL] failed to set status for {}: {e}", task.id);
+        log_daemon(
+            log_path,
+            &format!("[CANCEL] failed to set status for {}: {e}", task.id),
+        );
     }
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     if let Err(e) = db.update_task_field(&task.id, "finished_at", &now) {
-        eprintln!("[CANCEL] failed to set finished_at for {}: {e}", task.id);
+        log_daemon(
+            log_path,
+            &format!("[CANCEL] failed to set finished_at for {}: {e}", task.id),
+        );
     }
 
     let label =

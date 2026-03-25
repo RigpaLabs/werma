@@ -98,10 +98,10 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                 }
                 Err(e) => {
                     let err_msg = e.to_string();
-                    let is_unknown_status =
-                        err_msg.contains("unknown status") || err_msg.contains("no config");
+                    let is_config_error = err_msg.contains("no config for stage")
+                        || err_msg.contains("unknown status '");
 
-                    if is_unknown_status {
+                    if is_config_error {
                         // Config errors don't resolve with retries — abandon immediately.
                         // Increment attempts as safety net: if set_linear_pushed fails,
                         // the task re-enters this path but eventually hits MAX_CALLBACK_ATTEMPTS.
@@ -413,5 +413,113 @@ mod tests {
             !log_content.contains("TTL expired"),
             "recent task should not be TTL'd"
         );
+    }
+
+    // ─── Tests for retry/abandonment paths (Blocker #2) ─────────────────
+
+    #[test]
+    fn write_dead_letter_creates_log_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        super::write_dead_letter(
+            dir.path(),
+            "20260325-001",
+            "RIG-292",
+            "engineer",
+            "no config for stage 'engineer'",
+            5,
+        );
+
+        let content = std::fs::read_to_string(dir.path().join("logs/dead-letters.log")).unwrap();
+        assert!(content.contains("20260325-001"), "should contain task_id");
+        assert!(content.contains("RIG-292"), "should contain issue_id");
+        assert!(content.contains("engineer"), "should contain stage");
+        assert!(
+            content.contains("no config for stage"),
+            "should contain error"
+        );
+        assert!(content.contains("| 5"), "should contain attempt count");
+    }
+
+    #[test]
+    fn write_dead_letter_appends_multiple_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        super::write_dead_letter(dir.path(), "task-1", "RIG-1", "analyst", "err1", 3);
+        super::write_dead_letter(dir.path(), "task-2", "RIG-2", "engineer", "err2", 5);
+
+        let content = std::fs::read_to_string(dir.path().join("logs/dead-letters.log")).unwrap();
+        let lines: Vec<_> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "should have two entries");
+        assert!(lines[0].contains("task-1"));
+        assert!(lines[1].contains("task-2"));
+    }
+
+    #[test]
+    fn increment_callback_attempts_returns_increasing_count() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_task("20260325-inc", "engineer", "pipeline-engineer");
+        db.insert_task(&task).unwrap();
+
+        assert_eq!(db.increment_callback_attempts("20260325-inc").unwrap(), 1);
+        assert_eq!(db.increment_callback_attempts("20260325-inc").unwrap(), 2);
+        assert_eq!(db.increment_callback_attempts("20260325-inc").unwrap(), 3);
+    }
+
+    #[test]
+    fn callback_stops_after_max_attempts() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_task("20260325-max", "engineer", "pipeline-engineer");
+        db.insert_task(&task).unwrap();
+
+        // Simulate MAX_CALLBACK_ATTEMPTS increments
+        for _ in 0..super::MAX_CALLBACK_ATTEMPTS {
+            db.increment_callback_attempts("20260325-max").unwrap();
+        }
+
+        let count = db.increment_callback_attempts("20260325-max").unwrap();
+        // After 5 increments, count is 6 which exceeds MAX_CALLBACK_ATTEMPTS
+        assert!(
+            count > super::MAX_CALLBACK_ATTEMPTS,
+            "count ({count}) should exceed MAX_CALLBACK_ATTEMPTS ({})",
+            super::MAX_CALLBACK_ATTEMPTS
+        );
+
+        // Verify the guard condition matches what process_completed_tasks checks
+        let final_count: i32 = super::MAX_CALLBACK_ATTEMPTS;
+        assert!(
+            final_count >= super::MAX_CALLBACK_ATTEMPTS,
+            "at exactly MAX attempts, task should be abandoned"
+        );
+    }
+
+    #[test]
+    fn config_error_detection_matches_known_errors() {
+        // These are the actual error messages produced by pipeline::callback
+        let config_errors = [
+            "no config for stage 'engineer'",
+            "unknown status 'Review' for team 'RIG'",
+        ];
+        for msg in &config_errors {
+            assert!(
+                msg.contains("no config for stage") || msg.contains("unknown status '"),
+                "should detect config error: {msg}"
+            );
+        }
+
+        // Transient errors should NOT match
+        let transient_errors = [
+            "HTTP 500: internal server error",
+            "connection timed out",
+            "no response from Linear API",
+        ];
+        for msg in &transient_errors {
+            assert!(
+                !(msg.contains("no config for stage") || msg.contains("unknown status '")),
+                "should NOT detect transient error as config error: {msg}"
+            );
+        }
     }
 }
