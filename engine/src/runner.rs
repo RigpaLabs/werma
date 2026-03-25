@@ -511,6 +511,19 @@ fi
 
 SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
 
+# RIG-252: Detect error_max_turns — agent ran out of turns without completing.
+# Claude returns is_error=false for this, but the work is incomplete.
+SUBTYPE=$(echo "$RESULT_JSON" | jq -r '.subtype // empty' 2>/dev/null || echo "")
+if [ "$SUBTYPE" = "error_max_turns" ]; then
+    echo "$(date): MAX_TURNS_EXIT — agent hit max_turns (subtype=$SUBTYPE), marking failed" >> "$LOG_FILE"
+    # Still save output for inspection
+    if [ -n "$RESULT_TEXT" ]; then
+        echo "$RESULT_TEXT" > "$RESULT_FILE"
+    fi
+    werma fail "$TASK_ID"
+    exit 1
+fi
+
 # Guard: if truly empty (claude returned nothing), log and fail
 if [ -z "$(echo "$RESULT_TEXT" | tr -d '[:space:]')" ]; then
     echo "$(date): EMPTY OUTPUT — claude returned no parseable result" >> "$LOG_FILE"
@@ -934,6 +947,36 @@ mod tests {
         assert!(script.contains("werma fail \"$TASK_ID\""));
         // Claude exit code is logged
         assert!(script.contains("CLAUDE_EXIT"));
+    }
+
+    #[test]
+    fn exec_script_detects_max_turns_exit() {
+        // RIG-252: runner script must detect error_max_turns subtype and call werma fail
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "20260325-252",
+            prompt_file: Path::new("/tmp/prompt.txt"),
+            output: "",
+            working_dir: Path::new("/tmp"),
+            tools: "Read,Edit,Write,Bash",
+            max_turns: 30,
+            model: "claude-opus-4-6",
+            fallback_model: None,
+            log_file: Path::new("/tmp/test.log"),
+            is_write_task: false,
+        });
+
+        assert!(
+            script.contains("error_max_turns"),
+            "script should check for error_max_turns subtype"
+        );
+        assert!(
+            script.contains("SUBTYPE"),
+            "script should extract SUBTYPE from JSON"
+        );
+        assert!(
+            script.contains("MAX_TURNS_EXIT"),
+            "script should log MAX_TURNS_EXIT marker"
+        );
     }
 
     #[test]
