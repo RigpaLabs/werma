@@ -1,0 +1,105 @@
+name: Prompt Eval
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'engine/pipelines/prompts/**'
+      - 'engine/pipelines/evals/**'
+      - 'engine/pipelines/default.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+jobs:
+  verdict-parsing:
+    name: Verdict Format Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install promptfoo
+        run: npm install -g promptfoo
+
+      - name: Run verdict parsing eval
+        working-directory: engine/pipelines/evals
+        run: |
+          promptfoo eval -c verdict-parsing.yaml \
+            --output verdict-results.json \
+            --no-progress-bar
+          echo "## Verdict Parsing Results" >> "$GITHUB_STEP_SUMMARY"
+          promptfoo eval -c verdict-parsing.yaml --output /dev/stdout --table-cell-max-length 80 >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: Check verdict parsing pass rate
+        working-directory: engine/pipelines/evals
+        run: |
+          TOTAL=$(jq '.results.stats.total' verdict-results.json)
+          PASSED=$(jq '.results.stats.successes' verdict-results.json)
+          RATE=$(echo "scale=2; $PASSED * 100 / $TOTAL" | bc)
+          echo "Pass rate: ${RATE}% ($PASSED/$TOTAL)"
+          if [ "$PASSED" -lt "$TOTAL" ]; then
+            echo "::error::Verdict parsing eval failed: $PASSED/$TOTAL passed"
+            exit 1
+          fi
+
+  golden-dataset:
+    name: Golden Dataset Eval
+    runs-on: ubuntu-latest
+    # Only run LLM evals on prompt changes, not on every PR
+    if: |
+      contains(github.event.pull_request.labels.*.name, 'prompt-eval') ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install promptfoo
+        run: npm install -g promptfoo
+
+      - name: Run golden dataset eval
+        working-directory: engine/pipelines/evals
+        run: |
+          promptfoo eval \
+            --output golden-results.json \
+            --no-progress-bar
+          echo "## Golden Dataset Results" >> "$GITHUB_STEP_SUMMARY"
+          promptfoo eval --output /dev/stdout --table-cell-max-length 80 >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: Check golden dataset pass rate
+        working-directory: engine/pipelines/evals
+        run: |
+          TOTAL=$(jq '.results.stats.total' golden-results.json)
+          PASSED=$(jq '.results.stats.successes' golden-results.json)
+          FAILED=$((TOTAL - PASSED))
+          RATE=$(echo "scale=2; $PASSED * 100 / $TOTAL" | bc)
+          echo "Pass rate: ${RATE}% ($PASSED/$TOTAL)"
+
+          # Allow up to 20% failure rate for LLM-based evals (non-deterministic)
+          THRESHOLD=80
+          RATE_INT=$(echo "$PASSED * 100 / $TOTAL" | bc)
+          if [ "$RATE_INT" -lt "$THRESHOLD" ]; then
+            echo "::error::Golden dataset eval below ${THRESHOLD}% threshold: ${RATE}% ($PASSED/$TOTAL)"
+            exit 1
+          else
+            echo "::notice::Golden dataset eval passed: ${RATE}% ($PASSED/$TOTAL)"
+          fi
+
+      - name: Upload eval results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prompt-eval-results
+          path: engine/pipelines/evals/golden-results.json
+          retention-days: 30

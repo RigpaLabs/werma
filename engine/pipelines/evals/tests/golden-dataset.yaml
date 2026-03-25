@@ -1,0 +1,462 @@
+# Golden dataset for werma pipeline prompt evaluation
+# Each test case targets a specific stage prompt with realistic issue data
+# and asserts correct verdict format, comment structure, and behavioral compliance.
+
+# ─── ANALYST STAGE ───────────────────────────────────────────────────────────
+
+- description: "analyst: clear feature request → VERDICT=DONE with spec"
+  vars:
+    issue_id: RIG-100
+    issue_title: "feat: add --json flag to werma st command"
+    issue_description: |
+      Add a `--json` flag to `werma st` that outputs task status as JSON
+      instead of the formatted table. Useful for scripting and piping to jq.
+      Should include all fields currently shown in the table output.
+    rejection_feedback: ""
+    code_diff: ""
+    pr_context: ""
+  assert:
+    - type: contains
+      value: "VERDICT=DONE"
+    - type: contains
+      value: "---COMMENT---"
+    - type: contains
+      value: "---END COMMENT---"
+    - type: llm-rubric
+      value: |
+        The output contains a detailed implementation spec with:
+        1. Clear description of what --json flag does
+        2. Acceptance criteria
+        3. Risks or dependencies identified
+        Grade PASS if all three are present.
+  options:
+    prompts:
+      - analyst
+
+- description: "analyst: vague issue with missing info → VERDICT=BLOCKED"
+  vars:
+    issue_id: RIG-101
+    issue_title: "fix: make it faster"
+    issue_description: "The thing is slow. Fix it."
+    rejection_feedback: ""
+    code_diff: ""
+    pr_context: ""
+  assert:
+    - type: contains
+      value: "VERDICT=BLOCKED"
+    - type: contains
+      value: "---COMMENT---"
+    - type: llm-rubric
+      value: |
+        The analyst correctly identified that the issue lacks specifics
+        (what is slow? which command? what metrics?) and asked clarifying
+        questions. Grade PASS if the response asks at least 2 specific questions.
+  options:
+    prompts:
+      - analyst
+
+- description: "analyst: well-scoped bug report → VERDICT=DONE"
+  vars:
+    issue_id: RIG-102
+    issue_title: "fix: daemon crash on empty linear_issue_id"
+    issue_description: |
+      ## Bug
+      Pipeline poller creates tasks with empty `linear_issue_id` when the
+      Linear API returns a partial response (missing `identifier` field).
+      This causes dedup to fail → infinite task spawn.
+
+      ## Steps to reproduce
+      1. Run `werma pipeline poll` when Linear API is slow
+      2. Observe ghost tasks with `sqlite3 ~/.werma/werma.db "SELECT id, linear_issue_id FROM tasks WHERE linear_issue_id = ''"`
+
+      ## Expected
+      Poller should skip issues with missing identifier field.
+    rejection_feedback: ""
+    code_diff: ""
+    pr_context: ""
+  assert:
+    - type: contains
+      value: "VERDICT=DONE"
+    - type: contains
+      value: "---COMMENT---"
+    - type: llm-rubric
+      value: |
+        The spec identifies the root cause (missing identifier field in API response),
+        proposes a fix (skip or validate), and includes acceptance criteria.
+        Grade PASS if all three are present.
+  options:
+    prompts:
+      - analyst
+
+- description: "analyst: contradictory requirements → VERDICT=BLOCKED"
+  vars:
+    issue_id: RIG-103
+    issue_title: "feat: add real-time dashboard AND remove TUI dependency"
+    issue_description: |
+      We need a real-time TUI dashboard for werma status.
+      Also, remove all TUI dependencies (ratatui, crossterm) to reduce binary size.
+    rejection_feedback: ""
+    code_diff: ""
+    pr_context: ""
+  assert:
+    - type: contains
+      value: "VERDICT=BLOCKED"
+    - type: llm-rubric
+      value: |
+        The analyst identified the contradiction: can't add a TUI dashboard
+        while removing TUI dependencies. Grade PASS if this contradiction
+        is explicitly called out.
+  options:
+    prompts:
+      - analyst
+
+- description: "analyst: infrastructure/refactor task → VERDICT=DONE"
+  vars:
+    issue_id: RIG-104
+    issue_title: "refactor: split callback.rs into submodules"
+    issue_description: |
+      `engine/src/pipeline/callback.rs` is 1,726 LOC — the largest file in the codebase.
+      Split it into:
+      - `callback/mod.rs` (re-exports)
+      - `callback/analyst.rs` (analyst verdict handling)
+      - `callback/engineer.rs` (engineer verdict + PR creation)
+      - `callback/reviewer.rs` (review verdict + status transitions)
+      - `callback/deployer.rs` (deploy verdict)
+
+      No behavior changes — pure structural refactor. All existing tests must pass.
+    rejection_feedback: ""
+    code_diff: ""
+    pr_context: ""
+  assert:
+    - type: contains
+      value: "VERDICT=DONE"
+    - type: contains
+      value: "---COMMENT---"
+  options:
+    prompts:
+      - analyst
+
+# ─── ENGINEER STAGE ──────────────────────────────────────────────────────────
+
+- description: "engineer: clear feature → plans implementation with VERDICT=DONE"
+  vars:
+    issue_id: RIG-200
+    issue_title: "feat: add --json flag to werma st command"
+    issue_description: |
+      Add a `--json` flag to `werma st` that outputs task status as JSON
+      instead of the formatted table. Modify the clap CLI definition and
+      the status command handler. Use serde_json for serialization.
+    rejection_feedback: ""
+    code_diff: ""
+    pr_context: ""
+  assert:
+    - type: contains
+      value: "VERDICT=DONE"
+    - type: not-contains
+      value: "gh pr create"
+    - type: not-contains
+      value: "gh pr merge"
+    - type: llm-rubric
+      value: |
+        The engineer's response describes implementation steps for adding
+        a --json flag. It should NOT attempt to call gh pr create or gh pr merge.
+        Grade PASS if it plans code changes and ends with VERDICT=DONE.
+  options:
+    prompts:
+      - engineer
+
+- description: "engineer: rejection feedback → addresses reviewer concerns"
+  vars:
+    issue_id: RIG-201
+    issue_title: "feat: add retry logic to Linear API calls"
+    issue_description: |
+      Add exponential backoff retry for Linear GraphQL API calls.
+      Max 3 retries, starting at 1s delay, doubling each time.
+    rejection_feedback: |
+      ## Blockers
+      - linear.rs:145 — retry loop uses `thread::sleep` instead of `tokio::time::sleep`, blocking the async runtime
+      - linear.rs:152 — no jitter added to backoff, will cause thundering herd
+      ## Nits
+      - linear.rs:140 — magic number 3 should be a constant
+    code_diff: ""
+    pr_context: ""
+  assert:
+    - type: contains
+      value: "VERDICT=DONE"
+    - type: llm-rubric
+      value: |
+        The engineer acknowledges and addresses ALL reviewer blockers:
+        1. Switches from thread::sleep to tokio::time::sleep
+        2. Adds jitter to backoff
+        3. Optionally addresses nit (magic number → constant)
+        Grade PASS if both blockers are addressed.
+  options:
+    prompts:
+      - engineer
+
+- description: "engineer: bug fix → targets root cause"
+  vars:
+    issue_id: RIG-202
+    issue_title: "fix: parse_verdict returns None for backtick-wrapped verdicts"
+    issue_description: |
+      When agents wrap their verdict in backticks (e.g. `VERDICT=DONE`),
+      parse_verdict returns None because it doesn't strip backticks.
+      This causes the callback to treat successful tasks as failures.
+
+      Fix: strip backticks from verdict line before parsing.
+    rejection_feedback: ""
+    code_diff: ""
+    pr_context: ""
+  assert:
+    - type: contains
+      value: "VERDICT=DONE"
+    - type: llm-rubric
+      value: |
+        The engineer plans to modify verdict.rs to handle backtick-wrapped
+        verdicts. The fix should strip backticks before or during parsing.
+        Grade PASS if the approach targets the root cause in verdict parsing.
+  options:
+    prompts:
+      - engineer
+
+# ─── REVIEWER STAGE ──────────────────────────────────────────────────────────
+
+- description: "reviewer: clean code → REVIEW_VERDICT=APPROVED"
+  vars:
+    issue_id: RIG-300
+    issue_title: "feat: add --json flag to werma st command"
+    issue_description: |
+      Add a `--json` flag to `werma st` that outputs task status as JSON.
+    rejection_feedback: ""
+    code_diff: |
+      diff --git a/engine/src/cli.rs b/engine/src/cli.rs
+      --- a/engine/src/cli.rs
+      +++ b/engine/src/cli.rs
+      @@ -45,6 +45,9 @@ pub enum Commands {
+           St {
+      +        /// Output status as JSON
+      +        #[arg(long)]
+      +        json: bool,
+           },
+      diff --git a/engine/src/commands/status.rs b/engine/src/commands/status.rs
+      --- a/engine/src/commands/status.rs
+      +++ b/engine/src/commands/status.rs
+      @@ -10,7 +10,15 @@ use crate::models::Task;
+      -pub fn show_status(tasks: &[Task]) {
+      +pub fn show_status(tasks: &[Task], json: bool) {
+      +    if json {
+      +        let output = serde_json::to_string_pretty(tasks)
+      +            .expect("tasks are always serializable");
+      +        println!("{output}");
+      +        return;
+      +    }
+           // existing table output...
+       }
+      diff --git a/engine/src/commands/status_test.rs b/engine/src/commands/status_test.rs
+      +++ b/engine/src/commands/status_test.rs
+      @@ -0,0 +1,15 @@
+      +#[cfg(test)]
+      +mod tests {
+      +    use super::*;
+      +    use crate::models::Task;
+      +
+      +    #[test]
+      +    fn json_output_is_valid() {
+      +        let tasks = vec![Task::test_fixture("test-1")];
+      +        let output = capture_stdout(|| show_status(&tasks, true));
+      +        let parsed: Vec<Task> = serde_json::from_str(&output).unwrap();
+      +        assert_eq!(parsed.len(), 1);
+      +        assert_eq!(parsed[0].id, "test-1");
+      +    }
+      +}
+    pr_context: ""
+  assert:
+    - type: contains
+      value: "REVIEW_VERDICT=APPROVED"
+    - type: contains
+      value: "---COMMENT---"
+    - type: llm-rubric
+      value: |
+        The reviewer approved the code because:
+        1. The diff is clean and focused
+        2. Tests are included
+        3. No security issues
+        Grade PASS if verdict is APPROVED with reasonable justification.
+  options:
+    prompts:
+      - reviewer
+
+- description: "reviewer: code with blocker → REVIEW_VERDICT=REJECTED"
+  vars:
+    issue_id: RIG-301
+    issue_title: "feat: add user input to SQL query"
+    issue_description: |
+      Add ability to filter tasks by custom SQL WHERE clause from CLI input.
+    rejection_feedback: ""
+    code_diff: |
+      diff --git a/engine/src/db/task.rs b/engine/src/db/task.rs
+      --- a/engine/src/db/task.rs
+      +++ b/engine/src/db/task.rs
+      @@ -50,6 +50,12 @@ impl TaskDb {
+      +    pub fn filter_tasks(&self, where_clause: &str) -> eyre::Result<Vec<Task>> {
+      +        let query = format!("SELECT * FROM tasks WHERE {}", where_clause);
+      +        let mut stmt = self.conn.prepare(&query)?;
+      +        let tasks = stmt.query_map([], |row| Task::from_row(row))?
+      +            .collect::<Result<Vec<_>, _>>()?;
+      +        Ok(tasks)
+      +    }
+    pr_context: ""
+  assert:
+    - type: contains
+      value: "REVIEW_VERDICT=REJECTED"
+    - type: icontains
+      value: "sql injection"
+    - type: contains
+      value: "---COMMENT---"
+    - type: llm-rubric
+      value: |
+        The reviewer correctly identified SQL injection vulnerability in
+        the format!() string interpolation of user input into a SQL query.
+        This MUST be flagged as a blocker. Grade PASS if SQL injection is
+        identified and the review is REJECTED.
+  options:
+    prompts:
+      - reviewer
+
+- description: "reviewer: missing tests → REVIEW_VERDICT=REJECTED"
+  vars:
+    issue_id: RIG-302
+    issue_title: "feat: add exponential backoff to Linear API"
+    issue_description: |
+      Add retry with exponential backoff for Linear API calls.
+    rejection_feedback: ""
+    code_diff: |
+      diff --git a/engine/src/linear.rs b/engine/src/linear.rs
+      --- a/engine/src/linear.rs
+      +++ b/engine/src/linear.rs
+      @@ -100,8 +100,25 @@ impl LinearClient {
+      -    pub async fn query(&self, graphql: &str) -> eyre::Result<serde_json::Value> {
+      -        let resp = self.client.post(&self.url)
+      +    pub async fn query_with_retry(&self, graphql: &str) -> eyre::Result<serde_json::Value> {
+      +        let mut delay = Duration::from_secs(1);
+      +        let max_retries = 3;
+      +
+      +        for attempt in 0..=max_retries {
+      +            match self.client.post(&self.url)
+                       .header("Authorization", &self.api_key)
+                       .json(&serde_json::json!({"query": graphql}))
+      -                .send().await?;
+      -        Ok(resp.json().await?)
+      +                .send().await
+      +            {
+      +                Ok(resp) => return Ok(resp.json().await?),
+      +                Err(e) if attempt < max_retries => {
+      +                    tracing::warn!(attempt, error = %e, "Linear API retry");
+      +                    tokio::time::sleep(delay).await;
+      +                    delay *= 2;
+      +                }
+      +                Err(e) => return Err(e.into()),
+      +            }
+      +        }
+      +        unreachable!()
+           }
+    pr_context: ""
+  assert:
+    - type: contains
+      value: "REVIEW_VERDICT=REJECTED"
+    - type: llm-rubric
+      value: |
+        The reviewer flagged that no tests were added for the retry logic.
+        This is a significant behavioral change (retry + backoff) that needs
+        unit tests. Grade PASS if missing tests are flagged as a blocker.
+  options:
+    prompts:
+      - reviewer
+
+- description: "reviewer: nits only → REVIEW_VERDICT=APPROVED"
+  vars:
+    issue_id: RIG-303
+    issue_title: "docs: update CLAUDE.md with new pipeline stages"
+    issue_description: "Update CLAUDE.md to reflect the new deployer stage."
+    rejection_feedback: ""
+    code_diff: |
+      diff --git a/CLAUDE.md b/CLAUDE.md
+      --- a/CLAUDE.md
+      +++ b/CLAUDE.md
+      @@ -50,6 +50,7 @@
+       | analyst | `analyze` | Writes spec |
+       | engineer | `code` | Creates branch, writes code, opens PR |
+       | reviewer | `review` | Reviews PR on GitHub |
+      +| deployer | `full` | Merges PR, waits for release, verifies |
+
+       ### Agent Verdict Protocol
+      @@ -58,3 +59,4 @@
+       - Engineer: `PR_URL=https://github.com/...` or `FIX_VERDICT=FIXED`
+       - Reviewer: `REVIEW_VERDICT=APPROVED` or `REVIEW_VERDICT=REQUEST_CHANGES`
+      +- Deployer: `VERDICT=DONE`, `VERDICT=CONFLICTS`, or `VERDICT=FAILED`
+    pr_context: ""
+  assert:
+    - type: contains
+      value: "REVIEW_VERDICT=APPROVED"
+    - type: llm-rubric
+      value: |
+        The reviewer approved a documentation-only change. There should be
+        no blockers for a simple CLAUDE.md update. Grade PASS if approved.
+  options:
+    prompts:
+      - reviewer
+
+# ─── DEPLOYER STAGE ──────────────────────────────────────────────────────────
+
+- description: "deployer: PR ready → plans merge with VERDICT=DONE"
+  vars:
+    issue_id: RIG-400
+    issue_title: "feat: add --json flag to werma st"
+    issue_description: "Add JSON output flag to status command."
+    rejection_feedback: ""
+    code_diff: ""
+    pr_context: |
+      PR #42: feat: add --json flag to werma st
+      Status: open, CI passing, approved
+      Branch: feat/RIG-400-json-flag
+      Mergeable: true
+  assert:
+    - type: contains
+      value: "VERDICT=DONE"
+    - type: not-contains
+      value: "VERDICT=CONFLICTS"
+    - type: not-contains
+      value: "VERDICT=FAILED"
+    - type: llm-rubric
+      value: |
+        The deployer plans to merge the PR and wait for the release workflow.
+        The response follows the correct sequence: find PR → check mergeable → merge → wait → verify.
+        Grade PASS if the sequence is correct and verdict is DONE.
+  options:
+    prompts:
+      - deployer
+
+- description: "deployer: merge conflicts → VERDICT=CONFLICTS"
+  vars:
+    issue_id: RIG-401
+    issue_title: "fix: daemon crash on startup"
+    issue_description: "Fix panic in daemon initialization."
+    rejection_feedback: ""
+    code_diff: ""
+    pr_context: |
+      PR #55: fix: daemon crash on startup
+      Status: open, CI passing, approved
+      Branch: fix/RIG-401-daemon-crash
+      Mergeable: false — merge conflicts detected
+      Conflicting files: engine/src/daemon/mod.rs
+  assert:
+    - type: contains
+      value: "VERDICT=CONFLICTS"
+    - type: llm-rubric
+      value: |
+        The deployer detected merge conflicts and correctly output VERDICT=CONFLICTS
+        instead of attempting to force-merge. Grade PASS if conflicts are reported
+        and the verdict is CONFLICTS.
+  options:
+    prompts:
+      - deployer
