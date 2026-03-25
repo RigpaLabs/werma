@@ -53,7 +53,15 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                             task.linear_issue_id, task.id
                         ),
                     );
-                    let _ = db.set_linear_pushed(&task.id, true);
+                    if let Err(e) = db.set_linear_pushed(&task.id, true) {
+                        log_daemon(
+                            &log_path,
+                            &format!(
+                                "[CALLBACK] {}: {} — TTL set_linear_pushed failed: {e}",
+                                task.linear_issue_id, task.id
+                            ),
+                        );
+                    }
                     continue;
                 }
             }
@@ -95,6 +103,9 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
 
                     if is_unknown_status {
                         // Config errors don't resolve with retries — abandon immediately.
+                        // Increment attempts as safety net: if set_linear_pushed fails,
+                        // the task re-enters this path but eventually hits MAX_CALLBACK_ATTEMPTS.
+                        let attempts = db.increment_callback_attempts(&task.id).unwrap_or(1);
                         log_daemon(
                             &log_path,
                             &format!(
@@ -102,14 +113,22 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                                 task.linear_issue_id, task.id, task.pipeline_stage
                             ),
                         );
-                        let _ = db.set_linear_pushed(&task.id, true);
+                        if let Err(e) = db.set_linear_pushed(&task.id, true) {
+                            log_daemon(
+                                &log_path,
+                                &format!(
+                                    "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
+                                    task.linear_issue_id, task.id
+                                ),
+                            );
+                        }
                         write_dead_letter(
                             werma_dir,
                             &task.id,
                             &task.linear_issue_id,
                             &task.pipeline_stage,
                             &err_msg,
-                            0,
+                            attempts,
                         );
                         continue;
                     }
@@ -134,7 +153,15 @@ pub fn process_completed_tasks(db: &Db, werma_dir: &Path) -> Result<()> {
                                 task.linear_issue_id, task.id, attempts
                             ),
                         );
-                        let _ = db.set_linear_pushed(&task.id, true);
+                        if let Err(e) = db.set_linear_pushed(&task.id, true) {
+                            log_daemon(
+                                &log_path,
+                                &format!(
+                                    "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
+                                    task.linear_issue_id, task.id
+                                ),
+                            );
+                        }
                         write_dead_letter(
                             werma_dir,
                             &task.id,
