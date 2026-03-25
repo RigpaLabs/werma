@@ -253,6 +253,7 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [version]
+    if: needs.version.outputs.skipped != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
