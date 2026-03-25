@@ -67,6 +67,8 @@ pub fn cmd_add(db: &Db, p: AddParams) -> Result<()> {
         estimate: 0,
         retry_count: 0,
         retry_after: None,
+        cost_usd: None,
+        turns_used: 0,
     };
 
     db.insert_task(&task)?;

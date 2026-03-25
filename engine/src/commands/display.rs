@@ -87,19 +87,36 @@ pub fn format_duration_secs(secs: i64) -> String {
     }
 }
 
+pub fn format_cost_turns(task: &Task) -> String {
+    let mut parts = Vec::new();
+    if let Some(cost) = task.cost_usd {
+        parts.push(format!("${cost:.2}"));
+    }
+    if task.turns_used > 0 {
+        parts.push(format!("{}t", task.turns_used));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("  ({})", parts.join("/"))
+    }
+}
+
 pub fn format_task_line(task: &Task, time_str: &str) -> String {
     let linear = if task.linear_issue_id.is_empty() {
         String::new()
     } else {
         format!("  [{}]", task.linear_issue_id.cyan())
     };
+    let cost_turns = format_cost_turns(task);
     let preview = truncate(&task.prompt, 45);
     format!(
-        "   {}  {}{}  {}  {}",
+        "   {}  {}{}  {}{}  {}",
         task.id,
         task.task_type.blue(),
         linear,
         time_str.dimmed(),
+        cost_turns.dimmed(),
         preview,
     )
 }

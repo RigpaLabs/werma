@@ -41,6 +41,8 @@ pub fn cmd_complete(
     id: &str,
     session: Option<&str>,
     result_file: Option<&str>,
+    cost_usd: Option<f64>,
+    turns_used: Option<i32>,
 ) -> Result<()> {
     let task = db.task(id)?.context(format!("task not found: {id}"))?;
 
@@ -58,6 +60,12 @@ pub fn cmd_complete(
     db.update_task_field(id, "finished_at", &now)?;
     if let Some(sid) = session {
         db.update_task_field(id, "session_id", sid)?;
+    }
+    if let Some(cost) = cost_usd {
+        db.update_task_field(id, "cost_usd", &cost.to_string())?;
+    }
+    if let Some(turns) = turns_used {
+        db.update_task_field(id, "turns_used", &turns.to_string())?;
     }
 
     db.increment_usage(&task.model)?;
@@ -216,7 +224,130 @@ pub fn cmd_clean(db: &Db) -> Result<()> {
     Ok(())
 }
 
+pub fn cmd_peek(db: &Db, id: &str) -> Result<()> {
+    let task = db.task(id)?.context(format!("task not found: {id}"))?;
+
+    println!("=== Peek: {id} ===");
+    println!(
+        "status: {:?}  type: {}  model: {}",
+        task.status, task.task_type, task.model
+    );
+    if !task.pipeline_stage.is_empty() {
+        println!(
+            "stage: {}  issue: {}",
+            task.pipeline_stage, task.linear_issue_id
+        );
+    }
+
+    // Elapsed time
+    if let Some(ref started_str) = task.started_at {
+        if let Ok(started) = chrono::NaiveDateTime::parse_from_str(started_str, "%Y-%m-%dT%H:%M:%S")
+        {
+            let now = chrono::Local::now().naive_local();
+            let elapsed = now - started;
+            let mins = elapsed.num_minutes();
+            let secs = elapsed.num_seconds() % 60;
+            println!("elapsed: {mins}m {secs}s");
+        }
+    }
+
+    // Cost and turns
+    if let Some(cost) = task.cost_usd {
+        println!("cost: ${cost:.4}");
+    }
+    if task.turns_used > 0 {
+        println!("turns: {}", task.turns_used);
+    }
+
+    // Working directory info
+    println!("dir: {}", task.working_dir);
+
+    // Check worktree for recent activity
+    let working_dir = std::path::Path::new(&task.working_dir);
+    if working_dir.exists() {
+        // git diff --stat for uncommitted changes
+        let diff_output = std::process::Command::new("git")
+            .args(["diff", "--stat", "HEAD"])
+            .current_dir(working_dir)
+            .output();
+        if let Ok(out) = diff_output {
+            let diff_text = String::from_utf8_lossy(&out.stdout);
+            if !diff_text.trim().is_empty() {
+                println!("\n--- uncommitted changes ---");
+                print!("{diff_text}");
+            } else {
+                println!("\nno uncommitted changes");
+            }
+        }
+
+        // Find most recently modified file
+        let recent = std::process::Command::new("find")
+            .args([
+                ".", "-not", "-path", "./.git/*", "-type", "f", "-printf", "%T@ %p\n",
+            ])
+            .current_dir(working_dir)
+            .output();
+
+        // macOS find doesn't support -printf; try stat-based fallback
+        let last_modified = if let Ok(ref out) = recent {
+            if out.status.success() {
+                parse_most_recent_from_printf(&String::from_utf8_lossy(&out.stdout))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some((ts, path)) = last_modified {
+            let now = chrono::Local::now().timestamp();
+            let age_secs = now - ts;
+            let age_min = age_secs / 60;
+            if age_min < 1 {
+                println!("last file change: {path} ({age_secs}s ago)");
+            } else {
+                println!("last file change: {path} ({age_min}m ago)");
+            }
+            if age_min > 5 && task.status == Status::Running {
+                println!("WARNING: no file changes in >5min — agent may be idle");
+            }
+        }
+    }
+
+    // tmux session check
+    let session_name = format!("werma-{id}");
+    let tmux_check = std::process::Command::new("tmux")
+        .args(["has-session", "-t", &session_name])
+        .output();
+    match tmux_check {
+        Ok(out) if out.status.success() => println!("\ntmux: {session_name} (active)"),
+        _ => println!("\ntmux: {session_name} (not found)"),
+    }
+
+    Ok(())
+}
+
 // --- Private helpers ---
+
+fn parse_most_recent_from_printf(output: &str) -> Option<(i64, String)> {
+    let mut best_ts: f64 = 0.0;
+    let mut best_path = String::new();
+    for line in output.lines() {
+        if let Some((ts_str, path)) = line.split_once(' ') {
+            if let Ok(ts) = ts_str.parse::<f64>() {
+                if ts > best_ts {
+                    best_ts = ts;
+                    best_path = path.to_string();
+                }
+            }
+        }
+    }
+    if best_ts > 0.0 {
+        Some((best_ts as i64, best_path))
+    } else {
+        None
+    }
+}
 
 fn log_empty_output(id: &str, task: &Task, result_file: Option<&str>) {
     let werma_dir = dirs::home_dir()
@@ -304,7 +435,7 @@ mod tests {
         };
         db.insert_task(&task).unwrap();
 
-        cmd_complete(&db, "20260313-001", None, None).unwrap();
+        cmd_complete(&db, "20260313-001", None, None, None, None).unwrap();
         let t = db.task("20260313-001").unwrap().unwrap();
         assert_eq!(t.status, Status::Completed);
     }
@@ -386,7 +517,7 @@ mod tests {
         };
         db.insert_task(&task).unwrap();
 
-        cmd_complete(&db, "20260313-002", None, None).unwrap();
+        cmd_complete(&db, "20260313-002", None, None, None, None).unwrap();
 
         let t = db.task("20260313-002").unwrap().unwrap();
         assert_eq!(

@@ -765,6 +765,8 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         estimate: p.estimate,
         retry_count: 0,
         retry_after: None,
+        cost_usd: None,
+        turns_used: 0,
     };
 
     db.insert_task(&task)?;
@@ -978,6 +980,8 @@ mod tests {
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         };
         db.insert_task(&analyst_task).unwrap();
 
@@ -1641,6 +1645,8 @@ stages:
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         };
         db.insert_task(&task).unwrap();
 
@@ -1717,6 +1723,8 @@ stages:
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         };
         db.insert_task(&task).unwrap();
 

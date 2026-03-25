@@ -26,7 +26,8 @@ impl super::Db {
         let base_sql = "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate,
+                    retry_count, retry_after, cost_usd, turns_used
              FROM tasks WHERE linear_issue_id = ?1";
         let stage_clause = if stage.is_some() {
             " AND pipeline_stage = ?2"
@@ -128,7 +129,8 @@ impl super::Db {
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
-                    pipeline_stage, depends_on, context_files, repo_hash, estimate
+                    pipeline_stage, depends_on, context_files, repo_hash, estimate,
+                    retry_count, retry_after, cost_usd, turns_used
              FROM tasks
              WHERE linear_issue_id != '' AND linear_pushed = 0 AND status = 'completed'
              ORDER BY created_at ASC",
@@ -605,6 +607,8 @@ mod tests {
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         };
         db.insert_task(&task).unwrap();
 

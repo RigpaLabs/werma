@@ -593,6 +593,10 @@ fi
 
 SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
 
+# RIG-291: Extract cost and turns from Claude JSON output
+COST_USD=$(echo "$RESULT_JSON" | jq -r '.total_cost_usd // empty' 2>/dev/null || echo "")
+NUM_TURNS=$(echo "$RESULT_JSON" | jq -r '.num_turns // empty' 2>/dev/null || echo "")
+
 # RIG-252: Detect error_max_turns — agent ran out of turns without completing.
 # Claude returns is_error=false for this, but the work is incomplete.
 SUBTYPE=$(echo "$RESULT_JSON" | jq -r '.subtype // empty' 2>/dev/null || echo "")
@@ -650,7 +654,14 @@ if [ -n "$OUTPUT" ]; then
     echo "$RESULT_TEXT" > "$OUTPUT"
 fi
 
-werma complete "$TASK_ID" --session "$SESSION_ID" --result-file "$RESULT_FILE"
+COMPLETE_ARGS="--session \"$SESSION_ID\" --result-file \"$RESULT_FILE\""
+if [ -n "$COST_USD" ]; then
+    COMPLETE_ARGS="$COMPLETE_ARGS --cost $COST_USD"
+fi
+if [ -n "$NUM_TURNS" ]; then
+    COMPLETE_ARGS="$COMPLETE_ARGS --turns $NUM_TURNS"
+fi
+eval werma complete "$TASK_ID" $COMPLETE_ARGS
 
 echo "$(date): DONE (session=$SESSION_ID)" >> "$LOG_FILE"
 "##
@@ -790,6 +801,8 @@ mod tests {
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -826,6 +839,8 @@ mod tests {
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         };
 
         let result = build_prompt(&task, dir.path(), dir.path()).unwrap();
@@ -860,6 +875,8 @@ mod tests {
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -902,6 +919,8 @@ mod tests {
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -948,6 +967,8 @@ mod tests {
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -985,6 +1006,8 @@ mod tests {
             estimate: 0,
             retry_count: 0,
             retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
