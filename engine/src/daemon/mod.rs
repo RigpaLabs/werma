@@ -130,7 +130,9 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 log_daemon(&log_path, &format!("schedule check error: {e}"));
             }
 
-            if let Err(e) = pipeline::process_completed_tasks(&db, werma_dir) {
+            if let Err(e) =
+                pipeline::process_completed_tasks(&db, werma_dir, &cmd_runner, &notifier)
+            {
                 log_daemon(&log_path, &format!("pipeline callback error: {e}"));
             }
 
@@ -191,6 +193,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                     &log_path,
                     &mut cleanliness_notified,
                     CLEANLINESS_COOLDOWN_SECS,
+                    &notifier,
                 ) {
                     log_daemon(&log_path, &format!("main branch check error: {e}"));
                 }
