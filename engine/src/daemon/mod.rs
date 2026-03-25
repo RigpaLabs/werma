@@ -126,11 +126,13 @@ pub fn run(werma_dir: &Path) -> Result<()> {
         let tick_start = Instant::now();
 
         if let Ok(db) = Db::open(&db_path) {
-            if let Err(e) = cron::check_schedules(&db, werma_dir) {
+            if let Err(e) = cron::check_schedules(&db, &db, werma_dir) {
                 log_daemon(&log_path, &format!("schedule check error: {e}"));
             }
 
-            if let Err(e) = pipeline::process_completed_tasks(&db, werma_dir) {
+            if let Err(e) =
+                pipeline::process_completed_tasks(&db, werma_dir, &cmd_runner, &notifier)
+            {
                 log_daemon(&log_path, &format!("pipeline callback error: {e}"));
             }
 
@@ -191,6 +193,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                     &log_path,
                     &mut cleanliness_notified,
                     CLEANLINESS_COOLDOWN_SECS,
+                    &notifier,
                 ) {
                     log_daemon(&log_path, &format!("main branch check error: {e}"));
                 }

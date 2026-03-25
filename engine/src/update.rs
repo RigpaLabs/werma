@@ -34,6 +34,8 @@ fn current_target() -> &'static str {
         "x86_64-apple-darwin"
     } else if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
         "x86_64-unknown-linux-gnu"
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
+        "aarch64-unknown-linux-gnu"
     } else {
         "unknown"
     }

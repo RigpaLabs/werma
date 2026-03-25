@@ -481,6 +481,8 @@ impl LinearClient {
                         title
                         description
                         priority
+                        estimate
+                        state { type }
                         labels { nodes { name } }
                     }
                 }
@@ -533,7 +535,8 @@ impl LinearClient {
             }
 
             let task_type = infer_type_from_labels(&labels);
-            let working_dir = infer_working_dir(title, &labels);
+            let user_cfg = crate::config::UserConfig::load();
+            let working_dir = infer_working_dir(title, &labels, &user_cfg);
             if validate_working_dir(&working_dir).is_none() {
                 eprintln!(
                     "  ! skipping {identifier} [{title}]: working dir '{working_dir}' does not exist"
@@ -1146,19 +1149,13 @@ pub fn is_manual_issue(labels: &[&str]) -> bool {
     labels.iter().any(|l| l.eq_ignore_ascii_case("manual"))
 }
 
-/// Map a `repo:*` label value to its local directory path.
-/// All RigpaLabs repos live under `~/projects/rigpa/`.
-fn repo_label_to_dir(repo: &str) -> Option<&'static str> {
-    match repo.trim() {
-        "forge" | "werma" => Some("~/projects/rigpa/werma"),
-        "fathom" => Some("~/projects/rigpa/fathom"),
-        "hyper-liq" => Some("~/projects/rigpa/hyper-liq"),
-        "sui-bots" => Some("~/projects/rigpa/sui-bots"),
-        "ar-quant" => Some("~/projects/rigpa/ar-quant"),
-        "ar-quant-alpha" => Some("~/projects/rigpa/ar-quant-alpha"),
-        "sigil" => Some("~/projects/rigpa/sigil"),
-        _ => None,
-    }
+/// Map a `repo:*` label value to its local directory path using config.
+/// Handles the `forge` → `werma` alias, then delegates to `UserConfig::repo_dir`.
+fn repo_label_to_dir(repo: &str, config: &crate::config::UserConfig) -> String {
+    let repo = repo.trim();
+    // Handle legacy alias
+    let repo = if repo == "forge" { "werma" } else { repo };
+    config.repo_dir(repo)
 }
 
 /// Expand `~` to the user's home directory.
@@ -1183,41 +1180,40 @@ pub fn validate_working_dir(dir: &str) -> Option<String> {
 }
 
 /// Infer working directory from title keywords and labels.
-pub fn infer_working_dir(title: &str, labels: &[&str]) -> String {
+/// Uses `UserConfig` for repo label → directory resolution.
+pub fn infer_working_dir(
+    title: &str,
+    labels: &[&str],
+    config: &crate::config::UserConfig,
+) -> String {
     let title_lower = title.to_lowercase();
 
     // Check for repo: label (explicit mapping takes priority)
     for label in labels {
         if let Some(repo) = label.strip_prefix("repo:") {
-            if let Some(dir) = repo_label_to_dir(repo) {
-                return dir.to_string();
-            }
-            // Unknown repo label — fall through to keyword matching
-            eprintln!(
-                "warning: unknown repo label 'repo:{repo}', falling back to keyword inference"
-            );
+            return repo_label_to_dir(repo, config);
         }
     }
 
-    // Keyword-based inference
+    // Keyword-based inference: keyword → repo name, resolved via config
     let keywords: &[(&str, &str)] = &[
-        ("werma", "~/projects/rigpa/werma"),
-        ("pipeline", "~/projects/rigpa/werma"),
-        ("fathom", "~/projects/rigpa/fathom"),
-        ("sigil", "~/projects/rigpa/sigil"),
-        ("sui", "~/projects/rigpa/sui-bots"),
-        ("hyper", "~/projects/rigpa/hyper-liq"),
-        ("ar-quant-alpha", "~/projects/rigpa/ar-quant-alpha"),
-        ("ar-quant", "~/projects/rigpa/ar-quant"),
+        ("werma", "werma"),
+        ("pipeline", "werma"),
+        ("fathom", "fathom"),
+        ("sigil", "sigil"),
+        ("sui", "sui-bots"),
+        ("hyper", "hyper-liq"),
+        ("ar-quant-alpha", "ar-quant-alpha"),
+        ("ar-quant", "ar-quant"),
     ];
 
-    for (keyword, dir) in keywords {
+    for (keyword, repo) in keywords {
         if title_lower.contains(keyword) {
-            return (*dir).to_string();
+            return config.repo_dir(repo);
         }
     }
 
-    "~/projects/rigpa/werma".to_string()
+    config.repo_dir("werma")
 }
 
 // ─── FakeLinearApi (test-only) ────────────────────────────────────────────────
@@ -1392,75 +1388,103 @@ mod tests {
         assert_eq!(infer_type_from_labels(&[]), "code"); // empty labels
     }
 
+    /// Helper: default UserConfig for tests (no custom repos — convention fallback only).
+    fn test_config() -> crate::config::UserConfig {
+        crate::config::UserConfig::default()
+    }
+
     #[test]
     fn working_dir_from_title() {
+        let cfg = test_config();
         assert_eq!(
-            infer_working_dir("Fix werma daemon crash", &[]),
+            infer_working_dir("Fix werma daemon crash", &[], &cfg),
             "~/projects/rigpa/werma"
         );
         assert_eq!(
-            infer_working_dir("Add pipeline stage", &[]),
+            infer_working_dir("Add pipeline stage", &[], &cfg),
             "~/projects/rigpa/werma"
         );
         // Default fallback for unknown titles
         assert_eq!(
-            infer_working_dir("Random task title", &[]),
+            infer_working_dir("Random task title", &[], &cfg),
             "~/projects/rigpa/werma"
         );
     }
 
     #[test]
     fn working_dir_from_repo_label() {
-        // Known repo labels map to rigpa/ paths
+        let cfg = test_config();
+        // Convention-based repo labels resolve to rigpa/ paths
         assert_eq!(
-            infer_working_dir("Some task", &["repo:forge"]),
+            infer_working_dir("Some task", &["repo:forge"], &cfg),
             "~/projects/rigpa/werma"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:werma"]),
+            infer_working_dir("Some task", &["repo:werma"], &cfg),
             "~/projects/rigpa/werma"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:fathom"]),
+            infer_working_dir("Some task", &["repo:fathom"], &cfg),
             "~/projects/rigpa/fathom"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:hyper-liq"]),
+            infer_working_dir("Some task", &["repo:hyper-liq"], &cfg),
             "~/projects/rigpa/hyper-liq"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:sui-bots"]),
+            infer_working_dir("Some task", &["repo:sui-bots"], &cfg),
             "~/projects/rigpa/sui-bots"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:ar-quant"]),
+            infer_working_dir("Some task", &["repo:ar-quant"], &cfg),
             "~/projects/rigpa/ar-quant"
         );
         assert_eq!(
-            infer_working_dir("Some task", &["repo:ar-quant-alpha"]),
+            infer_working_dir("Some task", &["repo:ar-quant-alpha"], &cfg),
             "~/projects/rigpa/ar-quant-alpha"
         );
         // repo: label takes priority over title keywords
         assert_eq!(
-            infer_working_dir("Fix werma bug", &["repo:fathom"]),
+            infer_working_dir("Fix werma bug", &["repo:fathom"], &cfg),
             "~/projects/rigpa/fathom"
         );
-        // Unknown repo label falls through to keyword inference
+        // Unknown repo label uses convention fallback (no keyword inference)
         assert_eq!(
-            infer_working_dir("Fix werma bug", &["repo:unknown-project"]),
-            "~/projects/rigpa/werma"
+            infer_working_dir("Fix werma bug", &["repo:unknown-project"], &cfg),
+            "~/projects/rigpa/unknown-project"
         );
     }
 
     #[test]
     fn working_dir_title_keywords() {
+        let cfg = test_config();
         assert_eq!(
-            infer_working_dir("sui bot improvements", &[]),
+            infer_working_dir("sui bot improvements", &[], &cfg),
             "~/projects/rigpa/sui-bots"
         );
         assert_eq!(
-            infer_working_dir("hyper liquidation fix", &[]),
+            infer_working_dir("hyper liquidation fix", &[], &cfg),
             "~/projects/rigpa/hyper-liq"
+        );
+    }
+
+    #[test]
+    fn working_dir_custom_config_override() {
+        let mut cfg = test_config();
+        cfg.repos
+            .insert("werma".to_string(), "/custom/path/werma".to_string());
+        assert_eq!(
+            infer_working_dir("Fix werma bug", &[], &cfg),
+            "/custom/path/werma"
+        );
+        assert_eq!(
+            infer_working_dir("Some task", &["repo:werma"], &cfg),
+            "/custom/path/werma"
+        );
+        // Non-overridden repos still use convention
+        assert_eq!(
+            infer_working_dir("Some task", &["repo:fathom"], &cfg),
+            "~/projects/rigpa/fathom"
         );
     }
 
@@ -1496,40 +1520,47 @@ mod tests {
 
     #[test]
     fn repo_label_mapping() {
-        assert_eq!(repo_label_to_dir("forge"), Some("~/projects/rigpa/werma"));
-        assert_eq!(repo_label_to_dir("werma"), Some("~/projects/rigpa/werma"));
-        assert_eq!(repo_label_to_dir("fathom"), Some("~/projects/rigpa/fathom"));
+        let cfg = test_config();
+        assert_eq!(repo_label_to_dir("forge", &cfg), "~/projects/rigpa/werma");
+        assert_eq!(repo_label_to_dir("werma", &cfg), "~/projects/rigpa/werma");
+        assert_eq!(repo_label_to_dir("fathom", &cfg), "~/projects/rigpa/fathom");
         assert_eq!(
-            repo_label_to_dir("hyper-liq"),
-            Some("~/projects/rigpa/hyper-liq")
+            repo_label_to_dir("hyper-liq", &cfg),
+            "~/projects/rigpa/hyper-liq"
         );
         assert_eq!(
-            repo_label_to_dir("sui-bots"),
-            Some("~/projects/rigpa/sui-bots")
+            repo_label_to_dir("sui-bots", &cfg),
+            "~/projects/rigpa/sui-bots"
         );
         assert_eq!(
-            repo_label_to_dir("ar-quant"),
-            Some("~/projects/rigpa/ar-quant")
+            repo_label_to_dir("ar-quant", &cfg),
+            "~/projects/rigpa/ar-quant"
         );
         assert_eq!(
-            repo_label_to_dir("ar-quant-alpha"),
-            Some("~/projects/rigpa/ar-quant-alpha")
+            repo_label_to_dir("ar-quant-alpha", &cfg),
+            "~/projects/rigpa/ar-quant-alpha"
         );
-        assert_eq!(repo_label_to_dir("sigil"), Some("~/projects/rigpa/sigil"));
-        assert_eq!(repo_label_to_dir("unknown-repo"), None);
+        assert_eq!(repo_label_to_dir("sigil", &cfg), "~/projects/rigpa/sigil");
+        // Unknown repos get convention-based fallback
+        assert_eq!(
+            repo_label_to_dir("unknown-repo", &cfg),
+            "~/projects/rigpa/unknown-repo"
+        );
     }
 
     #[test]
     fn infer_working_dir_repo_label_overrides_keyword() {
+        let cfg = test_config();
         // repo: label should take priority over title keyword matching
         assert_eq!(
-            infer_working_dir("Fix fathom collector", &["repo:werma"]),
+            infer_working_dir("Fix fathom collector", &["repo:werma"], &cfg),
             "~/projects/rigpa/werma"
         );
     }
 
     #[test]
     fn infer_working_dir_all_repo_labels() {
+        let cfg = test_config();
         let cases = [
             ("repo:werma", "~/projects/rigpa/werma"),
             ("repo:forge", "~/projects/rigpa/werma"),
@@ -1542,7 +1573,7 @@ mod tests {
         ];
         for (label, expected) in cases {
             assert_eq!(
-                infer_working_dir("Some task", &[label]),
+                infer_working_dir("Some task", &[label], &cfg),
                 expected,
                 "failed for label: {label}"
             );
@@ -1550,27 +1581,30 @@ mod tests {
     }
 
     #[test]
-    fn infer_working_dir_unknown_repo_falls_back_to_keyword() {
-        // Unknown repo label should fall through to keyword inference
+    fn infer_working_dir_unknown_repo_uses_convention() {
+        let cfg = test_config();
+        // Unknown repo label uses convention fallback ~/projects/rigpa/{name}
         assert_eq!(
-            infer_working_dir("Fix fathom bug", &["repo:nonexistent"]),
-            "~/projects/rigpa/fathom"
+            infer_working_dir("Fix fathom bug", &["repo:nonexistent"], &cfg),
+            "~/projects/rigpa/nonexistent"
         );
     }
 
     #[test]
-    fn infer_working_dir_unknown_repo_no_keyword_defaults_to_werma() {
-        // Unknown repo label + no keyword match → default werma
+    fn infer_working_dir_unknown_repo_no_keyword_uses_convention() {
+        let cfg = test_config();
+        // Unknown repo label → convention path (not keyword inference)
         assert_eq!(
-            infer_working_dir("Some generic task", &["repo:nonexistent"]),
-            "~/projects/rigpa/werma"
+            infer_working_dir("Some generic task", &["repo:my-new-repo"], &cfg),
+            "~/projects/rigpa/my-new-repo"
         );
     }
 
     #[test]
     fn infer_working_dir_sigil_keyword() {
+        let cfg = test_config();
         assert_eq!(
-            infer_working_dir("Build sigil signal engine", &[]),
+            infer_working_dir("Build sigil signal engine", &[], &cfg),
             "~/projects/rigpa/sigil"
         );
     }
@@ -1594,20 +1628,22 @@ mod tests {
 
     #[test]
     fn working_dir_fathom_keyword() {
+        let cfg = test_config();
         assert_eq!(
-            infer_working_dir("Fix fathom collector", &[]),
+            infer_working_dir("Fix fathom collector", &[], &cfg),
             "~/projects/rigpa/fathom"
         );
     }
 
     #[test]
     fn working_dir_ar_quant_keywords() {
+        let cfg = test_config();
         assert_eq!(
-            infer_working_dir("Update ar-quant-alpha bot", &[]),
+            infer_working_dir("Update ar-quant-alpha bot", &[], &cfg),
             "~/projects/rigpa/ar-quant-alpha"
         );
         assert_eq!(
-            infer_working_dir("Fix ar-quant backtesting", &[]),
+            infer_working_dir("Fix ar-quant backtesting", &[], &cfg),
             "~/projects/rigpa/ar-quant"
         );
     }

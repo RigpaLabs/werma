@@ -190,6 +190,12 @@ pub enum Commands {
         force: bool,
     },
 
+    /// Configuration management
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+
     /// Dashboard (stub)
     Dash,
 
@@ -292,6 +298,12 @@ pub enum LinearAction {
     },
     /// Push all completed tasks to Linear
     PushAll,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigAction {
+    /// Show current configuration (repo mappings, limits)
+    Show,
 }
 
 #[derive(Subcommand, Debug)]

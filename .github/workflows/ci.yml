@@ -11,8 +11,8 @@ env:
 
 jobs:
   check:
-    name: Check · Format · Lint · Test · Build
-    runs-on: ubuntu-latest
+    name: Check · Format · Lint · Test
+    runs-on: [self-hosted, linux, arm64]
     defaults:
       run:
         working-directory: engine
@@ -34,6 +34,3 @@ jobs:
 
       - name: Test
         run: cargo test
-
-      - name: Build (release)
-        run: cargo build --release

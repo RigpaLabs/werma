@@ -1,3 +1,31 @@
+/// Detect whether agent output indicates a max_turns exit.
+///
+/// Claude Code returns `{"subtype":"error_max_turns","is_error":false}` when the agent
+/// exhausts its turn budget. The runner script should catch this and call `werma fail`,
+/// but this function provides a defense-in-depth check for the callback path.
+///
+/// Checks for:
+/// - Raw JSON `"subtype":"error_max_turns"` (if output wasn't extracted from JSON)
+/// - The text "error_max_turns" appearing in the output
+/// - "MAX_TURNS_EXIT" marker from the runner script's log line
+pub fn is_max_turns_exit(result: &str) -> bool {
+    // Check last 30 lines only — the indicator would be near the end
+    let tail: Vec<&str> = result.lines().rev().take(30).collect();
+    for line in &tail {
+        let line = line.trim();
+        if line.contains("error_max_turns") || line.contains("MAX_TURNS_EXIT") {
+            return true;
+        }
+    }
+    // Also check for raw JSON subtype field (if entire JSON was dumped as output)
+    if result.contains(r#""subtype":"error_max_turns""#)
+        || result.contains(r#""subtype": "error_max_turns""#)
+    {
+        return true;
+    }
+    false
+}
+
 /// Extract verdict from result text.
 /// Looks for patterns like VERDICT=APPROVED, REVIEW_VERDICT=APPROVED, etc.
 /// Returns None if no verdict found (critical fix from bash version).
@@ -166,6 +194,39 @@ pub fn parse_pr_url(result: &str) -> Option<String> {
     }
 
     None
+}
+
+/// Extract the review body from reviewer output for posting as a PR comment.
+///
+/// Uses the `---COMMENT---` block if present (preferred — structured output).
+/// Falls back to extracting everything except the verdict line.
+pub fn extract_review_body(output: &str) -> Option<String> {
+    // Prefer structured comment blocks — reviewer is instructed to use them
+    let comments = parse_comments(output);
+    if !comments.is_empty() {
+        return Some(comments.join("\n\n---\n\n"));
+    }
+
+    // Fallback: strip verdict lines and return the rest (trimmed)
+    let body: String = output
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with("VERDICT=")
+                && !trimmed.starts_with("REVIEW_VERDICT=")
+                && !trimmed.starts_with("QA_VERDICT=")
+                && !trimmed.starts_with("DEPLOY_VERDICT=")
+                && !trimmed.starts_with("FIX_VERDICT=")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Story point thresholds for track routing.
@@ -401,5 +462,86 @@ mod tests {
         let output = "---COMMENT---\nLine one.\nLine two.\nLine three.\n---END COMMENT---";
         let comments = parse_comments(output);
         assert_eq!(comments, vec!["Line one.\nLine two.\nLine three."]);
+    }
+
+    // ─── is_max_turns_exit tests (RIG-252) ──────────────────────────────
+
+    #[test]
+    fn max_turns_exit_raw_json_subtype() {
+        let output =
+            r#"{"type":"result","subtype":"error_max_turns","is_error":false,"result":""}"#;
+        assert!(is_max_turns_exit(output));
+    }
+
+    #[test]
+    fn max_turns_exit_raw_json_spaced() {
+        let output = r#"{"type": "result", "subtype": "error_max_turns", "is_error": false}"#;
+        assert!(is_max_turns_exit(output));
+    }
+
+    #[test]
+    fn max_turns_exit_in_text_output() {
+        let output = "Some partial work done.\nerror_max_turns\nVERDICT=DONE";
+        assert!(is_max_turns_exit(output));
+    }
+
+    #[test]
+    fn max_turns_exit_runner_marker() {
+        let output = "Partial output here.\nMAX_TURNS_EXIT — agent hit max_turns";
+        assert!(is_max_turns_exit(output));
+    }
+
+    #[test]
+    fn max_turns_exit_normal_output_not_detected() {
+        let output = "All work completed successfully.\nVERDICT=DONE";
+        assert!(!is_max_turns_exit(output));
+    }
+
+    #[test]
+    fn max_turns_exit_empty_output() {
+        assert!(!is_max_turns_exit(""));
+    }
+
+    // ─── extract_review_body ─────────────────────────────────────────────
+
+    #[test]
+    fn extract_review_body_from_comment_block() {
+        let output = "Some preamble.\n---COMMENT---\n## Review\n- blocker: no tests\n- nit: typo\n---END COMMENT---\nREVIEW_VERDICT=REJECTED";
+        let body = extract_review_body(output);
+        assert!(body.is_some());
+        let body = body.unwrap();
+        assert!(body.contains("blocker: no tests"));
+        assert!(body.contains("nit: typo"));
+    }
+
+    #[test]
+    fn extract_review_body_fallback_strips_verdict() {
+        let output = "## Review\nLooks good, minor issues only.\nREVIEW_VERDICT=APPROVED";
+        let body = extract_review_body(output);
+        assert!(body.is_some());
+        let body = body.unwrap();
+        assert!(body.contains("Looks good"));
+        assert!(
+            !body.contains("REVIEW_VERDICT="),
+            "verdict line should be stripped"
+        );
+    }
+
+    #[test]
+    fn extract_review_body_empty_output() {
+        assert!(extract_review_body("").is_none());
+    }
+
+    #[test]
+    fn extract_review_body_only_verdict() {
+        assert!(extract_review_body("REVIEW_VERDICT=APPROVED").is_none());
+    }
+
+    #[test]
+    fn extract_review_body_multiple_comment_blocks() {
+        let output = "---COMMENT---\nFirst finding.\n---END COMMENT---\n---COMMENT---\nSecond finding.\n---END COMMENT---\nREVIEW_VERDICT=REJECTED";
+        let body = extract_review_body(output).unwrap();
+        assert!(body.contains("First finding."));
+        assert!(body.contains("Second finding."));
     }
 }

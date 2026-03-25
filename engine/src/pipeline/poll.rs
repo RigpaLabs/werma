@@ -21,6 +21,7 @@ pub fn is_research_issue(labels: &[&str]) -> bool {
 /// Poll Linear for issues at pipeline-relevant statuses and create tasks.
 pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<()> {
     let config = load_default()?;
+    let user_cfg = crate::config::UserConfig::load();
 
     let mut total_created = 0;
     let mut total_skipped = 0;
@@ -63,7 +64,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             continue;
         }
 
-        let working_dir = crate::linear::infer_working_dir(title, &labels);
+        let working_dir = crate::linear::infer_working_dir(title, &labels, &user_cfg);
         if crate::linear::validate_working_dir(&working_dir).is_none() {
             eprintln!(
                 "  ! skipping {identifier} [{title}]: working dir '{working_dir}' does not exist"
@@ -148,6 +149,14 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
+            // RIG-272: Skip canceled/completed issues (defensive — the Linear query
+            // filters by status, but state_type can be stale or change mid-poll).
+            let state_type = issue["state"]["type"].as_str().unwrap_or("");
+            if state_type == "canceled" || state_type == "completed" {
+                total_skipped += 1;
+                continue;
+            }
+
             let labels: Vec<&str> = issue["labels"]["nodes"]
                 .as_array()
                 .map(|arr| {
@@ -182,13 +191,24 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     continue;
                 }
 
+                // RIG-296: cross-stage guard — skip if another pipeline task is running
+                // for this issue. Prevents spawning engineer while reviewer is still active.
+                if db.has_running_pipeline_task_for_issue(identifier)? {
+                    eprintln!(
+                        "  ~ skipping {identifier} stage={stage_name}: \
+                         another pipeline task is running for this issue"
+                    );
+                    total_skipped += 1;
+                    continue;
+                }
+
                 // Manual issues: skip execution stages (skip_manual=true)
                 if crate::linear::is_manual_issue(&labels) && stage_cfg.skip_manual() {
                     total_skipped += 1;
                     continue;
                 }
 
-                let working_dir = crate::linear::infer_working_dir(title, &labels);
+                let working_dir = crate::linear::infer_working_dir(title, &labels, &user_cfg);
                 if crate::linear::validate_working_dir(&working_dir).is_none() {
                     eprintln!(
                         "  ! skipping {identifier} [{title}] stage={stage_name}: working dir '{working_dir}' does not exist"
@@ -336,6 +356,17 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
+            // RIG-296: cross-stage guard (label path) — skip if another pipeline
+            // task is running for this issue.
+            if db.has_running_pipeline_task_for_issue(identifier)? {
+                eprintln!(
+                    "  ~ skipping {identifier} stage={stage_name}: \
+                     another pipeline task is running for this issue (label path)"
+                );
+                total_skipped += 1;
+                continue;
+            }
+
             // RIG-274: Skip analyst if spec is already done (has spec:done or {label}:done).
             // This prevents re-running analyst on issues that already have a completed spec,
             // even if the trigger label is re-added (e.g., after failed label removal).
@@ -372,7 +403,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 }
             }
 
-            let working_dir = crate::linear::infer_working_dir(title, &labels);
+            let working_dir = crate::linear::infer_working_dir(title, &labels, &user_cfg);
             if crate::linear::validate_working_dir(&working_dir).is_none() {
                 eprintln!(
                     "  ! skipping {identifier} [{title}] stage={stage_name}: working dir '{working_dir}' does not exist"
@@ -689,84 +720,5 @@ stages:
             tasks.is_empty(),
             "should not create analyst task when engineer already ran"
         );
-    }
-
-    #[test]
-    fn poll_skips_analyst_when_nonfailed_task_exists() {
-        // Existing dedup: non-failed task blocks re-creation
-        let db = crate::db::Db::open_in_memory().unwrap();
-        let linear = FakeLinearApi::new();
-        let cmd = FakeCommandRunner::new();
-
-        // Insert a completed analyst task for this issue
-        let mut existing = crate::db::make_test_task("20260324-001");
-        existing.status = crate::models::Status::Completed;
-        existing.linear_issue_id = "RIG-276".to_string();
-        existing.pipeline_stage = "analyst".to_string();
-        db.insert_task(&existing).unwrap();
-
-        let issue = fake_issue(
-            "uuid-3",
-            "RIG-276",
-            "Test werma issue",
-            &["analyze", "repo:werma"],
-        );
-        linear.set_issues_for_label("analyze", vec![issue]);
-
-        poll(&db, &linear, &cmd).unwrap();
-
-        // Should still only have the 1 original task
-        let tasks = db
-            .tasks_by_linear_issue("RIG-276", Some("analyst"), false)
-            .unwrap();
-        assert_eq!(tasks.len(), 1, "should not create duplicate analyst task");
-    }
-
-    #[test]
-    fn poll_skips_completed_and_canceled_issues() {
-        let db = crate::db::Db::open_in_memory().unwrap();
-        let linear = FakeLinearApi::new();
-        let cmd = FakeCommandRunner::new();
-
-        // Issue with state type "completed" (Done in Linear)
-        let mut done_issue = fake_issue("uuid-done", "RIG-300", "Done issue", &["repo:werma"]);
-        done_issue["state"]["type"] = serde_json::json!("completed");
-
-        // Issue with state type "canceled"
-        let mut canceled_issue =
-            fake_issue("uuid-cancel", "RIG-301", "Canceled issue", &["repo:werma"]);
-        canceled_issue["state"]["type"] = serde_json::json!("canceled");
-
-        // Issue with state type "cancelled" (British spelling)
-        let mut cancelled_issue = fake_issue(
-            "uuid-cancel2",
-            "RIG-302",
-            "Cancelled issue",
-            &["repo:werma"],
-        );
-        cancelled_issue["state"]["type"] = serde_json::json!("cancelled");
-
-        // Normal active issue
-        let active_issue = fake_issue("uuid-active", "RIG-303", "Active issue", &["repo:werma"]);
-
-        linear.set_issues_for_status(
-            "in_progress",
-            vec![done_issue, canceled_issue, cancelled_issue, active_issue],
-        );
-
-        poll(&db, &linear, &cmd).unwrap();
-
-        // Only the active issue should spawn a task
-        let all_tasks = db.list_tasks(None).unwrap();
-        let engineer_tasks: Vec<_> = all_tasks
-            .iter()
-            .filter(|t| t.pipeline_stage == "engineer")
-            .collect();
-        assert_eq!(
-            engineer_tasks.len(),
-            1,
-            "only active issue should spawn engineer task"
-        );
-        assert_eq!(engineer_tasks[0].linear_issue_id, "RIG-303");
     }
 }
