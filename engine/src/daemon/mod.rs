@@ -136,6 +136,23 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 log_daemon(&log_path, &format!("pipeline callback error: {e}"));
             }
 
+            // Drain outbox: execute pending external effects (Linear, GitHub, notifications).
+            // Only runs when LINEAR_API_KEY is configured.
+            if let Some(ref lp) = linear_poll {
+                match crate::pipeline::effects::process_effects(&db, lp, &cmd_runner, &notifier) {
+                    Ok(r) if r.processed > 0 || r.failed > 0 => {
+                        log_daemon(
+                            &log_path,
+                            &format!("effects: processed={} failed={}", r.processed, r.failed),
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        log_daemon(&log_path, &format!("effect processor error: {e}"));
+                    }
+                }
+            }
+
             if last_zombie_check.elapsed() >= Duration::from_secs(ZOMBIE_CHECK_INTERVAL_SECS) {
                 if let Err(e) = zombie::check_zombie_tasks(&db, werma_dir, &tmux, &notifier) {
                     log_daemon(&log_path, &format!("zombie check error: {e}"));
@@ -517,6 +534,7 @@ mod tests {
             retry_after: None,
             cost_usd: None,
             turns_used: 0,
+            handoff_content: String::new(),
         }
     }
 

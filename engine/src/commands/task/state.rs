@@ -99,12 +99,10 @@ pub fn cmd_complete(
         return Ok(());
     }
 
-    // Pipeline callback: trigger stage transitions.
-    // On success, mark linear_pushed=true so daemon doesn't re-process.
+    // Pipeline callback: write effects to outbox + internal DB changes.
+    // linear_pushed is set by the effect processor after effects are executed.
     if !task.pipeline_stage.is_empty() && !task.linear_issue_id.is_empty() {
-        let linear_client = crate::linear::LinearClient::new()?;
         let cmd_runner = crate::traits::RealCommandRunner;
-        let notifier = crate::traits::RealNotifier;
         match pipeline::callback(
             db,
             id,
@@ -112,13 +110,9 @@ pub fn cmd_complete(
             &result_text,
             &task.linear_issue_id,
             &task.working_dir,
-            &linear_client,
             &cmd_runner,
-            &notifier,
         ) {
-            Ok(()) => {
-                db.set_linear_pushed(id, true)?;
-            }
+            Ok(()) => {}
             Err(e) => {
                 // Log to both stderr and daemon.log for visibility.
                 // Daemon will retry via process_completed_pipeline_tasks.

@@ -1,3 +1,4 @@
+mod effects;
 pub mod fakes;
 mod pipeline;
 mod schedule;
@@ -23,6 +24,7 @@ const MIGRATION_007_SQL: &str =
     include_str!("../../migrations/007_callback_attempts_and_indexes.sql");
 const MIGRATION_008_SQL: &str = include_str!("../../migrations/008_retry.sql");
 const MIGRATION_009_SQL: &str = include_str!("../../migrations/009_cost_tracking.sql");
+const MIGRATION_010_SQL: &str = include_str!("../../migrations/010_effects_and_handoff.sql");
 
 pub struct Db {
     pub(super) conn: Connection,
@@ -125,7 +127,36 @@ impl Db {
                 return Err(e).context("migration 009_cost_tracking");
             }
         }
+        // 010: effects outbox table + handoff_content column on tasks.
+        if let Err(e) = self.conn.execute_batch(MIGRATION_010_SQL) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") && !msg.contains("already exists") {
+                return Err(e).context("migration 010_effects_and_handoff");
+            }
+        }
         Ok(())
+    }
+
+    /// Run a closure inside a SQLite IMMEDIATE transaction.
+    ///
+    /// Uses BEGIN IMMEDIATE for explicit write-locking. Safe because werma
+    /// daemon is single-threaded. If multi-threading is ever added, Db must
+    /// switch to &mut self or Arc<Mutex<Connection>>.
+    pub fn transaction<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T>,
+    {
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        match f(&self.conn) {
+            Ok(result) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(result)
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 }
 
@@ -165,6 +196,7 @@ pub(super) fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         retry_after: row.get(22).ok(),
         cost_usd: row.get(23).ok().flatten(),
         turns_used: row.get(24).unwrap_or(0),
+        handoff_content: row.get(25).unwrap_or_default(),
     })
 }
 
@@ -197,6 +229,7 @@ pub(crate) fn make_test_task(id: &str) -> Task {
         retry_after: None,
         cost_usd: None,
         turns_used: 0,
+        handoff_content: String::new(),
     }
 }
 
@@ -478,5 +511,100 @@ mod tests {
             "001_init.sql must not include 'canceled' in the CHECK constraint — \
              that belongs to migration 006 only"
         );
+    }
+
+    // ─── Migration 010 tests ─────────────────────────────────────────────
+
+    #[test]
+    fn migration_010_creates_effects_table() {
+        let db = Db::open_in_memory().unwrap();
+        let count: i32 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='effects'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn migration_010_adds_handoff_content_column() {
+        let db = Db::open_in_memory().unwrap();
+        // Should not panic — column exists
+        db.conn
+            .execute(
+                "UPDATE tasks SET handoff_content = 'test' WHERE id = 'nonexistent'",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn migration_010_dedup_key_is_unique() {
+        use rusqlite::params;
+        let db = Db::open_in_memory().unwrap();
+        // Insert a real task so the FK constraint is satisfied.
+        let task = make_test_task("dedup-task-1");
+        db.insert_task(&task).unwrap();
+        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        db.conn
+            .execute(
+                "INSERT INTO effects (dedup_key, task_id, effect_type, created_at) VALUES ('key1', 'dedup-task-1', 'MoveIssue', ?1)",
+                params![now],
+            )
+            .unwrap();
+        // Duplicate dedup_key should fail or be ignored
+        let result = db.conn.execute(
+            "INSERT OR IGNORE INTO effects (dedup_key, task_id, effect_type, created_at) VALUES ('key1', 'dedup-task-1', 'MoveIssue', ?1)",
+            params![now],
+        );
+        assert!(result.is_ok()); // INSERT OR IGNORE succeeds but inserts 0 rows
+        let count: i32 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM effects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    // ─── Transaction tests ───────────────────────────────────────────────
+
+    #[test]
+    fn transaction_commits_on_success() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260326-tx1");
+        db.insert_task(&task).unwrap();
+
+        db.transaction(|conn| {
+            conn.execute(
+                "UPDATE tasks SET priority = 4 WHERE id = '20260326-tx1'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let updated = db.task("20260326-tx1").unwrap().unwrap();
+        assert_eq!(updated.priority, 4);
+    }
+
+    #[test]
+    fn transaction_rolls_back_on_error() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_test_task("20260326-tx2");
+        db.insert_task(&task).unwrap();
+
+        let result = db.transaction(|conn| -> Result<()> {
+            conn.execute(
+                "UPDATE tasks SET priority = 4 WHERE id = '20260326-tx2'",
+                [],
+            )?;
+            anyhow::bail!("simulated error");
+        });
+        assert!(result.is_err());
+
+        let unchanged = db.task("20260326-tx2").unwrap().unwrap();
+        assert_eq!(unchanged.priority, 2); // original value from make_test_task
     }
 }

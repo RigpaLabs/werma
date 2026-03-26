@@ -1,8 +1,121 @@
 use crate::db::{Db, make_test_task};
-use crate::models::Status;
+use crate::models::{EffectType, Status};
 use crate::pipeline::executor::{callback, poll};
 use crate::traits::fakes::{FakeCommandRunner, FakeLinearApi, FakeNotifier};
 use serde_json::json;
+
+/// Helper: assert that a pending effect of the given type with the given target_status payload exists.
+fn assert_move_effect(db: &Db, target_status: &str) {
+    let effects = db.pending_effects(100).unwrap();
+    assert!(
+        effects.iter().any(|e| {
+            e.effect_type == EffectType::MoveIssue
+                && e.payload.get("target_status").and_then(|v| v.as_str()) == Some(target_status)
+        }),
+        "expected MoveIssue effect with target_status={target_status}, got: {effects:?}"
+    );
+}
+
+/// Helper: assert no MoveIssue effects exist with a given target_status.
+fn assert_no_move_effect(db: &Db, target_status: &str) {
+    let effects = db.pending_effects(100).unwrap();
+    assert!(
+        !effects.iter().any(|e| {
+            e.effect_type == EffectType::MoveIssue
+                && e.payload.get("target_status").and_then(|v| v.as_str()) == Some(target_status)
+        }),
+        "unexpected MoveIssue effect with target_status={target_status}, got: {effects:?}"
+    );
+}
+
+/// Helper: assert a PostComment effect exists whose body contains the given substring.
+fn assert_comment_effect(db: &Db, body_contains: &str) {
+    let effects = db.pending_effects(100).unwrap();
+    assert!(
+        effects.iter().any(|e| {
+            e.effect_type == EffectType::PostComment
+                && e.payload
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|b| b.contains(body_contains))
+        }),
+        "expected PostComment effect containing {body_contains:?}, got: {effects:?}"
+    );
+}
+
+/// Helper: assert no MoveIssue effects exist at all.
+fn assert_no_move_effects(db: &Db) {
+    let effects = db.pending_effects(100).unwrap();
+    assert!(
+        !effects
+            .iter()
+            .any(|e| e.effect_type == EffectType::MoveIssue),
+        "expected no MoveIssue effects, got: {effects:?}"
+    );
+}
+
+/// Helper: assert an AddLabel effect exists with the given label.
+fn assert_add_label_effect(db: &Db, label: &str) {
+    let effects = db.pending_effects(100).unwrap();
+    assert!(
+        effects.iter().any(|e| {
+            e.effect_type == EffectType::AddLabel
+                && e.payload.get("label").and_then(|v| v.as_str()) == Some(label)
+        }),
+        "expected AddLabel effect with label={label:?}, got: {effects:?}"
+    );
+}
+
+/// Helper: assert no AddLabel effect exists with the given label.
+fn assert_no_add_label_effect(db: &Db, label: &str) {
+    let effects = db.pending_effects(100).unwrap();
+    assert!(
+        !effects.iter().any(|e| {
+            e.effect_type == EffectType::AddLabel
+                && e.payload.get("label").and_then(|v| v.as_str()) == Some(label)
+        }),
+        "unexpected AddLabel effect with label={label:?}, got: {effects:?}"
+    );
+}
+
+/// Helper: assert a RemoveLabel effect exists with the given label.
+fn assert_remove_label_effect(db: &Db, label: &str) {
+    let effects = db.pending_effects(100).unwrap();
+    assert!(
+        effects.iter().any(|e| {
+            e.effect_type == EffectType::RemoveLabel
+                && e.payload.get("label").and_then(|v| v.as_str()) == Some(label)
+        }),
+        "expected RemoveLabel effect with label={label:?}, got: {effects:?}"
+    );
+}
+
+/// Helper: assert an AttachUrl effect exists for the given url.
+fn assert_attach_url_effect(db: &Db, url_contains: &str) {
+    let effects = db.pending_effects(100).unwrap();
+    assert!(
+        effects.iter().any(|e| {
+            e.effect_type == EffectType::AttachUrl
+                && e.payload
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|u| u.contains(url_contains))
+        }),
+        "expected AttachUrl effect containing url={url_contains:?}, got: {effects:?}"
+    );
+}
+
+/// Helper: assert an UpdateEstimate effect exists with the given estimate value.
+fn assert_update_estimate_effect(db: &Db, estimate: i64) {
+    let effects = db.pending_effects(100).unwrap();
+    assert!(
+        effects.iter().any(|e| {
+            e.effect_type == EffectType::UpdateEstimate
+                && e.payload.get("estimate").and_then(|v| v.as_i64()) == Some(estimate)
+        }),
+        "expected UpdateEstimate effect with estimate={estimate}, got: {effects:?}"
+    );
+}
 
 /// Ensure `~/projects/rigpa/werma` exists so `validate_working_dir` passes on CI.
 /// Locally this is a no-op (dir already exists). On CI it creates empty dirs.
@@ -58,9 +171,8 @@ fn callback_done_moves_issue() {
 
     let result = "## Implementation\nDone.\n\nVERDICT=DONE";
 
-    // FakeCommandRunner defaults to empty success (no PRs found),
-    // so engineer DONE will warn about missing PR but won't fail the callback.
-    // The key assertion: move_issue_by_name IS called with "review".
+    // callback() writes effects to DB outbox — does NOT call linear directly.
+    // The MoveIssue effect will be executed by the effect processor (Task 4).
     callback(
         &db,
         "20260313-100",
@@ -68,23 +180,24 @@ fn callback_done_moves_issue() {
         result,
         "RIG-200",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
-    let moves = linear.move_calls.borrow();
+    // Verify the MoveIssue effect is queued with the correct target status.
+    assert_move_effect(&db, "review");
+
+    // Linear is NOT called during callback — effects are deferred to processor.
     assert!(
-        moves
-            .iter()
-            .any(|(id, status)| id == "RIG-200" && status == "review"),
-        "expected move to 'review', got: {moves:?}"
+        linear.move_calls.borrow().is_empty(),
+        "linear should not be called during callback"
     );
 }
 
 // ─── Test 2: callback_move_failure_returns_error ────────────────────────────
-// With RIG-211 retry logic, all 3 retries must fail for the callback to error.
+// With the outbox pattern, callback() always succeeds — it writes effects to DB.
+// Move failures are handled by the effect processor with its own retry logic.
+// The old "retry" behavior is now owned by the processor (Task 4).
 
 #[test]
 fn callback_move_failure_returns_error() {
@@ -92,7 +205,7 @@ fn callback_move_failure_returns_error() {
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
 
-    // Configure the fake to fail all 3 retry attempts
+    // fail_next_n_moves no longer affects callback — moves are deferred.
     linear.fail_next_n_moves(3);
 
     let mut task = make_test_task("20260313-101");
@@ -103,21 +216,28 @@ fn callback_move_failure_returns_error() {
 
     let result = "## Done\nVERDICT=DONE";
 
-    let err = callback(
+    // callback() always succeeds — effects are written to outbox for deferred execution.
+    let ok = callback(
         &db,
         "20260313-101",
         "engineer",
         result,
         "RIG-201",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
+    );
+    assert!(
+        ok.is_ok(),
+        "callback should succeed: effects are durable outbox entries"
     );
 
+    // MoveIssue effect should be queued for the processor.
+    assert_move_effect(&db, "review");
+
+    // callback_fired_at IS set (transaction succeeded).
     assert!(
-        err.is_err(),
-        "callback should return Err when all retries fail"
+        db.is_callback_recently_fired("20260313-101", 60).unwrap(),
+        "callback_fired_at should be set after successful callback"
     );
 }
 
@@ -321,9 +441,9 @@ fn poll_research_move_failure_nonfatal() {
     assert_eq!(tasks[0].task_type, "research");
 }
 
-// ─── Test 7: callback succeeds on retry after initial failure (RIG-211) ─────
-// move_with_retry retries within a single callback invocation. One failure
-// followed by a success means the callback itself returns Ok.
+// ─── Test 7: callback succeeds with effects queued (RIG-211) ─────────────────
+// With outbox pattern, callback always succeeds — move retry is handled by the
+// effect processor. callback() dequeues nothing; it only queues effects.
 
 #[test]
 fn callback_retry_after_move_failure() {
@@ -340,7 +460,7 @@ fn callback_retry_after_move_failure() {
     let result =
         "## Implementation\nDone.\n\nPR_URL=https://github.com/org/repo/pull/99\nVERDICT=DONE";
 
-    // First move attempt fails, second succeeds (within the same callback call)
+    // fail_next_n_moves no longer affects callback — deferred to processor.
     linear.fail_next_n_moves(1);
     let ok = callback(
         &db,
@@ -349,23 +469,20 @@ fn callback_retry_after_move_failure() {
         result,
         "RIG-300",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     );
-    assert!(ok.is_ok(), "callback should succeed on retry: {ok:?}");
+    assert!(ok.is_ok(), "callback should always succeed: {ok:?}");
 
-    // The retry should have moved the issue to "review"
-    let moves = linear.move_calls.borrow();
-    assert!(
-        moves
-            .iter()
-            .any(|(id, status)| id == "RIG-300" && status == "review"),
-        "retry should move to 'review', got: {moves:?}"
-    );
+    // MoveIssue effect should be queued.
+    assert_move_effect(&db, "review");
+
+    // AttachUrl effect should be queued for the PR.
+    assert_attach_url_effect(&db, "/pull/99");
 }
 
-// ─── Test 7b: callback fails after all retries exhausted (RIG-211) ──────────
+// ─── Test 7b: callback always succeeds with outbox (RIG-211) ─────────────────
+// With outbox pattern, callback() always succeeds — retry exhaustion happens
+// in the effect processor. The callback just enqueues effects atomically.
 
 #[test]
 fn callback_all_retries_exhausted() {
@@ -381,35 +498,33 @@ fn callback_all_retries_exhausted() {
 
     let result = "## Done\nVERDICT=DONE";
 
-    // All 3 retry attempts fail
+    // fail_next_n_moves no longer affects callback — deferred to processor.
     linear.fail_next_n_moves(3);
-    let err = callback(
+    let ok = callback(
         &db,
         "20260313-301",
         "engineer",
         result,
         "RIG-301",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     );
+    assert!(ok.is_ok(), "callback always succeeds: effects are durable");
+
+    // callback_fired_at IS set after success.
     assert!(
-        err.is_err(),
-        "callback should return Err when all retries exhausted"
+        db.is_callback_recently_fired("20260313-301", 60).unwrap(),
+        "callback_fired_at should be set after successful callback"
     );
 
-    // Dedup guard should NOT be set after failure
-    assert!(
-        !db.is_callback_recently_fired("20260313-301", 60).unwrap(),
-        "callback_fired_at should not be set after failure"
-    );
+    // MoveIssue effect should be in the outbox for the processor.
+    assert_move_effect(&db, "review");
 }
 
-// ─── Test 7c: daemon-level retry — failed callback retried on next tick ──────
-// Verifies the dedup guard is NOT set on failure, allowing the daemon's next
-// tick to retry successfully. This is the two-invocation scenario: first call
-// fails (all moves fail), second call succeeds (moves work).
+// ─── Test 7c: callback with outbox — dedup guard via callback_fired_at ───────
+// With outbox pattern, callback() always succeeds on first call.
+// The dedup guard (callback_fired_at) prevents duplicate effect insertion.
+// Second call with fired_at set → no effects written.
 
 #[test]
 fn callback_daemon_retry_after_failure() {
@@ -426,42 +541,7 @@ fn callback_daemon_retry_after_failure() {
 
     let result = "## Review\nLooks good.\n\nVERDICT=APPROVED";
 
-    // --- Daemon tick 1: all moves fail ---
-    linear.fail_next_n_moves(3);
-    let err = callback(
-        &db,
-        "20260313-302",
-        "reviewer",
-        result,
-        "RIG-302",
-        "~/projects/rigpa/werma",
-        &linear,
-        &cmd,
-        &notifier,
-    );
-    assert!(
-        err.is_err(),
-        "first callback should fail when all moves fail"
-    );
-
-    // Dedup guard must NOT be set — allows daemon retry on next tick
-    assert!(
-        !db.is_callback_recently_fired("20260313-302", 60).unwrap(),
-        "callback_fired_at should not be set after failure"
-    );
-
-    // Notifications should have been sent on failure
-    assert!(
-        !notifier.macos_calls.borrow().is_empty(),
-        "macOS alert should fire on retry exhaustion"
-    );
-    assert!(
-        !notifier.slack_calls.borrow().is_empty(),
-        "Slack alert should fire on retry exhaustion"
-    );
-
-    // --- Daemon tick 2: moves succeed now ---
-    // (fail_next_n_moves counter is exhausted, so moves work)
+    // First callback: succeeds, sets callback_fired_at, queues effects.
     let ok = callback(
         &db,
         "20260313-302",
@@ -469,29 +549,46 @@ fn callback_daemon_retry_after_failure() {
         result,
         "RIG-302",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &notifier,
     );
-    assert!(ok.is_ok(), "second callback should succeed: {ok:?}");
+    assert!(ok.is_ok(), "callback should succeed: {ok:?}");
 
-    // Dedup guard should now be set after success
+    // callback_fired_at IS set.
     assert!(
         db.is_callback_recently_fired("20260313-302", 60).unwrap(),
-        "callback_fired_at should be set after successful retry"
+        "callback_fired_at should be set after first success"
     );
 
-    // Issue should have been moved to "ready" (reviewer APPROVED transition)
-    let moves = linear.move_calls.borrow();
+    // MoveIssue effect queued.
+    assert_move_effect(&db, "ready");
+
+    let effects_count = db.pending_effects(100).unwrap().len();
+
+    // Second callback: dedup guard fires → no new effects.
+    let ok2 = callback(
+        &db,
+        "20260313-302",
+        "reviewer",
+        result,
+        "RIG-302",
+        "~/projects/rigpa/werma",
+        &cmd,
+    );
     assert!(
-        moves
-            .iter()
-            .any(|(id, status)| id == "RIG-302" && status == "ready"),
-        "retry should move to 'ready', got: {moves:?}"
+        ok2.is_ok(),
+        "second callback should succeed (dedup guard): {ok2:?}"
+    );
+
+    let effects_count_after = db.pending_effects(100).unwrap().len();
+    assert_eq!(
+        effects_count, effects_count_after,
+        "dedup guard should prevent new effects on second call"
     );
 }
 
-// ─── Test 7d: callback failure sends notifications via Notifier trait ────────
+// ─── Test 7d: callback with outbox — no notifications during callback ─────────
+// With outbox pattern, notifications are sent by the effect processor (Task 4),
+// not by callback(). callback() always succeeds and notifier is not invoked.
 
 #[test]
 fn callback_failure_sends_notifications() {
@@ -508,42 +605,31 @@ fn callback_failure_sends_notifications() {
 
     let result = "## Done\nVERDICT=DONE";
 
-    // All retries fail
+    // fail_next_n_moves no longer affects callback — notifier is not called during callback.
     linear.fail_next_n_moves(3);
-    let _ = callback(
+    let ok = callback(
         &db,
         "20260313-303",
         "engineer",
         result,
         "RIG-303",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &notifier,
+    );
+    assert!(ok.is_ok(), "callback always succeeds: {ok:?}");
+
+    // Notifications are deferred to the effect processor — not sent during callback.
+    assert!(
+        notifier.macos_calls.borrow().is_empty(),
+        "notifier should NOT be called during callback (deferred to processor)"
+    );
+    assert!(
+        notifier.slack_calls.borrow().is_empty(),
+        "notifier should NOT be called during callback (deferred to processor)"
     );
 
-    // Verify notifications were sent via the Notifier trait
-    let macos = notifier.macos_calls.borrow();
-    assert_eq!(macos.len(), 1, "should send exactly one macOS notification");
-    assert!(
-        macos[0].0.contains("Callback Failed"),
-        "macOS title should mention failure, got: {:?}",
-        macos[0].0
-    );
-    assert!(
-        macos[0].1.contains("RIG-303"),
-        "macOS message should mention issue ID, got: {:?}",
-        macos[0].1
-    );
-
-    let slack = notifier.slack_calls.borrow();
-    assert_eq!(slack.len(), 1, "should send exactly one Slack notification");
-    assert_eq!(slack[0].0, "#werma-alerts");
-    assert!(
-        slack[0].1.contains("RIG-303"),
-        "Slack message should mention issue ID, got: {:?}",
-        slack[0].1
-    );
+    // MoveIssue effect should be queued.
+    assert_move_effect(&db, "review");
 }
 
 // ─── Test 8: poll_creates_research_task ──────────────────────────────────────
@@ -851,9 +937,7 @@ fn callback_dedup_guard_blocks_duplicate() {
         result,
         "RIG-217",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -867,9 +951,7 @@ fn callback_dedup_guard_blocks_duplicate() {
         result,
         "RIG-217",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -894,7 +976,7 @@ fn callback_empty_output_posts_comment() {
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
-    // Empty result triggers early return with comment
+    // Empty result queues a PostComment effect (no MoveIssue).
     callback(
         &db,
         "20260313-218",
@@ -902,26 +984,15 @@ fn callback_empty_output_posts_comment() {
         "   ",
         "RIG-218",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
-    // No moves should happen
-    assert!(
-        linear.move_calls.borrow().is_empty(),
-        "empty output should not trigger any moves"
-    );
+    // No MoveIssue effects.
+    assert_no_move_effects(&db);
 
-    // A comment should be posted about empty output
-    let comments = linear.comment_calls.borrow();
-    assert!(
-        comments
-            .iter()
-            .any(|(id, body)| id == "RIG-218" && body.contains("empty output")),
-        "empty output should post a comment, got: {comments:?}"
-    );
+    // PostComment effect should be queued about empty output.
+    assert_comment_effect(&db, "empty output");
 }
 
 // ─── Test 19: callback_unknown_stage_noop ────────────────────────────────────
@@ -938,7 +1009,7 @@ fn callback_unknown_stage_noop() {
     task.pipeline_stage = "nonexistent_stage".to_string();
     db.insert_task(&task).unwrap();
 
-    // Unknown stage should return Ok without doing anything
+    // Unknown stage returns Err from decide_callback → callback propagates Err.
     let result = callback(
         &db,
         "20260313-219",
@@ -946,16 +1017,11 @@ fn callback_unknown_stage_noop() {
         "Some output\nVERDICT=DONE",
         "RIG-219",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     );
 
-    assert!(result.is_ok(), "unknown stage should return Ok");
-    assert!(
-        linear.move_calls.borrow().is_empty(),
-        "unknown stage should not trigger moves"
-    );
+    assert!(result.is_err(), "unknown stage should return Err");
+    assert_no_move_effects(&db);
 }
 
 // ─── Test 20: callback_analyst_estimate_updates_linear ───────────────────────
@@ -981,29 +1047,15 @@ fn callback_analyst_estimate_updates_linear() {
         result,
         "RIG-220",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
-    // Estimate should be updated on Linear
-    let estimates = linear.estimate_calls.borrow();
-    assert!(
-        estimates
-            .iter()
-            .any(|(id, est)| id == "RIG-220" && *est == 5),
-        "analyst should update estimate to 5, got: {estimates:?}"
-    );
+    // UpdateEstimate effect should be queued (processor calls linear.update_estimate).
+    assert_update_estimate_effect(&db, 5);
 
-    // Issue should move to todo (analyst done → todo per config)
-    let moves = linear.move_calls.borrow();
-    assert!(
-        moves
-            .iter()
-            .any(|(id, status)| id == "RIG-220" && status == "todo"),
-        "analyst DONE should move to todo, got: {moves:?}"
-    );
+    // MoveIssue effect should be queued with target "todo".
+    assert_move_effect(&db, "todo");
 }
 
 // ─── Test 20b: callback_analyst_adds_done_label ──────────────────────────────
@@ -1014,9 +1066,9 @@ fn callback_analyst_adds_done_label() {
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
 
-    let mut task = make_test_task("20260313-219");
+    let mut task = make_test_task("20260313-219b-done");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-219".to_string();
+    task.linear_issue_id = "RIG-219b-done".to_string();
     task.pipeline_stage = "analyst".to_string();
     db.insert_task(&task).unwrap();
 
@@ -1024,33 +1076,20 @@ fn callback_analyst_adds_done_label() {
 
     callback(
         &db,
-        "20260313-219",
+        "20260313-219b-done",
         "analyst",
         result,
-        "RIG-219",
+        "RIG-219b-done",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
-    // analyze:done label should be added
-    let adds = linear.add_label_calls.borrow();
-    assert!(
-        adds.iter()
-            .any(|(id, label)| id == "RIG-219" && label == "analyze:done"),
-        "analyst callback should add 'analyze:done' label, got: {adds:?}"
-    );
+    // AddLabel effect should be queued for analyze:done.
+    assert_add_label_effect(&db, "analyze:done");
 
-    // Issue should still move to todo (existing behavior)
-    let moves = linear.move_calls.borrow();
-    assert!(
-        moves
-            .iter()
-            .any(|(id, status)| id == "RIG-219" && status == "todo"),
-        "analyst DONE should move to todo, got: {moves:?}"
-    );
+    // MoveIssue effect should be queued with target "todo".
+    assert_move_effect(&db, "todo");
 }
 
 // ─── Test 20c: callback_analyst_blocked_adds_blocked_label ───────────────────
@@ -1062,9 +1101,9 @@ fn callback_analyst_blocked_adds_blocked_label() {
     let linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
 
-    let mut task = make_test_task("20260313-219b");
+    let mut task = make_test_task("20260313-219b-blk");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-219B".to_string();
+    task.linear_issue_id = "RIG-219B-blk".to_string();
     task.pipeline_stage = "analyst".to_string();
     db.insert_task(&task).unwrap();
 
@@ -1072,41 +1111,23 @@ fn callback_analyst_blocked_adds_blocked_label() {
 
     callback(
         &db,
-        "20260313-219b",
+        "20260313-219b-blk",
         "analyst",
         result,
-        "RIG-219B",
+        "RIG-219B-blk",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
-    // RIG-300: analyze:blocked label should be added for BLOCKED verdict
-    let adds = linear.add_label_calls.borrow();
-    assert!(
-        adds.iter()
-            .any(|(id, label)| id == "RIG-219B" && label == "analyze:blocked"),
-        "analyst BLOCKED callback should add 'analyze:blocked' label, got: {adds:?}"
-    );
+    // AddLabel effect for analyze:blocked.
+    assert_add_label_effect(&db, "analyze:blocked");
 
-    // Should NOT add analyze:done for blocked verdict
-    assert!(
-        !adds
-            .iter()
-            .any(|(id, label)| id == "RIG-219B" && label == "analyze:done"),
-        "analyst BLOCKED callback should NOT add 'analyze:done' label, got: {adds:?}"
-    );
+    // No AddLabel effect for analyze:done.
+    assert_no_add_label_effect(&db, "analyze:done");
 
-    // Trigger label should be removed
-    let removes = linear.remove_label_calls.borrow();
-    assert!(
-        removes
-            .iter()
-            .any(|(id, label)| id == "RIG-219B" && label == "analyze"),
-        "analyst BLOCKED callback should remove 'analyze' trigger label, got: {removes:?}"
-    );
+    // RemoveLabel effect for trigger label.
+    assert_remove_label_effect(&db, "analyze");
 }
 
 // ─── Test 21: callback_missing_verdict_warns ─────────────────────────────────
@@ -1123,7 +1144,7 @@ fn callback_missing_verdict_warns() {
     task.pipeline_stage = "reviewer".to_string();
     db.insert_task(&task).unwrap();
 
-    // Reviewer output without VERDICT= — should post warning comment
+    // Reviewer output without VERDICT= — should queue a PostComment effect.
     let result = "Code looks fine. No major issues found.";
 
     callback(
@@ -1133,26 +1154,15 @@ fn callback_missing_verdict_warns() {
         result,
         "RIG-221",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
-    // No moves — missing verdict keeps current state
-    assert!(
-        linear.move_calls.borrow().is_empty(),
-        "missing verdict should not trigger moves"
-    );
+    // No MoveIssue effects — missing verdict does not transition.
+    assert_no_move_effects(&db);
 
-    // Warning comment should be posted
-    let comments = linear.comment_calls.borrow();
-    assert!(
-        comments
-            .iter()
-            .any(|(id, body)| id == "RIG-221" && body.contains("no verdict")),
-        "missing verdict should post warning comment, got: {comments:?}"
-    );
+    // PostComment effect with "no verdict" warning.
+    assert_comment_effect(&db, "no verdict");
 }
 
 // ─── Test 22: callback_already_done_blocked_by_open_pr ───────────────────────
@@ -1170,8 +1180,6 @@ fn callback_already_done_blocked_by_open_pr() {
     db.insert_task(&task).unwrap();
 
     // Analyst says ALREADY_DONE, but there's an open PR.
-    // The ALREADY_DONE guard checks for open PRs BEFORE calling move_issue_by_name.
-    // FakeCommandRunner: gh pr list --search RIG-222 --state open → returns a PR
     cmd.push_success(r#"[{"number":42}]"#);
 
     let result = "Already implemented.\n\nVERDICT=ALREADY_DONE";
@@ -1183,27 +1191,15 @@ fn callback_already_done_blocked_by_open_pr() {
         result,
         "RIG-222",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
-    // The move to "done" should be blocked — open PR exists
-    let moves = linear.move_calls.borrow();
-    assert!(
-        !moves.iter().any(|(_, status)| status == "done"),
-        "ALREADY_DONE should be blocked when open PR exists, got: {moves:?}"
-    );
+    // No MoveIssue effect to "done" — blocked by open PR.
+    assert_no_move_effect(&db, "done");
 
-    // A comment should explain why it was blocked
-    let comments = linear.comment_calls.borrow();
-    assert!(
-        comments
-            .iter()
-            .any(|(id, body)| id == "RIG-222" && body.contains("ALREADY_DONE blocked")),
-        "should post blocking comment, got: {comments:?}"
-    );
+    // PostComment effect explaining the block.
+    assert_comment_effect(&db, "ALREADY_DONE blocked");
 }
 
 // ─── Test 23: callback_engineer_done_with_pr_url ─────────────────────────────
@@ -1220,9 +1216,6 @@ fn callback_engineer_done_with_pr_url() {
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
-    // Provide issue data for the spawned reviewer task
-    linear.set_issue_data("RIG-223", "Test issue", "test description");
-
     let result = "## Implementation\nDone.\n\nPR_URL=https://github.com/RigpaLabs/werma/pull/42\nVERDICT=DONE";
 
     callback(
@@ -1232,30 +1225,15 @@ fn callback_engineer_done_with_pr_url() {
         result,
         "RIG-223",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
-    // PR should be attached to Linear
-    let attaches = linear.attach_calls.borrow();
-    assert!(
-        attaches
-            .iter()
-            .any(|(id, url, _)| id == "RIG-223"
-                && url == "https://github.com/RigpaLabs/werma/pull/42"),
-        "PR URL should be attached, got: {attaches:?}"
-    );
+    // AttachUrl effect queued for the PR.
+    assert_attach_url_effect(&db, "/pull/42");
 
-    // Issue should move to review
-    let moves = linear.move_calls.borrow();
-    assert!(
-        moves
-            .iter()
-            .any(|(id, status)| id == "RIG-223" && status == "review"),
-        "engineer DONE should move to review, got: {moves:?}"
-    );
+    // MoveIssue effect queued for "review".
+    assert_move_effect(&db, "review");
 }
 
 // ─── Test 24: callback_engineer_done_auto_pr ─────────────────────────────────
@@ -1272,15 +1250,7 @@ fn callback_engineer_done_auto_pr() {
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
-    linear.set_issue_data("RIG-224", "Test issue", "test description");
-
     // No PR_URL in output — triggers auto_create_pr flow.
-    // auto_create_pr calls sequence:
-    // 1. git branch --show-current → "feat/RIG-224-impl"
-    // 2. git log origin/main..HEAD --oneline → "abc1234 feat: impl"
-    // 3. git push -u origin feat/RIG-224-impl → success
-    // 4. gh pr view --json url -q .url → failure (no existing PR)
-    // 5. gh pr create ... → PR URL
     cmd.push_success("feat/RIG-224-impl");
     cmd.push_success("abc1234 feat: implementation");
     cmd.push_success(""); // git push success
@@ -1296,30 +1266,15 @@ fn callback_engineer_done_auto_pr() {
         result,
         "RIG-224",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
-    // Auto-created PR should be attached
-    let attaches = linear.attach_calls.borrow();
-    assert!(
-        attaches
-            .iter()
-            .any(|(id, url, _)| id == "RIG-224"
-                && url == "https://github.com/RigpaLabs/werma/pull/99"),
-        "auto-created PR should be attached, got: {attaches:?}"
-    );
+    // AttachUrl effect queued for the auto-created PR.
+    assert_attach_url_effect(&db, "/pull/99");
 
-    // Issue should move to review
-    let moves = linear.move_calls.borrow();
-    assert!(
-        moves
-            .iter()
-            .any(|(id, status)| id == "RIG-224" && status == "review"),
-        "engineer DONE should move to review, got: {moves:?}"
-    );
+    // MoveIssue effect queued for "review".
+    assert_move_effect(&db, "review");
 }
 
 // ─── Test 25: callback_engineer_done_no_pr_warns ─────────────────────────────
@@ -1336,8 +1291,7 @@ fn callback_engineer_done_no_pr_warns() {
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
-    // No PR_URL in output and auto_create_pr returns None.
-    // auto_create_pr: git branch → "main" (safety check → returns None)
+    // No PR_URL in output and auto_create_pr returns None (branch=main safety check).
     cmd.push_success("main");
 
     let result = "## Implementation\nDone.\n\nVERDICT=DONE";
@@ -1349,20 +1303,12 @@ fn callback_engineer_done_no_pr_warns() {
         result,
         "RIG-225",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
-    // A warning comment about missing PR should be posted
-    let comments = linear.comment_calls.borrow();
-    assert!(
-        comments
-            .iter()
-            .any(|(id, body)| id == "RIG-225" && body.contains("no PR created")),
-        "should warn about missing PR, got: {comments:?}"
-    );
+    // PostComment effect queued with "no PR created" warning.
+    assert_comment_effect(&db, "no PR created");
 }
 
 // ─── Test 26: callback_reviewer_rejected_spawns_engineer ─────────────────────
@@ -1379,9 +1325,6 @@ fn callback_reviewer_rejected_spawns_engineer() {
     task.pipeline_stage = "reviewer".to_string();
     db.insert_task(&task).unwrap();
 
-    // Provide issue data for spawned engineer task
-    linear.set_issue_data("RIG-226", "Fix werma bug", "bug description");
-
     let result =
         "## Review\nFound issues.\n\n### Feedback\nFix the error handling.\n\nVERDICT=REJECTED";
 
@@ -1392,22 +1335,14 @@ fn callback_reviewer_rejected_spawns_engineer() {
         result,
         "RIG-226",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
-    // Issue should move to in_progress (rejected → in_progress per config)
-    let moves = linear.move_calls.borrow();
-    assert!(
-        moves
-            .iter()
-            .any(|(id, status)| id == "RIG-226" && status == "in_progress"),
-        "rejected review should move to in_progress, got: {moves:?}"
-    );
+    // MoveIssue effect queued for "in_progress" (rejected → in_progress per config).
+    assert_move_effect(&db, "in_progress");
 
-    // A new engineer task should be spawned
+    // A new engineer task should be spawned (stored in DB atomically in the transaction).
     let engineer_tasks = db
         .tasks_by_linear_issue("RIG-226", Some("engineer"), false)
         .unwrap();
@@ -1417,6 +1352,12 @@ fn callback_reviewer_rejected_spawns_engineer() {
         "rejected review should spawn engineer task"
     );
     assert_eq!(engineer_tasks[0].pipeline_stage, "engineer");
+
+    // Spawned task uses handoff_content (no filesystem dependency).
+    assert!(
+        !engineer_tasks[0].handoff_content.is_empty(),
+        "spawned task should have handoff_content set"
+    );
 }
 
 // ─── Test 27: callback_review_cycle_limit_escalates ──────────────────────────
@@ -1446,8 +1387,6 @@ fn callback_review_cycle_limit_escalates() {
     task.task_type = "pipeline-reviewer".to_string();
     db.insert_task(&task).unwrap();
 
-    linear.set_issue_data("RIG-227", "Fix werma bug", "bug description");
-
     let result = "## Review\nStill broken.\n\nVERDICT=REJECTED";
 
     callback(
@@ -1457,23 +1396,14 @@ fn callback_review_cycle_limit_escalates() {
         result,
         "RIG-227",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
-    // Issue should be moved to backlog (from reviewer config's blocked transition),
-    // not in_progress — RIG-280: escalation uses config status, not hardcoded "blocked"
-    let moves = linear.move_calls.borrow();
-    assert!(
-        moves
-            .iter()
-            .any(|(id, status)| id == "RIG-227" && status == "backlog"),
-        "review cycle limit should escalate to backlog (from config), got: {moves:?}"
-    );
+    // MoveIssue effect queued for "backlog" (reviewer cycle limit escalation).
+    assert_move_effect(&db, "backlog");
 
-    // No new engineer task should be spawned
+    // No new engineer task should be spawned.
     let engineer_tasks = db
         .tasks_by_linear_issue("RIG-227", Some("engineer"), false)
         .unwrap();
@@ -1483,8 +1413,9 @@ fn callback_review_cycle_limit_escalates() {
     );
 }
 
-// ─── Test 27b: escalation to blocked retries on failure (RIG-211) ────────────
-// Verifies that the escalation path uses move_with_retry, not bare move.
+// ─── Test 27b: escalation with outbox — move effect queued ───────────────────
+// With outbox pattern, move retry is handled by processor. callback() always
+// succeeds and queues the MoveIssue effect regardless of fake move failures.
 
 #[test]
 fn callback_review_escalation_retries_on_failure() {
@@ -1511,11 +1442,9 @@ fn callback_review_escalation_retries_on_failure() {
     task.task_type = "pipeline-reviewer".to_string();
     db.insert_task(&task).unwrap();
 
-    linear.set_issue_data("RIG-228", "Fix werma bug", "bug description");
-
     let result = "## Review\nStill broken.\n\nVERDICT=REJECTED";
 
-    // First move attempt fails, but second should succeed (retry logic)
+    // fail_next_n_moves no longer affects callback — deferred to processor.
     linear.fail_next_n_moves(1);
 
     callback(
@@ -1525,19 +1454,85 @@ fn callback_review_escalation_retries_on_failure() {
         result,
         "RIG-228",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
-    // Should still escalate to backlog (from reviewer config's blocked transition)
-    // despite initial move failure — RIG-280: no longer hardcodes "blocked"
-    let moves = linear.move_calls.borrow();
+    // MoveIssue effect queued for "backlog" (escalation from cycle limit).
+    assert_move_effect(&db, "backlog");
+}
+
+// ─── Full outbox cycle test ──────────────────────────────────────────────────
+
+#[test]
+fn outbox_full_cycle_callback_to_processor() {
+    // Phase 1: callback() writes effects to outbox — no Linear calls.
+    // Phase 2: process_effects() drains outbox — Linear called, task marked pushed.
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+    let notifier = FakeNotifier::new();
+
+    linear.set_issue_status("FAT-CYCLE", "Todo");
+
+    let mut task = make_test_task("20260326-cycle");
+    task.status = Status::Completed;
+    task.linear_issue_id = "FAT-CYCLE".to_string();
+    task.pipeline_stage = "analyst".to_string();
+    task.task_type = "pipeline-analyst".to_string();
+    task.working_dir = "/tmp".to_string();
+    db.insert_task(&task).unwrap();
+
+    // Phase 1: callback writes effects to outbox.
+    let analyst_output = "## Spec\nDo the thing.\n\nESTIMATE=3";
+    callback(
+        &db,
+        "20260326-cycle",
+        "analyst",
+        analyst_output,
+        "FAT-CYCLE",
+        "/tmp",
+        &cmd,
+    )
+    .unwrap();
+
+    // Verify effects are in the outbox.
+    let effects = db.pending_effects(100).unwrap();
     assert!(
-        moves
-            .iter()
-            .any(|(id, status)| id == "RIG-228" && status == "backlog"),
-        "escalation should retry and succeed moving to backlog (from config), got: {moves:?}"
+        !effects.is_empty(),
+        "effects should be queued after callback"
+    );
+
+    // Verify Linear was NOT called during callback.
+    assert!(
+        linear.move_calls.borrow().is_empty(),
+        "Linear must not be called during callback (outbox pattern)"
+    );
+
+    // Phase 2: process_effects drains the outbox.
+    let result = crate::pipeline::effects::process_effects(&db, &linear, &cmd, &notifier).unwrap();
+    assert!(
+        result.processed > 0,
+        "processor should have executed effects"
+    );
+
+    // Verify Linear was called by the processor.
+    assert!(
+        !linear.move_calls.borrow().is_empty(),
+        "Linear.move_issue should be called by effect processor"
+    );
+
+    // Verify task is now marked linear_pushed (all blocking effects done).
+    let updated_task = db.task("20260326-cycle").unwrap().unwrap();
+    assert!(
+        updated_task.linear_pushed,
+        "task.linear_pushed should be true after all effects processed"
+    );
+
+    // No effects remain pending.
+    let remaining = db.pending_effects(100).unwrap();
+    assert!(
+        remaining.is_empty(),
+        "no effects should remain pending after processor run, got: {remaining:?}"
     );
 }
