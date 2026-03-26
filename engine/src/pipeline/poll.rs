@@ -34,7 +34,8 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
         let title = issue["title"].as_str().unwrap_or("");
         let description = issue["description"].as_str().unwrap_or("");
 
-        if issue_id.is_empty() {
+        // RIG-307: skip issues with empty id or identifier to prevent ghost tasks
+        if issue_id.is_empty() || identifier.is_empty() {
             continue;
         }
 
@@ -142,21 +143,14 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             let title = issue["title"].as_str().unwrap_or("");
             let description = issue["description"].as_str().unwrap_or("");
 
-            if issue_id.is_empty() {
+            // RIG-307: skip issues with empty id or identifier to prevent ghost tasks
+            if issue_id.is_empty() || identifier.is_empty() {
                 continue;
             }
 
             // Skip issues whose state type is completed or canceled — they're done.
             let state_type = issue["state"]["type"].as_str().unwrap_or("");
             if state_type == "completed" || state_type == "canceled" || state_type == "cancelled" {
-                total_skipped += 1;
-                continue;
-            }
-
-            // RIG-272: Skip canceled/completed issues (defensive — the Linear query
-            // filters by status, but state_type can be stale or change mid-poll).
-            let state_type = issue["state"]["type"].as_str().unwrap_or("");
-            if state_type == "canceled" || state_type == "completed" {
                 total_skipped += 1;
                 continue;
             }
@@ -330,7 +324,8 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             let title = issue["title"].as_str().unwrap_or("");
             let description = issue["description"].as_str().unwrap_or("");
 
-            if issue_id.is_empty() {
+            // RIG-307: skip issues with empty id or identifier to prevent ghost tasks
+            if issue_id.is_empty() || identifier.is_empty() {
                 continue;
             }
 
@@ -607,12 +602,23 @@ stages:
 
     /// Helper: build a fake issue JSON with labels and backlog state.
     fn fake_issue(id: &str, identifier: &str, title: &str, labels: &[&str]) -> serde_json::Value {
+        fake_issue_with_state(id, identifier, title, labels, "backlog")
+    }
+
+    /// Helper: build a fake issue JSON with labels and a specified state type.
+    fn fake_issue_with_state(
+        id: &str,
+        identifier: &str,
+        title: &str,
+        labels: &[&str],
+        state_type: &str,
+    ) -> serde_json::Value {
         serde_json::json!({
             "id": id,
             "identifier": identifier,
             "title": title,
             "description": "Test description",
-            "state": {"type": "backlog"},
+            "state": {"type": state_type},
             "estimate": 3,
             "labels": {
                 "nodes": labels.iter().map(|l| serde_json::json!({"name": l})).collect::<Vec<_>>()
@@ -776,6 +782,131 @@ stages:
         assert!(
             tasks.is_empty(),
             "should not create analyst task when engineer already ran"
+        );
+    }
+
+    #[test]
+    fn poll_creates_engineer_task_for_fat_issue_with_correct_identifier() {
+        // RIG-307: FAT team issues in In Progress must get correct FAT-XX identifier
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        let issue = fake_issue_with_state(
+            "uuid-fat-37",
+            "FAT-37",
+            "Fix fathom order book sync",
+            &["Feature", "repo:werma"],
+            "started",
+        );
+        linear.set_issues_for_status("in_progress", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        let tasks = db
+            .tasks_by_linear_issue("FAT-37", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "should create exactly one engineer task for FAT-37"
+        );
+        assert_eq!(
+            tasks[0].linear_issue_id, "FAT-37",
+            "engineer task must have FAT-37 as linear_issue_id"
+        );
+        assert_eq!(tasks[0].pipeline_stage, "engineer");
+    }
+
+    #[test]
+    fn poll_creates_engineer_task_for_rig_issue_still_works() {
+        // RIG-307: RIG team issues should still work as before
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        let issue = fake_issue_with_state(
+            "uuid-rig-100",
+            "RIG-100",
+            "Improve werma dashboard",
+            &["Feature", "repo:werma"],
+            "started",
+        );
+        linear.set_issues_for_status("in_progress", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        let tasks = db
+            .tasks_by_linear_issue("RIG-100", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "should create exactly one engineer task for RIG-100"
+        );
+        assert_eq!(tasks[0].linear_issue_id, "RIG-100");
+        assert_eq!(tasks[0].pipeline_stage, "engineer");
+    }
+
+    #[test]
+    fn poll_skips_issue_with_empty_identifier() {
+        // RIG-307: issues with empty identifier should be skipped to prevent ghost tasks
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Issue with empty identifier (malformed API response)
+        let issue = fake_issue_with_state(
+            "uuid-no-ident",
+            "",
+            "Issue with missing identifier",
+            &["Feature", "repo:werma"],
+            "started",
+        );
+        linear.set_issues_for_status("in_progress", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // No tasks should be created
+        let all_tasks = db.list_tasks(None).unwrap();
+        assert!(
+            all_tasks.is_empty(),
+            "should not create tasks for issues with empty identifier"
+        );
+    }
+
+    #[test]
+    fn poll_dedup_prevents_duplicate_fat_engineer_tasks() {
+        // RIG-307: second poll cycle should not create duplicate tasks
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        let issue = fake_issue_with_state(
+            "uuid-fat-42",
+            "FAT-42",
+            "Add per-symbol metrics",
+            &["Feature", "repo:werma"],
+            "started",
+        );
+        linear.set_issues_for_status("in_progress", vec![issue.clone()]);
+
+        // First poll — creates task
+        poll(&db, &linear, &cmd).unwrap();
+        let tasks = db
+            .tasks_by_linear_issue("FAT-42", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+
+        // Second poll — should not create duplicate
+        poll(&db, &linear, &cmd).unwrap();
+        let tasks = db
+            .tasks_by_linear_issue("FAT-42", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "second poll should not create duplicate engineer task for FAT-42"
         );
     }
 }
