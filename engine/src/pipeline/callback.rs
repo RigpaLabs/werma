@@ -805,6 +805,7 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         retry_after: None,
         cost_usd: None,
         turns_used: 0,
+        handoff_content: String::new(),
     };
 
     db.insert_task(&task)?;
@@ -1020,6 +1021,7 @@ mod tests {
             retry_after: None,
             cost_usd: None,
             turns_used: 0,
+            handoff_content: String::new(),
         };
         db.insert_task(&analyst_task).unwrap();
 
@@ -1685,6 +1687,7 @@ stages:
             retry_after: None,
             cost_usd: None,
             turns_used: 0,
+            handoff_content: String::new(),
         };
         db.insert_task(&task).unwrap();
 
@@ -1763,6 +1766,7 @@ stages:
             retry_after: None,
             cost_usd: None,
             turns_used: 0,
+            handoff_content: String::new(),
         };
         db.insert_task(&task).unwrap();
 

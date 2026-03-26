@@ -847,6 +847,7 @@ mod tests {
             retry_after: None,
             cost_usd: None,
             turns_used: 0,
+            handoff_content: String::new(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -885,6 +886,7 @@ mod tests {
             retry_after: None,
             cost_usd: None,
             turns_used: 0,
+            handoff_content: String::new(),
         };
 
         let result = build_prompt(&task, dir.path(), dir.path()).unwrap();
@@ -921,6 +923,7 @@ mod tests {
             retry_after: None,
             cost_usd: None,
             turns_used: 0,
+            handoff_content: String::new(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -965,6 +968,7 @@ mod tests {
             retry_after: None,
             cost_usd: None,
             turns_used: 0,
+            handoff_content: String::new(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -1013,6 +1017,7 @@ mod tests {
             retry_after: None,
             cost_usd: None,
             turns_used: 0,
+            handoff_content: String::new(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -1052,6 +1057,7 @@ mod tests {
             retry_after: None,
             cost_usd: None,
             turns_used: 0,
+            handoff_content: String::new(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();

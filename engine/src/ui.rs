@@ -592,6 +592,7 @@ mod tests {
             retry_after: None,
             cost_usd: None,
             turns_used: 0,
+            handoff_content: String::new(),
         }];
 
         let table = task_list_table(&tasks, 100);

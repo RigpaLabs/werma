@@ -85,6 +85,9 @@ pub struct Task {
     /// Number of turns actually used by the agent.
     #[serde(default)]
     pub turns_used: i32,
+    /// Handoff content stored in DB instead of filesystem (pipeline tasks).
+    #[serde(default)]
+    pub handoff_content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +104,114 @@ pub struct Schedule {
     pub enabled: bool,
     pub context_files: Vec<String>,
     pub last_enqueued: String,
+}
+
+/// An outbox effect: an external side-effect to execute asynchronously.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Effect {
+    pub id: i64,
+    pub dedup_key: String,
+    pub task_id: String,
+    pub issue_id: String,
+    pub effect_type: EffectType,
+    pub payload: serde_json::Value,
+    pub blocking: bool,
+    pub status: EffectStatus,
+    pub attempts: i32,
+    pub max_attempts: i32,
+    pub created_at: String,
+    pub next_retry_at: Option<String>,
+    pub executed_at: Option<String>,
+    pub error: Option<String>,
+}
+
+/// The type of external side effect to execute.
+///
+/// SpawnTask is NOT an EffectType — spawning a child task is an internal
+/// DB change done synchronously inside the callback transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EffectType {
+    MoveIssue,
+    PostComment,
+    AddLabel,
+    RemoveLabel,
+    UpdateEstimate,
+    CreatePr,
+    AttachUrl,
+    PostPrComment,
+    Notify,
+}
+
+impl fmt::Display for EffectType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MoveIssue => write!(f, "MoveIssue"),
+            Self::PostComment => write!(f, "PostComment"),
+            Self::AddLabel => write!(f, "AddLabel"),
+            Self::RemoveLabel => write!(f, "RemoveLabel"),
+            Self::UpdateEstimate => write!(f, "UpdateEstimate"),
+            Self::CreatePr => write!(f, "CreatePr"),
+            Self::AttachUrl => write!(f, "AttachUrl"),
+            Self::PostPrComment => write!(f, "PostPrComment"),
+            Self::Notify => write!(f, "Notify"),
+        }
+    }
+}
+
+impl FromStr for EffectType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "MoveIssue" => Ok(Self::MoveIssue),
+            "PostComment" => Ok(Self::PostComment),
+            "AddLabel" => Ok(Self::AddLabel),
+            "RemoveLabel" => Ok(Self::RemoveLabel),
+            "UpdateEstimate" => Ok(Self::UpdateEstimate),
+            "CreatePr" => Ok(Self::CreatePr),
+            "AttachUrl" => Ok(Self::AttachUrl),
+            "PostPrComment" => Ok(Self::PostPrComment),
+            "Notify" => Ok(Self::Notify),
+            _ => Err(anyhow::anyhow!("unknown effect type: {s}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EffectStatus {
+    Pending,
+    Running,
+    Done,
+    Failed,
+    Dead,
+}
+
+impl fmt::Display for EffectStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pending => write!(f, "pending"),
+            Self::Running => write!(f, "running"),
+            Self::Done => write!(f, "done"),
+            Self::Failed => write!(f, "failed"),
+            Self::Dead => write!(f, "dead"),
+        }
+    }
+}
+
+impl FromStr for EffectStatus {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "running" => Ok(Self::Running),
+            "done" => Ok(Self::Done),
+            "failed" => Ok(Self::Failed),
+            "dead" => Ok(Self::Dead),
+            _ => Err(anyhow::anyhow!("unknown effect status: {s}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

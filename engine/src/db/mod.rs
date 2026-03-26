@@ -1,3 +1,4 @@
+mod effects;
 pub mod fakes;
 mod pipeline;
 mod schedule;
@@ -195,6 +196,7 @@ pub(super) fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         retry_after: row.get(22).ok(),
         cost_usd: row.get(23).ok().flatten(),
         turns_used: row.get(24).unwrap_or(0),
+        handoff_content: row.get(25).unwrap_or_default(),
     })
 }
 
@@ -227,6 +229,7 @@ pub(crate) fn make_test_task(id: &str) -> Task {
         retry_after: None,
         cost_usd: None,
         turns_used: 0,
+        handoff_content: String::new(),
     }
 }
 

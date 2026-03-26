@@ -116,6 +116,7 @@ pub fn check_schedules(
             retry_after: None,
             cost_usd: None,
             turns_used: 0,
+            handoff_content: String::new(),
         };
 
         task_repo.insert_task(&task)?;

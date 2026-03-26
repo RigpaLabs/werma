@@ -119,6 +119,7 @@ mod tests {
             retry_after: None,
             cost_usd: None,
             turns_used: 0,
+            handoff_content: String::new(),
         };
         db.insert_task(&task).unwrap();
 

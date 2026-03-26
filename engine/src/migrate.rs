@@ -173,6 +173,7 @@ fn parse_task(v: &serde_json::Value) -> Task {
         retry_after: None,
         cost_usd: None,
         turns_used: 0,
+        handoff_content: String::new(),
     }
 }
 

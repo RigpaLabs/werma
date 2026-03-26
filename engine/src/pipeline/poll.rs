@@ -109,6 +109,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             retry_after: None,
             cost_usd: None,
             turns_used: 0,
+            handoff_content: String::new(),
         };
 
         db.insert_task(&task)?;
@@ -327,6 +328,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     retry_after: None,
                     cost_usd: None,
                     turns_used: 0,
+                    handoff_content: String::new(),
                 };
 
                 db.insert_task(&task)?;
@@ -549,6 +551,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 retry_after: None,
                 cost_usd: None,
                 turns_used: 0,
+                handoff_content: String::new(),
             };
 
             db.insert_task(&task)?;
