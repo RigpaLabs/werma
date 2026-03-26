@@ -59,10 +59,11 @@ fn print_effects_table(effects: &[Effect]) {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
+        let t: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{t}…")
     }
 }
 
@@ -99,4 +100,38 @@ pub fn cmd_effects_history(db: &Db, task_id: &str) -> Result<()> {
     println!("{BOLD}Effects for task {task_id}{RESET}");
     print_effects_table(&effects);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fix 4: truncate must operate on chars, not bytes, to avoid panicking on multibyte Unicode.
+    #[test]
+    fn test_truncate_handles_unicode() {
+        // ASCII — unchanged
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello world", 5), "hell…");
+
+        // Cyrillic (2 bytes/char in UTF-8) — must not panic
+        let s = "привет мир"; // 10 chars
+        assert_eq!(truncate(s, 20), s); // fits — no truncation
+        let truncated = truncate(s, 5);
+        assert_eq!(truncated.chars().count(), 5); // 4 chars + ellipsis
+        assert!(truncated.ends_with('…'));
+        // Must be valid UTF-8 (not a partial multibyte sequence)
+        assert!(std::str::from_utf8(truncated.as_bytes()).is_ok());
+
+        // Emoji (4 bytes/char)
+        let emoji = "😀😁😂🤣😄"; // 5 chars
+        assert_eq!(truncate(emoji, 10), emoji); // fits
+        let truncated_emoji = truncate(emoji, 3);
+        assert_eq!(truncated_emoji.chars().count(), 3);
+        assert!(truncated_emoji.ends_with('…'));
+        assert!(std::str::from_utf8(truncated_emoji.as_bytes()).is_ok());
+
+        // Exact boundary
+        assert_eq!(truncate("abcde", 5), "abcde");
+        assert_eq!(truncate("abcdef", 5), "abcd…");
+    }
 }

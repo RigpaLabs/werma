@@ -3,9 +3,7 @@ use anyhow::Result;
 use super::super::config::StageConfig;
 use super::super::helpers::truncate_lines;
 use super::super::loader::load_default;
-use super::super::pr::{
-    auto_create_pr, get_pr_review_verdict, has_open_pr_for_issue, pr_title_from_url,
-};
+use super::super::pr::{get_pr_review_verdict, has_open_pr_for_issue, pr_title_from_url};
 use super::super::verdict::{
     extract_review_body, is_max_turns_exit, parse_comments, parse_estimate, parse_pr_url,
     parse_verdict,
@@ -344,25 +342,39 @@ pub fn decide_callback(
             }
         }
 
-        // Auto-create PR for engineer stage completion
+        // Engineer DONE: attach existing PR or queue CreatePr effect (outbox boundary).
+        // Never call auto_create_pr() directly here — that's a GitHub side effect.
         let pr_url = if stage == "engineer" && verdict_str == "done" {
             let url_from_output = parse_pr_url(result);
-            let url = url_from_output.or_else(|| {
-                match auto_create_pr(cmd, working_dir, linear_issue_id, task_id) {
-                    Ok(u) => u,
-                    Err(e) => {
-                        eprintln!("auto-PR error: {e}");
-                        None
-                    }
-                }
-            });
 
-            // RIG-232: engineer DONE without PR still spawns reviewer.
-            if url.is_none() {
+            if let Some(ref pr) = url_from_output {
+                // Agent already created a PR and included PR_URL= in output — just attach it.
+                let pr_title = pr_title_from_url(pr);
+                effects.push(make_effect(
+                    task_id,
+                    linear_issue_id,
+                    EffectType::AttachUrl,
+                    &format!("attach_url:{pr}"),
+                    serde_json::json!({ "url": pr, "title": pr_title }),
+                ));
+            } else {
+                // RIG-232: No PR_URL in output — queue CreatePr effect.
+                // Effect processor calls auto_create_pr() atomically after the transaction.
                 eprintln!(
-                    "callback: engineer DONE but no PR_URL found for {linear_issue_id} (task {task_id}). \
-                     Spawning reviewer anyway."
+                    "callback: engineer DONE but no PR_URL in output for {linear_issue_id} \
+                     (task {task_id}) — queuing CreatePr effect."
                 );
+                effects.push(make_effect(
+                    task_id,
+                    linear_issue_id,
+                    EffectType::CreatePr,
+                    "create_pr",
+                    serde_json::json!({
+                        "working_dir": working_dir,
+                        "issue_id": linear_issue_id,
+                        "task_id": task_id,
+                    }),
+                ));
                 effects.push(make_effect(
                     task_id,
                     linear_issue_id,
@@ -378,18 +390,7 @@ pub fn decide_callback(
                 ));
             }
 
-            // Attach PR URL to Linear issue
-            if let Some(ref pr) = url {
-                let pr_title = pr_title_from_url(pr);
-                effects.push(make_effect(
-                    task_id,
-                    linear_issue_id,
-                    EffectType::AttachUrl,
-                    &format!("attach_url:{pr}"),
-                    serde_json::json!({ "url": pr, "title": pr_title }),
-                ));
-            }
-            url
+            url_from_output
         } else {
             None
         };
@@ -821,5 +822,99 @@ mod tests {
         for e in &estimate_effects {
             assert!(e.blocking, "UpdateEstimate must be blocking=true");
         }
+    }
+
+    /// Fix 1 regression: engineer DONE with no PR_URL in output must emit CreatePr effect,
+    /// never call auto_create_pr() directly. FakeCommandRunner should record 0 cmd calls.
+    #[test]
+    fn test_engineer_done_emits_create_pr_effect_not_direct_call() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "ENG-CREATEPR";
+        let task_id = "eng-createpr-t1";
+
+        let mut t = crate::db::make_test_task(task_id);
+        t.status = crate::models::Status::Completed;
+        t.linear_issue_id = issue_id.to_string();
+        t.pipeline_stage = "engineer".to_string();
+        t.task_type = "pipeline-engineer".to_string();
+        t.working_dir = "~/projects/rigpa/werma".to_string();
+        db.insert_task(&t).unwrap();
+
+        // No PR_URL in output → should queue CreatePr effect, not call git/gh commands.
+        let result = "Implementation complete.\nAll tests pass.\nVERDICT=DONE";
+
+        let decision =
+            decide_callback(&db, task_id, "engineer", result, issue_id, "/tmp", &cmd).unwrap();
+
+        // Must have CreatePr effect
+        assert!(
+            decision
+                .effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::CreatePr),
+            "engineer DONE without PR_URL must emit CreatePr effect, got: {:?}",
+            decision.effects
+        );
+
+        // Must NOT have AttachUrl (no URL to attach yet)
+        assert!(
+            !decision
+                .effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::AttachUrl),
+            "engineer DONE without PR_URL must not emit AttachUrl, got: {:?}",
+            decision.effects
+        );
+
+        // FakeCommandRunner must have 0 calls — no direct git/gh side effects in decide path.
+        // (The PR creation happens in the effect processor, not here.)
+        let calls = cmd.calls.borrow();
+        assert!(
+            calls.is_empty(),
+            "decide_callback must not call any commands for engineer DONE (no auto_create_pr), got: {calls:?}"
+        );
+    }
+
+    /// Fix 1 variant: engineer DONE with PR_URL already in output → emit AttachUrl, no CreatePr.
+    #[test]
+    fn test_engineer_done_with_pr_url_emits_attach_url_not_create_pr() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "ENG-ATTACHURL";
+        let task_id = "eng-attachurl-t1";
+
+        let mut t = crate::db::make_test_task(task_id);
+        t.status = crate::models::Status::Completed;
+        t.linear_issue_id = issue_id.to_string();
+        t.pipeline_stage = "engineer".to_string();
+        t.task_type = "pipeline-engineer".to_string();
+        t.working_dir = "~/projects/rigpa/werma".to_string();
+        db.insert_task(&t).unwrap();
+
+        // Agent included PR_URL in output → should queue AttachUrl, not CreatePr.
+        let result =
+            "Implementation complete.\nPR_URL=https://github.com/org/repo/pull/42\nVERDICT=DONE";
+
+        let decision =
+            decide_callback(&db, task_id, "engineer", result, issue_id, "/tmp", &cmd).unwrap();
+
+        assert!(
+            decision
+                .effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::AttachUrl),
+            "engineer DONE with PR_URL must emit AttachUrl, got: {:?}",
+            decision.effects
+        );
+
+        assert!(
+            !decision
+                .effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::CreatePr),
+            "engineer DONE with PR_URL must not emit CreatePr, got: {:?}",
+            decision.effects
+        );
     }
 }

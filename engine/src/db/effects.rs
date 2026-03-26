@@ -214,12 +214,12 @@ impl super::Db {
 
     /// Reset a dead or failed effect back to pending for retry.
     ///
-    /// Clears attempts, status, next_retry_at, and error so it will be picked
+    /// Clears attempts, status, next_retry_at, executed_at, and error so it will be picked
     /// up on the next processor run.
     pub fn retry_effect(&self, id: i64) -> Result<bool> {
         let rows_changed = self.conn.execute(
             "UPDATE effects
-             SET status = 'pending', attempts = 0, next_retry_at = NULL, error = NULL
+             SET status = 'pending', attempts = 0, next_retry_at = NULL, error = NULL, executed_at = NULL
              WHERE id = ?1 AND status IN ('dead', 'failed')",
             params![id],
         )?;

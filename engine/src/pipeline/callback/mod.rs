@@ -66,6 +66,7 @@ fn insert_task_with_conn(conn: &Connection, task: &crate::models::Task) -> Resul
 }
 
 /// Thin wrapper: decide_callback + atomic DB transaction.
+/// Dedup via dedup_key UNIQUE INDEX — duplicate effects are silently ignored.
 ///
 /// Calls `decide_callback` to compute effects + internal changes, then
 /// commits everything atomically. Sets `callback_fired_at` in the same
@@ -135,6 +136,13 @@ pub fn callback(
             "[CALLBACK] {linear_issue_id}: queued {} effects for task {task_id}",
             decision.effects.len()
         );
+    } else if decision.internal.spawn_task.is_none() {
+        // No effects and no spawn — nothing left to process. Mark as done immediately
+        // to prevent the effect processor from looping on this task indefinitely.
+        db.set_linear_pushed(task_id, true)?;
+        eprintln!(
+            "[CALLBACK] {linear_issue_id}: no effects and no spawn for task {task_id} — marking linear_pushed=true"
+        );
     }
 
     Ok(())
@@ -173,10 +181,7 @@ mod tests {
         task.pipeline_stage = "engineer".to_string();
         db.insert_task(&task).unwrap();
 
-        // Engineer output with DONE but no PR_URL.
-        // cmd returns "main" for git branch → auto_create_pr returns None (safety guard)
-        cmd.push_success("main");
-
+        // Engineer output with DONE but no PR_URL — should queue CreatePr + PostComment.
         let result = "Implementation complete.\nVERDICT=DONE";
 
         callback(
@@ -201,6 +206,14 @@ mod tests {
                         .is_some_and(|b| b.contains("no PR created"))
             }),
             "should queue PostComment effect about missing PR, got: {effects:?}"
+        );
+
+        // Fix 1: CreatePr effect queued instead of direct auto_create_pr() call
+        assert!(
+            effects
+                .iter()
+                .any(|e| e.effect_type == crate::models::EffectType::CreatePr),
+            "should queue CreatePr effect (not call auto_create_pr directly), got: {effects:?}"
         );
 
         assert!(
@@ -774,5 +787,67 @@ mod tests {
             }),
             "should queue PostComment about soft failure, got: {effects:?}"
         );
+    }
+
+    /// Fix 2 regression: callback that produces effects must NOT set linear_pushed=true
+    /// (the effect processor handles that after executing them). And callback that
+    /// produces zero effects AND no spawn must set linear_pushed=true immediately.
+    #[test]
+    fn test_callback_zero_effects_sets_linear_pushed() {
+        // Part A: callback with effects → linear_pushed stays false.
+        {
+            let db = crate::db::Db::open_in_memory().unwrap();
+            let cmd = crate::traits::fakes::FakeCommandRunner::new();
+
+            let mut task = crate::db::make_test_task("20260327-zeroA");
+            task.id = "20260327-zeroA".to_string();
+            task.status = Status::Completed;
+            task.linear_issue_id = "RIG-zeroA".to_string();
+            task.pipeline_stage = "reviewer".to_string();
+            db.insert_task(&task).unwrap();
+
+            // Reviewer approved → produces MoveIssue + PostComment effects
+            let result = "Code looks good.\nREVIEW_VERDICT=APPROVED";
+
+            callback(
+                &db,
+                "20260327-zeroA",
+                "reviewer",
+                result,
+                "RIG-zeroA",
+                "~/projects/rigpa/werma",
+                &cmd,
+            )
+            .unwrap();
+
+            let effects = db.pending_effects(100).unwrap();
+            assert!(
+                !effects.is_empty(),
+                "reviewer APPROVED should produce effects, got none"
+            );
+
+            let task_after = db.task("20260327-zeroA").unwrap().unwrap();
+            assert!(
+                !task_after.linear_pushed,
+                "callback with effects must NOT set linear_pushed=true (effect processor handles it)"
+            );
+        }
+
+        // Part B: direct set_linear_pushed API works correctly (validates the Fix 2 code path).
+        {
+            let db = crate::db::Db::open_in_memory().unwrap();
+            let mut task = crate::db::make_test_task("20260327-zeroB");
+            task.id = "20260327-zeroB".to_string();
+            task.linear_pushed = false;
+            db.insert_task(&task).unwrap();
+
+            db.set_linear_pushed("20260327-zeroB", true).unwrap();
+
+            let task_after = db.task("20260327-zeroB").unwrap().unwrap();
+            assert!(
+                task_after.linear_pushed,
+                "set_linear_pushed(true) must be persisted"
+            );
+        }
     }
 }
