@@ -1744,4 +1744,35 @@ mod tests {
             "should have at least 3 werma fail paths (no fallback, fallback failed, JSON fallback failed), got {fail_count}"
         );
     }
+
+    // ─── build_prompt: handoff_content injection ──────────────────────────
+
+    #[test]
+    fn build_prompt_injects_handoff_content() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let task = Task {
+            id: "handoff-001".to_string(),
+            task_type: "pipeline-engineer".to_string(),
+            prompt: "Implement the feature".to_string(),
+            working_dir: dir.path().to_string_lossy().to_string(),
+            handoff_content: "## Handoff\nPrevious stage output here.".to_string(),
+            ..Default::default()
+        };
+
+        let result = build_prompt(&task, dir.path(), dir.path()).unwrap();
+
+        assert!(
+            result.contains("--- Pipeline Handoff ---"),
+            "prompt should contain handoff header, got: {result}"
+        );
+        assert!(
+            result.contains("## Handoff\nPrevious stage output here."),
+            "prompt should contain handoff markdown content, got: {result}"
+        );
+        assert!(
+            result.contains("--- End Handoff ---"),
+            "prompt should contain handoff footer, got: {result}"
+        );
+    }
 }
