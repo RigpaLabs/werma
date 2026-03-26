@@ -28,6 +28,9 @@ mod integration_tests;
 #[cfg(test)]
 mod full_cycle_tests;
 
+#[cfg(test)]
+mod regression_tests;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};

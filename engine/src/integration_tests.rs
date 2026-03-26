@@ -1237,6 +1237,8 @@ fn callback_engineer_done_with_pr_url() {
 }
 
 // ─── Test 24: callback_engineer_done_auto_pr ─────────────────────────────────
+// Fix 1: auto_create_pr() is no longer called inside decide_callback. Instead,
+// a CreatePr effect is queued in the outbox and executed by the effect processor.
 
 #[test]
 fn callback_engineer_done_auto_pr() {
@@ -1250,13 +1252,7 @@ fn callback_engineer_done_auto_pr() {
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
-    // No PR_URL in output — triggers auto_create_pr flow.
-    cmd.push_success("feat/RIG-224-impl");
-    cmd.push_success("abc1234 feat: implementation");
-    cmd.push_success(""); // git push success
-    cmd.push_failure("no pull requests found"); // gh pr view — no existing PR
-    cmd.push_success("https://github.com/RigpaLabs/werma/pull/99");
-
+    // No PR_URL in output — should queue CreatePr effect, no direct git/gh calls.
     let result = "## Implementation\nDone.\n\nVERDICT=DONE";
 
     callback(
@@ -1270,19 +1266,40 @@ fn callback_engineer_done_auto_pr() {
     )
     .unwrap();
 
-    // AttachUrl effect queued for the auto-created PR.
-    assert_attach_url_effect(&db, "/pull/99");
+    let effects = db.pending_effects(100).unwrap();
+
+    // CreatePr effect queued (not AttachUrl — no PR URL yet).
+    assert!(
+        effects
+            .iter()
+            .any(|e| e.effect_type == crate::models::EffectType::CreatePr),
+        "should queue CreatePr effect, got: {effects:?}"
+    );
+
+    // No direct cmd calls — auto_create_pr not called in decide path.
+    assert!(
+        cmd.calls.borrow().is_empty(),
+        "decide_callback must not call commands (no auto_create_pr in decision path), got: {:?}",
+        cmd.calls.borrow()
+    );
+
+    // Linear not called during callback.
+    assert!(
+        linear.move_calls.borrow().is_empty(),
+        "linear should not be called during callback"
+    );
 
     // MoveIssue effect queued for "review".
     assert_move_effect(&db, "review");
 }
 
 // ─── Test 25: callback_engineer_done_no_pr_warns ─────────────────────────────
+// Fix 1: no direct auto_create_pr call — both CreatePr effect and PostComment are queued.
 
 #[test]
 fn callback_engineer_done_no_pr_warns() {
     let db = Db::open_in_memory().unwrap();
-    let linear = FakeLinearApi::new();
+    let _linear = FakeLinearApi::new();
     let cmd = FakeCommandRunner::new();
 
     let mut task = make_test_task("20260313-225");
@@ -1291,9 +1308,7 @@ fn callback_engineer_done_no_pr_warns() {
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
-    // No PR_URL in output and auto_create_pr returns None (branch=main safety check).
-    cmd.push_success("main");
-
+    // No PR_URL in output — CreatePr effect queued, plus warning PostComment.
     let result = "## Implementation\nDone.\n\nVERDICT=DONE";
 
     callback(
@@ -1309,6 +1324,15 @@ fn callback_engineer_done_no_pr_warns() {
 
     // PostComment effect queued with "no PR created" warning.
     assert_comment_effect(&db, "no PR created");
+
+    // CreatePr effect also queued.
+    let effects = db.pending_effects(100).unwrap();
+    assert!(
+        effects
+            .iter()
+            .any(|e| e.effect_type == crate::models::EffectType::CreatePr),
+        "should queue CreatePr effect alongside PostComment, got: {effects:?}"
+    );
 }
 
 // ─── Test 26: callback_reviewer_rejected_spawns_engineer ─────────────────────
