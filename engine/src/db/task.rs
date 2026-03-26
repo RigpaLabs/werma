@@ -63,29 +63,26 @@ impl TaskRepository for super::Db {
 
 impl super::Db {
     /// Generate next task ID: YYYYMMDD-NNN (sequential within day).
+    ///
+    /// Queries MAX(seq) from DB using integer cast to handle >999 tasks correctly
+    /// (lexicographic ORDER BY breaks when digit count changes).
     pub fn next_task_id(&self) -> Result<String> {
         let today = chrono::Local::now().format("%Y%m%d").to_string();
-        let prefix = format!("{today}-");
+        let pattern = format!("{today}-%");
 
-        let last_id: Option<String> = self
+        let max_seq: Option<u32> = self
             .conn
             .query_row(
-                "SELECT id FROM tasks WHERE id LIKE ?1 || '%' ORDER BY id DESC LIMIT 1",
-                params![prefix],
+                "SELECT MAX(CAST(SUBSTR(id, 10) AS INTEGER)) FROM tasks WHERE id LIKE ?1",
+                params![pattern],
                 |row| row.get(0),
             )
-            .ok();
+            .ok()
+            .flatten();
 
-        let next_num = match last_id {
-            Some(id) => {
-                let num_str = id.strip_prefix(&prefix).unwrap_or("000");
-                let num: u32 = num_str.parse().unwrap_or(0);
-                num + 1
-            }
-            None => 1,
-        };
+        let next_num = max_seq.map_or(1, |n| n + 1);
 
-        Ok(format!("{prefix}{next_num:03}"))
+        Ok(format!("{today}-{next_num:03}"))
     }
 
     /// Insert a new task.
@@ -652,6 +649,53 @@ mod tests {
         let prefix1 = id1.split('-').next().unwrap();
         let prefix2 = id2.split('-').next().unwrap();
         assert_eq!(prefix1, prefix2);
+    }
+
+    #[test]
+    fn next_task_id_beyond_999() {
+        let db = Db::open_in_memory().unwrap();
+        let today = chrono::Local::now().format("%Y%m%d").to_string();
+
+        // Insert tasks 001 through 999
+        for i in 1..=999 {
+            let id = format!("{today}-{i:03}");
+            db.insert_task(&make_test_task(&id)).unwrap();
+        }
+
+        let next = db.next_task_id().unwrap();
+        assert_eq!(next, format!("{today}-1000"));
+    }
+
+    #[test]
+    fn next_task_id_beyond_1500() {
+        let db = Db::open_in_memory().unwrap();
+        let today = chrono::Local::now().format("%Y%m%d").to_string();
+
+        // Insert tasks up to 1500
+        for i in 1..=1500 {
+            let id = format!("{today}-{i:03}");
+            db.insert_task(&make_test_task(&id)).unwrap();
+        }
+
+        let next = db.next_task_id().unwrap();
+        assert_eq!(next, format!("{today}-1501"));
+    }
+
+    #[test]
+    fn next_task_id_ignores_other_days() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Insert tasks from a different day
+        for i in 1..=500 {
+            let id = format!("20250101-{i:03}");
+            db.insert_task(&make_test_task(&id)).unwrap();
+        }
+
+        // Today should start fresh at 001
+        let next = db.next_task_id().unwrap();
+        assert!(next.ends_with("-001"));
+        // And it should NOT be prefixed with the old date
+        assert!(!next.starts_with("20250101"));
     }
 
     #[test]
