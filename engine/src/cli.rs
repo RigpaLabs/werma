@@ -227,6 +227,30 @@ pub enum Commands {
 
     /// Show version info
     Version,
+
+    /// Effects outbox management
+    Effects {
+        #[command(subcommand)]
+        action: Option<EffectsAction>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EffectsAction {
+    /// List dead-lettered (permanently failed) effects
+    Dead,
+
+    /// Retry a dead or failed effect by ID
+    Retry {
+        /// Effect ID
+        id: i64,
+    },
+
+    /// Show all effects for a given task
+    History {
+        /// Task ID
+        task_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
