@@ -2,15 +2,13 @@ use crate::models::{Effect, EffectStatus, EffectType};
 
 /// Returns true if an effect of the given type is blocking (failure halts the chain).
 ///
-/// Blocking: MoveIssue, CreatePr, AttachUrl, UpdateEstimate — state-mutating, must succeed.
-/// Non-blocking (best-effort): PostComment, AddLabel, RemoveLabel, Notify, PostPrComment.
+/// Blocking: MoveIssue, CreatePr, UpdateEstimate — state-mutating, must succeed.
+/// Non-blocking (best-effort): PostComment, AddLabel, RemoveLabel, Notify, PostPrComment, AttachUrl.
+/// AttachUrl is metadata decoration — a transient Linear API failure shouldn't wedge the pipeline.
 pub(super) fn is_blocking_effect(effect_type: EffectType) -> bool {
     matches!(
         effect_type,
-        EffectType::MoveIssue
-            | EffectType::CreatePr
-            | EffectType::AttachUrl
-            | EffectType::UpdateEstimate
+        EffectType::MoveIssue | EffectType::CreatePr | EffectType::UpdateEstimate
     )
 }
 
