@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use super::callback::move_with_retry;
-use super::pr::{auto_create_pr, post_pr_comment};
+use super::pr::{auto_create_pr, post_pr_comment, pr_title_from_url};
 use crate::db::Db;
 use crate::linear::LinearApi;
 use crate::models::{Effect, EffectType};
@@ -122,10 +122,12 @@ pub fn execute_effect(
 
         EffectType::CreatePr => {
             let working_dir = payload_str(payload, "working_dir")?;
-            // Returns Option<String> — we log but don't fail if no PR created.
+            // If no PR created, logs and continues (no failure).
+            // If PR created, attaches URL to Linear; propagates error if attach fails.
             if let Some(url) = auto_create_pr(cmd, working_dir, issue_id, task_id)? {
                 eprintln!("[effects] CreatePr: created PR {url} for {issue_id}");
-                linear.attach_url(issue_id, &url, &url)?;
+                let title = pr_title_from_url(&url);
+                linear.attach_url(issue_id, &url, &title)?;
             } else {
                 eprintln!(
                     "[effects] CreatePr: no PR created for {issue_id} (skipped — already exists or on main)"
@@ -557,6 +559,10 @@ mod tests {
         assert!(
             attaches[0].1.contains("pull/99"),
             "attached URL should be the PR URL"
+        );
+        assert_eq!(
+            attaches[0].2, "PR #99",
+            "title should be derived via pr_title_from_url"
         );
     }
 
