@@ -581,4 +581,173 @@ mod tests {
         let result = payload_str(&payload, "target_status");
         assert!(result.is_err(), "non-string value should return Err");
     }
+
+    #[test]
+    fn process_effects_multi_task_independent() {
+        let db = Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        let issue_a = "EFF-200";
+        let task_a = "eff-200-t";
+        let issue_b = "EFF-201";
+        let task_b = "eff-201-t";
+
+        insert_task(&db, task_a, issue_a);
+        insert_task(&db, task_b, issue_b);
+        linear.set_issue_status(issue_a, "Todo");
+        linear.set_issue_status(issue_b, "Todo");
+
+        // Fail the first 3 move calls (exhausts all move_with_retry attempts for Task A).
+        // Task B's MoveIssue call comes after and succeeds.
+        linear.fail_next_n_moves(3);
+
+        // Task A: MoveIssue (will fail, blocking) + PostComment (should be skipped)
+        let a1 = make_effect(
+            task_a,
+            issue_a,
+            EffectType::MoveIssue,
+            serde_json::json!({ "target_status": "in_progress" }),
+        );
+        let a2 = make_effect(
+            task_a,
+            issue_a,
+            EffectType::PostComment,
+            serde_json::json!({ "body": "task A comment — should not post" }),
+        );
+
+        // Task B: MoveIssue (will succeed) + PostComment (will succeed)
+        let b1 = make_effect(
+            task_b,
+            issue_b,
+            EffectType::MoveIssue,
+            serde_json::json!({ "target_status": "in_progress" }),
+        );
+        let b2 = make_effect(
+            task_b,
+            issue_b,
+            EffectType::PostComment,
+            serde_json::json!({ "body": "task B comment" }),
+        );
+
+        // Insert Task A effects first so they come first in the batch.
+        db.insert_effects(&[a1, a2]).unwrap();
+        db.insert_effects(&[b1, b2]).unwrap();
+
+        let result = process_effects(&db, &linear, &cmd, &notifier).unwrap();
+
+        // Task A: 1 failed (MoveIssue), 0 processed. Task B: 2 processed (Move + Comment).
+        assert_eq!(result.failed, 1, "only Task A's MoveIssue should fail");
+        assert_eq!(result.processed, 2, "Task B's two effects should succeed");
+
+        // Task A's PostComment must NOT have been called.
+        let comments = linear.comment_calls.borrow();
+        assert_eq!(
+            comments.len(),
+            1,
+            "only Task B's comment should have been posted"
+        );
+        assert!(
+            comments[0].1.contains("task B comment"),
+            "the posted comment should be from Task B"
+        );
+        drop(comments);
+
+        // Task B: all blocking effects done → linear_pushed = true.
+        let task_b_row = db.task(task_b).unwrap().unwrap();
+        assert!(
+            task_b_row.linear_pushed,
+            "Task B should have linear_pushed=true after all effects done"
+        );
+
+        // Task A: blocking effect failed → linear_pushed = false.
+        let task_a_row = db.task(task_a).unwrap().unwrap();
+        assert!(
+            !task_a_row.linear_pushed,
+            "Task A should have linear_pushed=false because MoveIssue failed"
+        );
+    }
+
+    #[test]
+    fn process_effects_nonblocking_failure_continues() {
+        let db = Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        let issue_id = "EFF-202";
+        let task_id = "eff-202-t";
+
+        insert_task(&db, task_id, issue_id);
+        linear.set_issue_status(issue_id, "Todo");
+
+        // Effect 1: non-blocking PostComment that will fail (missing 'body' key).
+        // Use a unique dedup_key so it doesn't collide with e3 below.
+        let mut e1 = Effect {
+            dedup_key: format!("{task_id}:PostComment:fail"),
+            ..make_effect(
+                task_id,
+                issue_id,
+                EffectType::PostComment,
+                serde_json::json!({ "WRONG_KEY": "will fail" }),
+            )
+        };
+        e1.blocking = false; // non-blocking — failure must not halt the chain
+
+        // Effect 2: blocking MoveIssue — should still execute despite e1 failing.
+        let e2 = make_effect(
+            task_id,
+            issue_id,
+            EffectType::MoveIssue,
+            serde_json::json!({ "target_status": "in_progress" }),
+        );
+
+        // Effect 3: non-blocking PostComment — should still execute.
+        let mut e3 = Effect {
+            dedup_key: format!("{task_id}:PostComment:ok"),
+            ..make_effect(
+                task_id,
+                issue_id,
+                EffectType::PostComment,
+                serde_json::json!({ "body": "continuation comment" }),
+            )
+        };
+        e3.blocking = false;
+
+        db.insert_effects(&[e1, e2, e3]).unwrap();
+
+        let result = process_effects(&db, &linear, &cmd, &notifier).unwrap();
+
+        assert_eq!(
+            result.failed, 1,
+            "only the non-blocking PostComment should fail"
+        );
+        assert_eq!(
+            result.processed, 2,
+            "MoveIssue and second PostComment should succeed"
+        );
+
+        // The MoveIssue (e2) must have been called.
+        let moves = linear.move_calls.borrow();
+        assert_eq!(moves.len(), 1, "MoveIssue should have been executed");
+        drop(moves);
+
+        // The second PostComment (e3) must have been called.
+        let comments = linear.comment_calls.borrow();
+        assert_eq!(
+            comments.len(),
+            1,
+            "the continuation PostComment should have been posted"
+        );
+        assert!(comments[0].1.contains("continuation comment"));
+        drop(comments);
+
+        // All blocking effects are done → linear_pushed = true.
+        let task_row = db.task(task_id).unwrap().unwrap();
+        assert!(
+            task_row.linear_pushed,
+            "blocking_effects_done=true so linear_pushed should be set"
+        );
+    }
 }
