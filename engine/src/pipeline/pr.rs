@@ -188,6 +188,8 @@ pub(crate) fn auto_create_pr(
 ///
 /// Finds the PR number from the current branch, then posts the comment body.
 /// Returns Ok(true) if comment was posted, Ok(false) if no PR found, Err on failure.
+// Used by Task 4 effect processor (PostPrComment effect); allow dead_code until effects.rs lands.
+#[allow(dead_code)]
 pub(crate) fn post_pr_comment(
     cmd: &dyn CommandRunner,
     working_dir: &str,

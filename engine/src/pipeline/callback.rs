@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, anyhow};
+use rusqlite::{Connection, params};
 
 use super::config::PipelineConfig;
 use super::helpers::{infer_working_dir_from_issue, truncate_lines};
 use super::loader::{load_default, resolve_prompt};
-use super::pr::{
-    auto_create_pr, get_pr_review_verdict, has_open_pr_for_issue, post_pr_comment,
-    pr_title_from_url,
-};
+use super::pr::{auto_create_pr, get_pr_review_verdict, has_open_pr_for_issue, pr_title_from_url};
 use super::prompt::{build_vars, render_prompt};
 use super::verdict::{
     extract_rejection_feedback, extract_review_body, is_heavy_track, is_max_turns_exit,
@@ -16,11 +14,107 @@ use super::verdict::{
 };
 use crate::db::Db;
 use crate::linear::LinearApi;
+use crate::models::{Effect, EffectStatus, EffectType};
 use crate::traits::{CommandRunner, Notifier};
 
+/// The decision produced by `decide_callback()`: internal DB changes + outbox effects.
+pub struct CallbackDecision {
+    pub internal: InternalChanges,
+    pub effects: Vec<Effect>,
+}
+
+/// Internal DB changes to apply atomically in the callback transaction.
+pub struct InternalChanges {
+    /// A new pipeline task to spawn (stored in DB, no filesystem write).
+    pub spawn_task: Option<crate::models::Task>,
+    /// Update the task's estimate field: `(task_id, estimate)`.
+    pub update_estimate: Option<(String, i32)>,
+}
+
+/// Insert a task using a raw `&Connection` — for use inside `Db::transaction()` closures.
+fn insert_task_with_conn(conn: &Connection, task: &crate::models::Task) -> Result<()> {
+    let depends_on = serde_json::to_string(&task.depends_on)?;
+    let context_files = serde_json::to_string(&task.context_files)?;
+    let linear_pushed: i32 = if task.linear_pushed { 1 } else { 0 };
+
+    conn.execute(
+        "INSERT INTO tasks (
+            id, status, priority, created_at, started_at, finished_at,
+            type, prompt, output_path, working_dir, model, max_turns,
+            allowed_tools, session_id, linear_issue_id, linear_pushed,
+            pipeline_stage, depends_on, context_files, repo_hash, estimate,
+            retry_count, retry_after, cost_usd, turns_used, handoff_content
+        ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6,
+            ?7, ?8, ?9, ?10, ?11, ?12,
+            ?13, ?14, ?15, ?16,
+            ?17, ?18, ?19, ?20, ?21,
+            ?22, ?23, ?24, ?25, ?26
+        )",
+        params![
+            task.id,
+            task.status.to_string(),
+            task.priority,
+            task.created_at,
+            task.started_at,
+            task.finished_at,
+            task.task_type,
+            task.prompt,
+            task.output_path,
+            task.working_dir,
+            task.model,
+            task.max_turns,
+            task.allowed_tools,
+            task.session_id,
+            task.linear_issue_id,
+            linear_pushed,
+            task.pipeline_stage,
+            depends_on,
+            context_files,
+            task.repo_hash,
+            task.estimate,
+            task.retry_count,
+            task.retry_after,
+            task.cost_usd,
+            task.turns_used,
+            task.handoff_content,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Helper: build a `Vec<Effect>` entry with deterministic dedup_key.
+fn make_effect(
+    task_id: &str,
+    issue_id: &str,
+    effect_type: EffectType,
+    key_suffix: &str,
+    payload: serde_json::Value,
+) -> Effect {
+    Effect {
+        id: 0,
+        dedup_key: format!("{task_id}:{key_suffix}"),
+        task_id: task_id.to_string(),
+        issue_id: issue_id.to_string(),
+        effect_type,
+        payload,
+        blocking: true,
+        status: EffectStatus::Pending,
+        attempts: 0,
+        max_attempts: 5,
+        created_at: chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
+        next_retry_at: None,
+        executed_at: None,
+        error: None,
+    }
+}
+
 /// Max retries for Linear status move operations.
+// Used by Task 4 effect processor; allow dead_code until effects.rs is implemented.
+#[allow(dead_code)]
 const CALLBACK_MAX_RETRIES: u32 = 3;
 /// Backoff delays in milliseconds between retries: 50ms, 100ms, 200ms.
+#[allow(dead_code)]
 const CALLBACK_BACKOFF_MS: [u64; 3] = [50, 100, 200];
 
 /// Default maximum review cycles when not configured in YAML.
@@ -32,6 +126,8 @@ pub(crate) const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 3;
 /// After a successful move, performs a read-after-write check to verify
 /// the status actually changed. Returns an error only if all retries
 /// are exhausted or reconciliation fails.
+// Used by Task 4 effect processor; allow dead_code until effects.rs is implemented.
+#[allow(dead_code)]
 pub(crate) fn move_with_retry(
     linear: &dyn LinearApi,
     issue_id: &str,
@@ -104,30 +200,30 @@ pub(crate) fn move_with_retry(
     Err(err)
 }
 
-/// Handle pipeline callback when a task completes.
+/// Decision service: read DB/cmd, return what should happen — no external mutations.
+///
+/// Reads the pipeline config, parses verdicts, checks review round limits, and
+/// builds the set of outbox effects + internal changes. Does NOT call Linear API
+/// mutating methods or write files. Calling code commits everything atomically.
 #[allow(clippy::too_many_arguments)]
-pub fn callback(
+pub fn decide_callback(
     db: &Db,
     task_id: &str,
     stage: &str,
     result: &str,
     linear_issue_id: &str,
     working_dir: &str,
-    linear: &dyn LinearApi,
     cmd: &dyn CommandRunner,
-    notifier: &dyn Notifier,
-) -> Result<()> {
-    // Dedup guard: if callback SUCCEEDED recently, skip to prevent
-    // duplicate Linear comments from overlapping daemon ticks / cmd_complete races.
-    if db.is_callback_recently_fired(task_id, 60)? {
-        eprintln!("callback: skipping duplicate for task {task_id} (fired <60s ago)");
-        return Ok(());
-    }
-
+) -> Result<CallbackDecision> {
     let config = load_default()?;
+    let mut effects: Vec<Effect> = Vec::new();
+    let mut internal = InternalChanges {
+        spawn_task: None,
+        update_estimate: None,
+    };
 
     // Guard: if output is empty, attempt fallback for reviewer stage (RIG-309),
-    // otherwise post a comment and return early.
+    // otherwise queue a comment effect and return.
     if result.trim().is_empty() {
         eprintln!("callback: empty output for task {task_id} (stage={stage}), checking fallback");
 
@@ -146,16 +242,14 @@ pub fn callback(
                      REVIEW_VERDICT={gh_verdict}"
                 );
                 // Recurse with synthesized result
-                return callback(
+                return decide_callback(
                     db,
                     task_id,
                     stage,
                     &synthesized_result,
                     linear_issue_id,
                     working_dir,
-                    linear,
                     cmd,
-                    notifier,
                 );
             }
             eprintln!(
@@ -164,16 +258,19 @@ pub fn callback(
             );
         }
 
-        if let Err(e) = linear.comment(
+        effects.push(make_effect(
+            task_id,
             linear_issue_id,
-            &format!(
-                "**Werma task `{task_id}`** (stage: {stage}) produced empty output. \
-                 Task marked as failed. Re-trigger needed."
-            ),
-        ) {
-            eprintln!("callback: failed to post empty-output comment on {linear_issue_id}: {e}");
-        }
-        return Ok(());
+            EffectType::PostComment,
+            "empty_output_comment",
+            serde_json::json!({
+                "body": format!(
+                    "**Werma task `{task_id}`** (stage: {stage}) produced empty output. \
+                     Task marked as failed. Re-trigger needed."
+                )
+            }),
+        ));
+        return Ok(CallbackDecision { internal, effects });
     }
 
     // RIG-252 + RIG-202: Detect error_max_turns — agent ran out of turns without completing.
@@ -194,61 +291,70 @@ pub fn callback(
                 .stage(stage)
                 .and_then(|s| s.transition_for("blocked"))
                 .map(|t| t.status.as_str())
-                .unwrap_or("backlog");
+                .unwrap_or("backlog")
+                .to_string();
             eprintln!(
                 "[CALLBACK] {linear_issue_id}: task {task_id} (stage={stage}) hit max_turns — \
                  {failed_count} prior failures >= limit {max_soft_failures}, escalating to {escalation_status}"
             );
-            if let Err(e) = move_with_retry(linear, linear_issue_id, escalation_status) {
-                eprintln!(
-                    "[CALLBACK] {linear_issue_id}: escalation move to '{escalation_status}' failed: {e}"
-                );
-            }
-            if let Err(e) = linear.comment(
+            effects.push(make_effect(
+                task_id,
                 linear_issue_id,
-                &format!(
-                    "**max_turns failure limit reached** ({failed_count} failures, stage: {stage}). \
-                     Moving to {escalation_status} — manual intervention required.\n\n\
-                     Task `{task_id}` was the latest attempt."
-                ),
-            ) {
-                eprintln!("callback: failed to post escalation comment on {linear_issue_id}: {e}");
-            }
-            if let Err(e) = db.set_callback_fired_at(task_id) {
-                eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
-            }
+                EffectType::MoveIssue,
+                &format!("max_turns_escalate:{escalation_status}"),
+                serde_json::json!({ "target_status": escalation_status }),
+            ));
+            effects.push(make_effect(
+                task_id,
+                linear_issue_id,
+                EffectType::PostComment,
+                "max_turns_escalation_comment",
+                serde_json::json!({
+                    "body": format!(
+                        "**max_turns failure limit reached** ({failed_count} failures, stage: {stage}). \
+                         Moving to {escalation_status} — manual intervention required.\n\n\
+                         Task `{task_id}` was the latest attempt."
+                    )
+                }),
+            ));
         } else {
             eprintln!(
                 "[CALLBACK] {linear_issue_id}: task {task_id} (stage={stage}) hit max_turns — \
                  soft failure ({failed_count}/{max_soft_failures}), no transition"
             );
-            if let Err(e) = linear.comment(
+            effects.push(make_effect(
+                task_id,
                 linear_issue_id,
-                &format!(
-                    "**Werma task `{task_id}`** (stage: {stage}) hit `max_turns` — agent ran out of \
-                     turns without completing. Soft failure ({}/{max_soft_failures}). Will be retried.",
-                    failed_count + 1,
-                ),
-            ) {
-                eprintln!("callback: failed to post max_turns comment on {linear_issue_id}: {e}");
-            }
+                EffectType::PostComment,
+                "max_turns_soft_comment",
+                serde_json::json!({
+                    "body": format!(
+                        "**Werma task `{task_id}`** (stage: {stage}) hit `max_turns` — agent ran out of \
+                         turns without completing. Soft failure ({}/{max_soft_failures}). Will be retried.",
+                        failed_count + 1,
+                    )
+                }),
+            ));
         }
-        return Ok(());
+        return Ok(CallbackDecision { internal, effects });
     }
 
     let stage_cfg = if let Some(s) = config.stage(stage) {
         s
     } else {
-        eprintln!("unknown pipeline stage: {stage}");
-        return Ok(());
+        return Err(anyhow::anyhow!("unknown pipeline stage: {stage}"));
     };
 
-    // Post any comment blocks from agent output (non-critical)
+    // Queue comment blocks from agent output (non-critical)
     let comments = parse_comments(result);
-    for comment_body in &comments {
-        if let Err(e) = linear.comment(linear_issue_id, comment_body) {
-            eprintln!("[CALLBACK] {linear_issue_id}: failed to post comment: {e}");
-        }
+    for (idx, comment_body) in comments.iter().enumerate() {
+        effects.push(make_effect(
+            task_id,
+            linear_issue_id,
+            EffectType::PostComment,
+            &format!("comment_block:{idx}"),
+            serde_json::json!({ "body": comment_body }),
+        ));
     }
 
     let verdict = parse_verdict(result);
@@ -260,23 +366,22 @@ pub fn callback(
         eprintln!(
             "warning: no verdict found for task {task_id} (stage={stage}), keeping current state"
         );
-        if let Err(e) = linear.comment(
+        effects.push(make_effect(
+            task_id,
             linear_issue_id,
-            &format!(
-                "**Werma task `{task_id}`** (stage: {stage}) completed but no verdict found. \
-                 Manual review needed."
-            ),
-        ) {
-            eprintln!("callback: failed to post no-verdict comment on {linear_issue_id}: {e}");
-        }
-        if let Err(e) = db.set_callback_fired_at(task_id) {
-            eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
-        }
-        return Ok(());
+            EffectType::PostComment,
+            "no_verdict_comment",
+            serde_json::json!({
+                "body": format!(
+                    "**Werma task `{task_id}`** (stage: {stage}) completed but no verdict found. \
+                     Manual review needed."
+                )
+            }),
+        ));
+        return Ok(CallbackDecision { internal, effects });
     }
 
     // Compute effective verdict once — analyst/engineer default to "done" when missing.
-    // Used for both fallback spec posting and transition routing.
     let verdict_str = verdict
         .as_deref()
         .unwrap_or(if stage == "engineer" || stage == "analyst" {
@@ -287,21 +392,18 @@ pub fn callback(
         .to_lowercase();
 
     // RIG-227: Fallback spec posting for analyst stage.
-    // Post substantive plain-text output as a comment so the spec reaches Linear.
-    // Only fire for "done" — ALREADY_DONE means no new spec was written,
-    // and BLOCKED shouldn't post a partial spec.
-    // When COMMENT blocks were posted, require substantial plain-text content
-    // (>= 5 lines) to avoid posting trivial preamble alongside proper blocks.
     if stage == "analyst" && verdict_str == "done" {
         let spec_body = extract_spec_from_output(result);
         let min_lines = if comments.is_empty() { 1 } else { 5 };
         if spec_body.lines().count() >= min_lines {
             let truncated = truncate_lines(&spec_body, 200);
-            if let Err(e) = linear.comment(linear_issue_id, &truncated) {
-                eprintln!(
-                    "[CALLBACK] {linear_issue_id}: failed to post fallback spec comment: {e}"
-                );
-            }
+            effects.push(make_effect(
+                task_id,
+                linear_issue_id,
+                EffectType::PostComment,
+                "analyst_spec_comment",
+                serde_json::json!({ "body": truncated }),
+            ));
         }
     }
 
@@ -309,12 +411,15 @@ pub fn callback(
     let estimate = if stage == "analyst" {
         let est = parse_estimate(result);
         if est > 0 {
-            if let Err(e) = linear.update_estimate(linear_issue_id, est) {
-                eprintln!("warn: failed to update estimate on Linear: {e}");
-            }
-            if let Err(e) = db.update_task_field(task_id, "estimate", &est.to_string()) {
-                eprintln!("warn: failed to update estimate in DB: {e}");
-            }
+            effects.push(make_effect(
+                task_id,
+                linear_issue_id,
+                EffectType::UpdateEstimate,
+                &format!("update_estimate:{est}"),
+                serde_json::json!({ "estimate": est }),
+            ));
+            // Internal DB update (synchronous, in the callback transaction)
+            internal.update_estimate = Some((task_id.to_string(), est));
         }
         est
     } else {
@@ -330,83 +435,88 @@ pub fn callback(
             && has_open_pr_for_issue(cmd, working_dir, linear_issue_id)
         {
             eprintln!(
-                "callback: blocking ALREADY_DONE→done for {linear_issue_id} — open PR exists. \
-                     Issue stays in current state."
+                "callback: blocking ALREADY_DONE→done for {linear_issue_id} — open PR exists."
             );
-            if let Err(e) = linear.comment(
-                    linear_issue_id,
-                    &format!(
+            effects.push(make_effect(
+                task_id,
+                linear_issue_id,
+                EffectType::PostComment,
+                "already_done_blocked_comment",
+                serde_json::json!({
+                    "body": format!(
                         "**Analyst ALREADY_DONE blocked** (task: `{task_id}`): open PR exists for this issue. \
                          An open PR means work is in progress, not done. Issue stays in current state."
-                    ),
-                ) {
-                    eprintln!("callback: failed to post ALREADY_DONE comment on {linear_issue_id}: {e}");
-                }
-            if let Err(e) = db.set_callback_fired_at(task_id) {
-                eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
-            }
-            // RIG-274: still add spec:done even when blocked by open PR — ensures
-            // the dedup label is set so re-adding the trigger label won't re-run analyst.
+                    )
+                }),
+            ));
+            // RIG-274: still add spec:done even when blocked by open PR.
             if stage == "analyst" {
-                if let Err(e) = linear.add_label(linear_issue_id, "spec:done") {
-                    eprintln!(
-                        "callback: failed to add 'spec:done' label to {linear_issue_id}: {e}"
-                    );
-                }
+                effects.push(make_effect(
+                    task_id,
+                    linear_issue_id,
+                    EffectType::AddLabel,
+                    "add_label:spec:done",
+                    serde_json::json!({ "label": "spec:done" }),
+                ));
             }
-            return Ok(());
+            return Ok(CallbackDecision { internal, effects });
         }
 
-        // Move the issue — retry with backoff + reconciliation check.
-        if let Err(e) = move_with_retry(linear, linear_issue_id, &t.status) {
-            let alert_msg = format!(
-                "[CALLBACK FAILURE] {linear_issue_id} task `{task_id}` (stage: {stage}): \
-                     failed to move to '{}' after {CALLBACK_MAX_RETRIES} retries: {e}",
-                t.status
-            );
-            notifier.notify_macos("Werma Callback Failed", &alert_msg, "Basso");
-            notifier.notify_slack("#werma-alerts", &alert_msg);
-            return Err(e);
-        }
+        // Queue the issue move as an effect — processor calls move_with_retry.
+        effects.push(make_effect(
+            task_id,
+            linear_issue_id,
+            EffectType::MoveIssue,
+            &format!("move_issue:{}", t.status),
+            serde_json::json!({
+                "target_status": t.status,
+                // Notify on failure: processor can read this payload
+                "alert_on_failure": true,
+            }),
+        ));
 
-        // RIG-300: Analyst label swap — remove trigger label, add verdict-specific label.
-        // done/already_done → "analyze:done" + "spec:done"
-        // blocked → "analyze:blocked" (no spec:done — spec wasn't completed)
+        // RIG-300: Analyst label swap.
         if stage == "analyst" {
             if let Some(ref label) = stage_cfg.linear_label {
-                if let Err(e) = linear.remove_label(linear_issue_id, label) {
-                    eprintln!("callback: failed to remove '{label}' from {linear_issue_id}: {e}");
-                }
+                effects.push(make_effect(
+                    task_id,
+                    linear_issue_id,
+                    EffectType::RemoveLabel,
+                    &format!("remove_label:{label}"),
+                    serde_json::json!({ "label": label }),
+                ));
                 let suffix = if verdict_str == "blocked" {
                     "blocked"
                 } else {
                     "done"
                 };
                 let result_label = format!("{label}:{suffix}");
-                if let Err(e) = linear.add_label(linear_issue_id, &result_label) {
-                    eprintln!(
-                        "callback: failed to add '{result_label}' label to {linear_issue_id}: {e}"
-                    );
-                }
+                effects.push(make_effect(
+                    task_id,
+                    linear_issue_id,
+                    EffectType::AddLabel,
+                    &format!("add_label:{result_label}"),
+                    serde_json::json!({ "label": result_label }),
+                ));
             }
-            // RIG-274: Add spec:done label for robust dedup — prevents re-running
-            // analyst even if trigger label is re-added later.
+            // RIG-274: Add spec:done for done/already_done.
             if verdict_str == "done" || verdict_str == "already_done" {
-                if let Err(e) = linear.add_label(linear_issue_id, "spec:done") {
-                    eprintln!(
-                        "callback: failed to add 'spec:done' label to {linear_issue_id}: {e}"
-                    );
-                }
+                effects.push(make_effect(
+                    task_id,
+                    linear_issue_id,
+                    EffectType::AddLabel,
+                    "add_label:spec:done",
+                    serde_json::json!({ "label": "spec:done" }),
+                ));
             }
         }
 
         // Auto-create PR for engineer stage completion
         let pr_url = if stage == "engineer" && verdict_str == "done" {
             let url_from_output = parse_pr_url(result);
-
             let url = url_from_output.or_else(|| {
                 match auto_create_pr(cmd, working_dir, linear_issue_id, task_id) {
-                    Ok(url) => url,
+                    Ok(u) => u,
                     Err(e) => {
                         eprintln!("auto-PR error: {e}");
                         None
@@ -415,62 +525,56 @@ pub fn callback(
             });
 
             // RIG-232: engineer DONE without PR still spawns reviewer.
-            // Reviewer can check for open PRs or request the engineer to create one.
             if url.is_none() {
                 eprintln!(
                     "callback: engineer DONE but no PR_URL found for {linear_issue_id} (task {task_id}). \
-                         Spawning reviewer anyway — reviewer can check for PR."
+                     Spawning reviewer anyway."
                 );
-                if let Err(e) = linear.comment(
+                effects.push(make_effect(
+                    task_id,
                     linear_issue_id,
-                    &format!(
-                        "**Engineer task `{task_id}` DONE but no PR created.** \
+                    EffectType::PostComment,
+                    "no_pr_comment",
+                    serde_json::json!({
+                        "body": format!(
+                            "**Engineer task `{task_id}` DONE but no PR created.** \
                              The agent did not include `PR_URL=` in output. \
                              Proceeding to reviewer — reviewer will verify or request a PR."
-                    ),
-                ) {
-                    eprintln!("callback: failed to post no-PR comment on {linear_issue_id}: {e}");
-                }
+                        )
+                    }),
+                ));
             }
 
-            // Attach PR URL to Linear issue if we have one
+            // Attach PR URL to Linear issue
             if let Some(ref pr) = url {
                 let pr_title = pr_title_from_url(pr);
-                if let Err(e) = linear.attach_url(linear_issue_id, pr, &pr_title) {
-                    eprintln!("attach PR to Linear: {e}");
-                }
+                effects.push(make_effect(
+                    task_id,
+                    linear_issue_id,
+                    EffectType::AttachUrl,
+                    &format!("attach_url:{pr}"),
+                    serde_json::json!({ "url": pr, "title": pr_title }),
+                ));
             }
             url
         } else {
             None
         };
 
-        // RIG-281: Post reviewer's review as a PR comment (engine-side, not agent-side).
-        // Agents no longer call `gh pr comment` directly — the engine handles it.
+        // RIG-281: Post reviewer's review as a PR comment.
         if stage == "reviewer" {
             if let Some(review_body) = extract_review_body(result) {
-                match post_pr_comment(cmd, working_dir, &review_body) {
-                    Ok(true) => {
-                        eprintln!(
-                            "[CALLBACK] {linear_issue_id}: posted review as PR comment (task {task_id})"
-                        );
-                    }
-                    Ok(false) => {
-                        eprintln!(
-                            "[CALLBACK] {linear_issue_id}: no open PR found for review comment \
-                             (task {task_id})"
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "[CALLBACK] {linear_issue_id}: failed to post review as PR comment: {e}"
-                        );
-                    }
-                }
+                effects.push(make_effect(
+                    task_id,
+                    linear_issue_id,
+                    EffectType::PostPrComment,
+                    "reviewer_pr_comment",
+                    serde_json::json!({ "body": review_body }),
+                ));
             }
         }
 
-        // Post a comment — non-critical, don't fail the callback if this errors.
+        // Queue the callback summary comment.
         let comment = format_callback_comment(
             task_id,
             stage,
@@ -478,14 +582,17 @@ pub fn callback(
             t.spawn.as_deref(),
             pr_url.as_deref(),
         );
-        if let Err(e) = linear.comment(linear_issue_id, &comment) {
-            eprintln!("callback: failed to post comment on {linear_issue_id}: {e}");
-        }
+        effects.push(make_effect(
+            task_id,
+            linear_issue_id,
+            EffectType::PostComment,
+            "callback_summary_comment",
+            serde_json::json!({ "body": comment }),
+        ));
 
         // Spawn next stage if configured
         if let Some(ref next_stage) = t.spawn {
-            // Check review cycle limit: if reviewer has rejected too many times,
-            // escalate to Blocked to prevent infinite loops.
+            // Check review cycle limit.
             if stage == "reviewer" && next_stage == "engineer" {
                 let review_count =
                     db.count_completed_tasks_for_issue_stage(linear_issue_id, "reviewer")?;
@@ -493,66 +600,145 @@ pub fn callback(
                     .review_round_limit()
                     .unwrap_or(DEFAULT_MAX_REVIEW_ROUNDS) as i64;
                 if review_count >= max_rounds {
-                    // Use the pipeline config's blocked transition target status
-                    // (e.g. "backlog"), falling back to "backlog" if not configured.
                     let escalation_status = stage_cfg
                         .transition_for("blocked")
                         .map(|t| t.status.as_str())
-                        .unwrap_or("backlog");
+                        .unwrap_or("backlog")
+                        .to_string();
                     eprintln!(
                         "review cycle limit ({max_rounds}) reached for issue {linear_issue_id}, \
-                             escalating to {escalation_status}"
+                         escalating to {escalation_status}"
                     );
-                    if let Err(e) = move_with_retry(linear, linear_issue_id, escalation_status) {
-                        eprintln!(
-                            "callback: escalation move to '{escalation_status}' failed for \
-                                 {linear_issue_id}: {e} — marking callback as fired to prevent retry loop"
-                        );
-                    }
-                    if let Err(e) = linear.comment(
+                    effects.push(make_effect(
+                        task_id,
                         linear_issue_id,
-                        &format!(
-                            "**Review cycle limit reached** ({max_rounds} rounds). \
+                        EffectType::MoveIssue,
+                        &format!("cycle_limit_escalate:{escalation_status}"),
+                        serde_json::json!({ "target_status": escalation_status }),
+                    ));
+                    effects.push(make_effect(
+                        task_id,
+                        linear_issue_id,
+                        EffectType::PostComment,
+                        "cycle_limit_comment",
+                        serde_json::json!({
+                            "body": format!(
+                                "**Review cycle limit reached** ({max_rounds} rounds). \
                                  Moving to {escalation_status} — manual review required."
-                        ),
-                    ) {
-                        eprintln!(
-                            "callback: failed to post escalation comment on {linear_issue_id}: {e}"
-                        );
-                    }
-                    if let Err(e) = db.set_callback_fired_at(task_id) {
-                        eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
-                    }
-                    return Ok(());
+                            )
+                        }),
+                    ));
+                    return Ok(CallbackDecision { internal, effects });
                 }
             }
 
-            create_next_stage_task(&NextStageParams {
+            // Build the next-stage task with handoff in DB column (no file write).
+            let spawn = build_next_stage_task(
                 db,
-                config: &config,
-                linear: Some(linear),
+                &config,
                 linear_issue_id,
                 next_stage,
-                previous_output: result,
-                prev_task_id: task_id,
-                prev_stage: stage,
+                result,
+                task_id,
+                stage,
                 working_dir,
                 estimate,
-                pr_url: pr_url.as_deref(),
-                logs_dir: None,
-            })?;
-        }
-
-        // RIG-211: set callback_fired_at AFTER successful transition.
-        if let Err(e) = db.set_callback_fired_at(task_id) {
-            eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
+                pr_url.as_deref(),
+            )?;
+            internal.spawn_task = spawn;
         }
     } else {
         eprintln!("stage '{stage}': no transition for verdict '{verdict_str}' — no action taken");
-        if let Err(e) = db.set_callback_fired_at(task_id) {
-            eprintln!("warn: failed to set callback_fired_at for {task_id}: {e}");
-        }
     }
+
+    Ok(CallbackDecision { internal, effects })
+}
+
+/// Thin wrapper: dedup guard + decide_callback + atomic DB transaction.
+///
+/// Signature kept identical to the old callback() so callers and tests need
+/// minimal changes. The `linear` and `notifier` params are now used only by
+/// the effect *processor* (Task 4), not here.
+#[allow(clippy::too_many_arguments)]
+pub fn callback(
+    db: &Db,
+    task_id: &str,
+    stage: &str,
+    result: &str,
+    linear_issue_id: &str,
+    working_dir: &str,
+    linear: &dyn LinearApi,
+    cmd: &dyn CommandRunner,
+    notifier: &dyn Notifier,
+) -> Result<()> {
+    // Dedup guard: if callback SUCCEEDED recently, skip to prevent duplicate
+    // effects from overlapping daemon ticks.
+    if db.is_callback_recently_fired(task_id, 60)? {
+        eprintln!("callback: skipping duplicate for task {task_id} (fired <60s ago)");
+        return Ok(());
+    }
+
+    let decision = decide_callback(
+        db,
+        task_id,
+        stage,
+        result,
+        linear_issue_id,
+        working_dir,
+        cmd,
+    )?;
+
+    // Atomically write all internal changes + outbox effects in one transaction.
+    // callback_fired_at is set here so it's part of the same atomic write.
+    db.transaction(|conn| {
+        // Spawn next pipeline task if the decision requires it.
+        if let Some(ref task) = decision.internal.spawn_task {
+            let exists: bool = conn.query_row(
+                "SELECT COUNT(*) FROM tasks WHERE id = ?1",
+                params![task.id],
+                |row| row.get::<_, i32>(0),
+            )? > 0;
+            if !exists {
+                insert_task_with_conn(conn, task)?;
+                eprintln!(
+                    "  + pipeline task: {} stage={} type={}",
+                    task.id, task.pipeline_stage, task.task_type
+                );
+            }
+        }
+
+        // Apply estimate update.
+        if let Some((ref tid, est)) = decision.internal.update_estimate {
+            conn.execute(
+                "UPDATE tasks SET estimate = ?1 WHERE id = ?2",
+                params![est, tid],
+            )?;
+        }
+
+        // Insert outbox effects (INSERT OR IGNORE via dedup_key).
+        crate::db::Db::insert_effects_with_conn(conn, &decision.effects)?;
+
+        // Mark callback as fired to prevent re-processing.
+        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        conn.execute(
+            "UPDATE tasks SET callback_fired_at = ?1 WHERE id = ?2",
+            params![now, task_id],
+        )?;
+        Ok(())
+    })?;
+
+    // Log for observability: what will the effect processor execute?
+    if !decision.effects.is_empty() {
+        eprintln!(
+            "[CALLBACK] {linear_issue_id}: queued {} effects for task {task_id}",
+            decision.effects.len()
+        );
+    }
+
+    // Suppress unused param warnings — linear and notifier are used by the
+    // effect processor (Task 4), not here. The params remain in the signature
+    // for backward compatibility with all call sites.
+    let _ = (linear, notifier);
 
     Ok(())
 }
@@ -661,7 +847,128 @@ pub(crate) fn extract_spec_from_output(output: &str) -> String {
     result.trim().to_string()
 }
 
+/// Build a Task for the next pipeline stage with handoff content stored in `task.handoff_content`.
+///
+/// Unlike `create_next_stage_task()`, this function:
+/// - Does NOT write any files (no `~/.werma/logs/*-handoff.md`)
+/// - Does NOT insert into DB (caller does that atomically via `insert_task_with_conn`)
+/// - Does NOT call Linear API for issue metadata (no `&dyn LinearApi` param)
+/// - Returns `None` if an active task already exists for the issue + stage
+#[allow(clippy::too_many_arguments)]
+fn build_next_stage_task(
+    db: &Db,
+    config: &PipelineConfig,
+    linear_issue_id: &str,
+    next_stage: &str,
+    previous_output: &str,
+    prev_task_id: &str,
+    prev_stage: &str,
+    working_dir: &str,
+    estimate: i32,
+    pr_url: Option<&str>,
+) -> Result<Option<crate::models::Task>> {
+    // Guard: don't spawn if an active task already exists for this issue + stage.
+    let existing = db.tasks_by_linear_issue(linear_issue_id, Some(next_stage), true)?;
+    if !existing.is_empty() {
+        eprintln!(
+            "skip spawn: active task already exists for {linear_issue_id} stage={next_stage}"
+        );
+        return Ok(None);
+    }
+
+    let stage_cfg = config
+        .stage(next_stage)
+        .ok_or_else(|| anyhow::anyhow!("no config for stage '{next_stage}'"))?;
+
+    let task_id = db.next_task_id()?;
+    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+
+    let review_round = if next_stage == "reviewer" {
+        db.count_completed_tasks_for_issue_stage(linear_issue_id, "reviewer")?
+    } else {
+        0
+    };
+
+    let max_turns = if let Some(t) = stage_cfg.max_turns {
+        t as i32
+    } else if next_stage == "engineer" {
+        if is_heavy_track(estimate) { 45 } else { 30 }
+    } else {
+        crate::default_turns(&stage_cfg.agent)
+    };
+    let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
+    let effective_model = stage_cfg
+        .effective_model(estimate, review_round)
+        .to_string();
+
+    // Build the prompt without issue metadata (no Linear API call).
+    let prompt = build_handoff_prompt(
+        config,
+        next_stage,
+        prev_stage,
+        linear_issue_id,
+        "", // issue_title: unknown without Linear API call
+        "", // issue_description: unknown without Linear API call
+        previous_output,
+    );
+
+    let pr_section = pr_url.map(|url| format!("PR: {url}\n")).unwrap_or_default();
+
+    let handoff_content = format!(
+        "## Pipeline Handoff: {} ({}) -> {} ({})\n\
+         Linear issue: {}\n\
+         {pr_section}\n\
+         ### Previous Stage Output\n{}\n",
+        prev_task_id,
+        prev_stage,
+        task_id,
+        next_stage,
+        linear_issue_id,
+        truncate_lines(previous_output, 200),
+    );
+
+    let effective_working_dir = if working_dir.is_empty() || working_dir == "~/projects/ar" {
+        infer_working_dir_from_issue(db, linear_issue_id)
+    } else {
+        working_dir.to_string()
+    };
+
+    use crate::models::{Status, Task};
+    let task = Task {
+        id: task_id,
+        status: Status::Pending,
+        priority: 1,
+        created_at: now,
+        started_at: None,
+        finished_at: None,
+        task_type: stage_cfg.agent.clone(),
+        prompt,
+        output_path: String::new(),
+        working_dir: effective_working_dir,
+        model: effective_model,
+        max_turns,
+        allowed_tools,
+        session_id: String::new(),
+        linear_issue_id: linear_issue_id.to_string(),
+        linear_pushed: false,
+        pipeline_stage: next_stage.to_string(),
+        depends_on: vec![],
+        context_files: vec![], // no filesystem dependency — handoff in DB column
+        repo_hash: crate::runtime_repo_hash(),
+        estimate,
+        retry_count: 0,
+        retry_after: None,
+        cost_usd: None,
+        turns_used: 0,
+        handoff_content,
+    };
+
+    Ok(Some(task))
+}
+
 /// Parameters for creating the next pipeline stage task.
+// Used only in tests; the production path uses build_next_stage_task() via decide_callback().
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct NextStageParams<'a> {
     pub db: &'a Db,
     pub config: &'a PipelineConfig,
@@ -679,6 +986,8 @@ pub(crate) struct NextStageParams<'a> {
 }
 
 /// Create a task for the next pipeline stage with handoff context.
+// Used only in tests; the production path uses build_next_stage_task() via decide_callback().
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
     let NextStageParams {
         db,
@@ -1393,14 +1702,11 @@ stages:
 
     #[test]
     fn callback_engineer_done_without_pr_posts_warning_comment() {
-        // RIG-232: verify that the "no PR created" warning comment is still posted.
-        // This tests the comment posting code path that was preserved from the old behavior.
+        // RIG-232: verify that the "no PR created" warning comment effect is queued.
         let db = crate::db::Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
-
-        linear.set_issue_status("RIG-232b", "in_progress");
 
         let mut task = crate::db::make_test_task("20260314-232b");
         task.id = "20260314-232b".to_string();
@@ -1428,34 +1734,37 @@ stages:
         )
         .unwrap();
 
-        // Warning comment about missing PR should be posted
-        let comments = linear.comment_calls.borrow();
+        let effects = db.pending_effects(100).unwrap();
+
+        // PostComment effect about missing PR should be queued.
         assert!(
-            comments
-                .iter()
-                .any(|(id, body)| id == "RIG-232b" && body.contains("no PR created")),
-            "should warn about missing PR, got: {comments:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::PostComment
+                    && e.payload
+                        .get("body")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|b| b.contains("no PR created"))
+            }),
+            "should queue PostComment effect about missing PR, got: {effects:?}"
         );
 
-        // Issue should still move to review
-        let moves = linear.move_calls.borrow();
+        // MoveIssue effect to "review" should be queued.
         assert!(
-            moves
-                .iter()
-                .any(|(id, status)| id == "RIG-232b" && status == "review"),
-            "engineer DONE should move to review even without PR, got: {moves:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::MoveIssue
+                    && e.payload.get("target_status").and_then(|v| v.as_str()) == Some("review")
+            }),
+            "should queue MoveIssue effect to review, got: {effects:?}"
         );
     }
 
     #[test]
     fn callback_analyst_done_swaps_labels() {
-        // RIG-253: analyst callback should remove trigger label and add analyze:done
+        // RIG-253: analyst callback should queue RemoveLabel(analyze), AddLabel(analyze:done), AddLabel(spec:done) effects.
         let db = crate::db::Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
-
-        linear.set_issue_status("RIG-253", "in_progress");
 
         let mut task = crate::db::make_test_task("20260315-253");
         task.status = Status::Completed;
@@ -1478,40 +1787,43 @@ stages:
         )
         .unwrap();
 
-        // Trigger label "analyze" should be removed
-        let removes = linear.remove_label_calls.borrow();
+        let effects = db.pending_effects(100).unwrap();
+
+        // RemoveLabel effect for "analyze".
         assert!(
-            removes
-                .iter()
-                .any(|(id, label)| id == "RIG-253" && label == "analyze"),
-            "should remove 'analyze' trigger label, got: {removes:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::RemoveLabel
+                    && e.payload.get("label").and_then(|v| v.as_str()) == Some("analyze")
+            }),
+            "should queue RemoveLabel(analyze), got: {effects:?}"
         );
 
-        // Done label "analyze:done" should be added
-        let adds = linear.add_label_calls.borrow();
+        // AddLabel effect for "analyze:done".
         assert!(
-            adds.iter()
-                .any(|(id, label)| id == "RIG-253" && label == "analyze:done"),
-            "should add 'analyze:done' label, got: {adds:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::AddLabel
+                    && e.payload.get("label").and_then(|v| v.as_str()) == Some("analyze:done")
+            }),
+            "should queue AddLabel(analyze:done), got: {effects:?}"
         );
 
-        // RIG-274: spec:done label should also be added
+        // AddLabel effect for "spec:done".
         assert!(
-            adds.iter()
-                .any(|(id, label)| id == "RIG-253" && label == "spec:done"),
-            "should add 'spec:done' label, got: {adds:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::AddLabel
+                    && e.payload.get("label").and_then(|v| v.as_str()) == Some("spec:done")
+            }),
+            "should queue AddLabel(spec:done), got: {effects:?}"
         );
     }
 
     #[test]
     fn callback_analyst_already_done_adds_spec_done() {
-        // RIG-274: ALREADY_DONE verdict should also add spec:done label
+        // RIG-274: ALREADY_DONE verdict should queue AddLabel(spec:done) effect.
         let db = crate::db::Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
-
-        linear.set_issue_status("RIG-274", "done");
 
         let mut task = crate::db::make_test_task("20260324-274");
         task.status = Status::Completed;
@@ -1534,25 +1846,23 @@ stages:
         )
         .unwrap();
 
-        let adds = linear.add_label_calls.borrow();
+        let effects = db.pending_effects(100).unwrap();
         assert!(
-            adds.iter()
-                .any(|(id, label)| id == "RIG-274" && label == "spec:done"),
-            "ALREADY_DONE should add 'spec:done' label, got: {adds:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::AddLabel
+                    && e.payload.get("label").and_then(|v| v.as_str()) == Some("spec:done")
+            }),
+            "ALREADY_DONE should queue AddLabel(spec:done), got: {effects:?}"
         );
     }
 
     #[test]
     fn callback_analyst_already_done_with_open_pr_still_adds_spec_done() {
-        // RIG-274: ALREADY_DONE + open PR path should still add spec:done label.
-        // The early return guard (blocking ALREADY_DONE→done when PR exists) was
-        // exiting before reaching the spec:done label code — this test covers that path.
+        // RIG-274: ALREADY_DONE + open PR path should still queue AddLabel(spec:done).
         let db = crate::db::Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
-
-        linear.set_issue_status("RIG-274c", "in_progress");
 
         let mut task = crate::db::make_test_task("20260324-274c");
         task.status = Status::Completed;
@@ -1578,24 +1888,23 @@ stages:
         )
         .unwrap();
 
-        let adds = linear.add_label_calls.borrow();
+        let effects = db.pending_effects(100).unwrap();
         assert!(
-            adds.iter()
-                .any(|(id, label)| id == "RIG-274c" && label == "spec:done"),
-            "ALREADY_DONE with open PR should still add 'spec:done' label, got: {adds:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::AddLabel
+                    && e.payload.get("label").and_then(|v| v.as_str()) == Some("spec:done")
+            }),
+            "ALREADY_DONE with open PR should still queue AddLabel(spec:done), got: {effects:?}"
         );
     }
 
     #[test]
     fn callback_analyst_blocked_adds_analyze_blocked_not_spec_done() {
-        // RIG-300: BLOCKED verdict should add analyze:blocked (not analyze:done)
-        // and should NOT add spec:done
+        // RIG-300: BLOCKED verdict should queue AddLabel(analyze:blocked), NOT AddLabel(spec:done)
         let db = crate::db::Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
-
-        linear.set_issue_status("RIG-274b", "blocked");
 
         let mut task = crate::db::make_test_task("20260324-275");
         task.status = Status::Completed;
@@ -1618,49 +1927,54 @@ stages:
         )
         .unwrap();
 
-        let adds = linear.add_label_calls.borrow();
+        let effects = db.pending_effects(100).unwrap();
+
+        // No AddLabel(spec:done) for BLOCKED.
         assert!(
-            !adds
-                .iter()
-                .any(|(id, label)| id == "RIG-274b" && label == "spec:done"),
-            "BLOCKED should NOT add 'spec:done' label, got: {adds:?}"
+            !effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::AddLabel
+                    && e.payload.get("label").and_then(|v| v.as_str()) == Some("spec:done")
+            }),
+            "BLOCKED should NOT queue AddLabel(spec:done), got: {effects:?}"
         );
 
-        // RIG-300: should add analyze:blocked label
+        // AddLabel(analyze:blocked).
         assert!(
-            adds.iter()
-                .any(|(id, label)| id == "RIG-274b" && label == "analyze:blocked"),
-            "BLOCKED should add 'analyze:blocked' label, got: {adds:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::AddLabel
+                    && e.payload.get("label").and_then(|v| v.as_str()) == Some("analyze:blocked")
+            }),
+            "BLOCKED should queue AddLabel(analyze:blocked), got: {effects:?}"
         );
 
-        // RIG-300: should NOT add analyze:done label
+        // No AddLabel(analyze:done).
         assert!(
-            !adds
-                .iter()
-                .any(|(id, label)| id == "RIG-274b" && label == "analyze:done"),
-            "BLOCKED should NOT add 'analyze:done' label, got: {adds:?}"
+            !effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::AddLabel
+                    && e.payload.get("label").and_then(|v| v.as_str()) == Some("analyze:done")
+            }),
+            "BLOCKED should NOT queue AddLabel(analyze:done), got: {effects:?}"
         );
 
-        // Trigger label should be removed
-        let removes = linear.remove_label_calls.borrow();
+        // RemoveLabel(analyze).
         assert!(
-            removes
-                .iter()
-                .any(|(id, label)| id == "RIG-274b" && label == "analyze"),
-            "BLOCKED should remove 'analyze' trigger label, got: {removes:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::RemoveLabel
+                    && e.payload.get("label").and_then(|v| v.as_str()) == Some("analyze")
+            }),
+            "BLOCKED should queue RemoveLabel(analyze), got: {effects:?}"
         );
     }
 
     #[test]
     fn review_cycle_escalation_uses_config_status() {
-        // When review cycle limit is reached, the callback should use the
-        // pipeline config's blocked transition target (backlog), not hardcode "blocked".
+        // When review cycle limit is reached, the callback should queue MoveIssue("backlog"),
+        // not "blocked" (config-driven, not hardcoded).
         let db = crate::db::Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
 
-        // Insert a reviewer task for the issue
         let task = Task {
             id: "20260324-esc".to_string(),
             status: Status::Completed,
@@ -1715,19 +2029,24 @@ stages:
         )
         .unwrap();
 
-        // Verify it moved to "backlog" (from config), not "blocked"
-        let moves = linear.move_calls.borrow();
-        // First move is the "review" status from the rejected transition,
-        // but escalation should override to "backlog"
-        let has_backlog = moves.iter().any(|(_, status)| status == "backlog");
-        let has_blocked = moves.iter().any(|(_, status)| status == "blocked");
+        let effects = db.pending_effects(100).unwrap();
+
+        // MoveIssue("backlog") should be queued (config-driven escalation).
+        let has_backlog = effects.iter().any(|e| {
+            e.effect_type == crate::models::EffectType::MoveIssue
+                && e.payload.get("target_status").and_then(|v| v.as_str()) == Some("backlog")
+        });
+        let has_blocked = effects.iter().any(|e| {
+            e.effect_type == crate::models::EffectType::MoveIssue
+                && e.payload.get("target_status").and_then(|v| v.as_str()) == Some("blocked")
+        });
         assert!(
             has_backlog,
-            "escalation should move to 'backlog' (from config), got: {moves:?}"
+            "escalation should queue MoveIssue('backlog'), got: {effects:?}"
         );
         assert!(
             !has_blocked,
-            "escalation should NOT move to 'blocked' (hardcoded), got: {moves:?}"
+            "escalation should NOT queue MoveIssue('blocked'), got: {effects:?}"
         );
     }
 
@@ -1808,15 +2127,12 @@ stages:
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
 
-        linear.set_issue_status("RIG-252a", "in_progress");
-
         let mut task = crate::db::make_test_task("20260325-252a");
         task.status = Status::Completed;
         task.linear_issue_id = "RIG-252a".to_string();
         task.pipeline_stage = "engineer".to_string();
         db.insert_task(&task).unwrap();
 
-        // Simulate output containing error_max_turns (raw JSON dumped as fallback)
         let result = r#"{"type":"result","subtype":"error_max_turns","is_error":false,"result":"partial work"}"#;
 
         callback(
@@ -1832,20 +2148,26 @@ stages:
         )
         .unwrap();
 
-        // No status moves should happen
-        let moves = linear.move_calls.borrow();
+        let effects = db.pending_effects(100).unwrap();
+
+        // No MoveIssue effects — max_turns should not transition.
         assert!(
-            moves.is_empty(),
-            "max_turns exit should not trigger any status moves, got: {moves:?}"
+            !effects
+                .iter()
+                .any(|e| e.effect_type == crate::models::EffectType::MoveIssue),
+            "max_turns exit should not queue MoveIssue effects, got: {effects:?}"
         );
 
-        // Should post a comment about max_turns
-        let comments = linear.comment_calls.borrow();
+        // PostComment effect about max_turns should be queued.
         assert!(
-            comments
-                .iter()
-                .any(|(id, body)| id == "RIG-252a" && body.contains("max_turns")),
-            "should post max_turns warning comment, got: {comments:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::PostComment
+                    && e.payload
+                        .get("body")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|b| b.contains("max_turns"))
+            }),
+            "should queue PostComment about max_turns, got: {effects:?}"
         );
     }
 
@@ -1856,15 +2178,12 @@ stages:
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
 
-        linear.set_issue_status("RIG-252b", "in_progress");
-
         let mut task = crate::db::make_test_task("20260325-252b");
         task.status = Status::Completed;
         task.linear_issue_id = "RIG-252b".to_string();
         task.pipeline_stage = "engineer".to_string();
         db.insert_task(&task).unwrap();
 
-        // Text output that mentions error_max_turns
         let result = "Partial implementation done.\nerror_max_turns\nSome more text";
 
         callback(
@@ -1880,22 +2199,22 @@ stages:
         )
         .unwrap();
 
-        let moves = linear.move_calls.borrow();
+        let effects = db.pending_effects(100).unwrap();
         assert!(
-            moves.is_empty(),
-            "max_turns text should not trigger moves, got: {moves:?}"
+            !effects
+                .iter()
+                .any(|e| e.effect_type == crate::models::EffectType::MoveIssue),
+            "max_turns text should not queue MoveIssue effects, got: {effects:?}"
         );
     }
 
     #[test]
     fn callback_normal_engineer_done_still_works() {
-        // Sanity check: normal DONE output should NOT be caught by max_turns guard
+        // Sanity check: normal DONE output should queue MoveIssue("review") effect.
         let db = crate::db::Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
-
-        linear.set_issue_status("RIG-252c", "in_progress");
 
         let mut task = crate::db::make_test_task("20260325-252c");
         task.status = Status::Completed;
@@ -1903,8 +2222,6 @@ stages:
         task.pipeline_stage = "engineer".to_string();
         db.insert_task(&task).unwrap();
 
-        // Normal success output — no max_turns indicator
-        cmd.push_success("main"); // for auto_create_pr branch check
         let result = "All work done.\nPR_URL=https://github.com/org/repo/pull/1\nVERDICT=DONE";
 
         callback(
@@ -1920,13 +2237,15 @@ stages:
         )
         .unwrap();
 
-        // Should transition normally
-        let moves = linear.move_calls.borrow();
+        let effects = db.pending_effects(100).unwrap();
+
+        // MoveIssue("review") should be queued.
         assert!(
-            moves
-                .iter()
-                .any(|(id, status)| id == "RIG-252c" && status == "review"),
-            "normal DONE should still move to review, got: {moves:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::MoveIssue
+                    && e.payload.get("target_status").and_then(|v| v.as_str()) == Some("review")
+            }),
+            "normal DONE should queue MoveIssue('review'), got: {effects:?}"
         );
     }
 
@@ -1934,19 +2253,16 @@ stages:
 
     #[test]
     fn callback_max_turns_escalates_after_repeated_failures() {
-        // RIG-202: After N failed reviewer tasks for the same issue,
-        // max_turns exit should escalate to blocked instead of allowing retry.
+        // RIG-202: After N failed reviewer tasks, max_turns should queue
+        // MoveIssue("backlog") + PostComment escalation effects.
         let db = crate::db::Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
 
-        linear.set_issue_status("RIG-202a", "review");
-
-        // Insert 3 prior failed reviewer tasks (at the limit per default.yaml max_review_rounds=3)
         for i in 0..3 {
             let mut prev = crate::db::make_test_task(&format!("20260326-f{i}"));
-            prev.status = Status::Completed; // insert first, then mark failed
+            prev.status = Status::Completed;
             prev.linear_issue_id = "RIG-202a".to_string();
             prev.pipeline_stage = "reviewer".to_string();
             db.insert_task(&prev).unwrap();
@@ -1954,15 +2270,13 @@ stages:
                 .unwrap();
         }
 
-        // Current task hits max_turns
         let mut task = crate::db::make_test_task("20260326-202a");
         task.status = Status::Completed;
         task.linear_issue_id = "RIG-202a".to_string();
         task.pipeline_stage = "reviewer".to_string();
         db.insert_task(&task).unwrap();
 
-        let result = r#"Partial review done.
-error_max_turns"#;
+        let result = "Partial review done.\nerror_max_turns";
 
         callback(
             &db,
@@ -1977,25 +2291,30 @@ error_max_turns"#;
         )
         .unwrap();
 
-        // Should escalate to backlog (reviewer blocked transition in default.yaml)
-        let moves = linear.move_calls.borrow();
+        let effects = db.pending_effects(100).unwrap();
+
+        // MoveIssue("backlog") escalation effect.
         assert!(
-            moves
-                .iter()
-                .any(|(id, status)| id == "RIG-202a" && status == "backlog"),
-            "should escalate to backlog after repeated max_turns failures, got: {moves:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::MoveIssue
+                    && e.payload.get("target_status").and_then(|v| v.as_str()) == Some("backlog")
+            }),
+            "should queue MoveIssue('backlog') escalation, got: {effects:?}"
         );
 
-        // Should post escalation comment
-        let comments = linear.comment_calls.borrow();
+        // PostComment with escalation message.
         assert!(
-            comments
-                .iter()
-                .any(|(id, body)| id == "RIG-202a" && body.contains("failure limit reached")),
-            "should post escalation comment, got: {comments:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::PostComment
+                    && e.payload
+                        .get("body")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|b| b.contains("failure limit reached"))
+            }),
+            "should queue PostComment about failure limit, got: {effects:?}"
         );
 
-        // callback_fired_at should be set
+        // callback_fired_at should be set.
         assert!(
             db.is_callback_recently_fired("20260326-202a", 60).unwrap(),
             "callback_fired_at should be set after escalation"
@@ -2004,16 +2323,13 @@ error_max_turns"#;
 
     #[test]
     fn callback_max_turns_soft_failure_below_limit() {
-        // RIG-202: Below the failure limit, max_turns exit should be a soft failure
-        // (no escalation, no status move).
+        // RIG-202: Below the failure limit, max_turns should queue only a PostComment
+        // (soft failure — no MoveIssue escalation).
         let db = crate::db::Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
 
-        linear.set_issue_status("RIG-202b", "review");
-
-        // Insert only 1 prior failed reviewer task (below limit of 3)
         let mut prev = crate::db::make_test_task("20260326-f0b");
         prev.status = Status::Completed;
         prev.linear_issue_id = "RIG-202b".to_string();
@@ -2021,7 +2337,6 @@ error_max_turns"#;
         db.insert_task(&prev).unwrap();
         db.set_task_status("20260326-f0b", Status::Failed).unwrap();
 
-        // Current task hits max_turns
         let mut task = crate::db::make_test_task("20260326-202b");
         task.status = Status::Completed;
         task.linear_issue_id = "RIG-202b".to_string();
@@ -2043,20 +2358,348 @@ error_max_turns"#;
         )
         .unwrap();
 
-        // Should NOT move the issue — soft failure, will be retried
-        let moves = linear.move_calls.borrow();
+        let effects = db.pending_effects(100).unwrap();
+
+        // No MoveIssue effects — soft failure does not escalate.
         assert!(
-            moves.is_empty(),
-            "soft failure below limit should not move issue, got: {moves:?}"
+            !effects
+                .iter()
+                .any(|e| e.effect_type == crate::models::EffectType::MoveIssue),
+            "soft failure should not queue MoveIssue, got: {effects:?}"
         );
 
-        // Should post a soft failure comment
-        let comments = linear.comment_calls.borrow();
+        // PostComment with "Soft failure" message.
         assert!(
-            comments
-                .iter()
-                .any(|(id, body)| id == "RIG-202b" && body.contains("Soft failure")),
-            "should post soft failure comment, got: {comments:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::PostComment
+                    && e.payload
+                        .get("body")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|b| b.contains("Soft failure"))
+            }),
+            "should queue PostComment about soft failure, got: {effects:?}"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // decide_callback() unit tests
+    // -------------------------------------------------------------------------
+
+    /// Helper: create a minimal analyst task in `db` and return its id.
+    fn insert_analyst_task(db: &crate::db::Db, task_id: &str, issue_id: &str) -> String {
+        let mut t = crate::db::make_test_task(task_id);
+        t.status = Status::Completed;
+        t.linear_issue_id = issue_id.to_string();
+        t.pipeline_stage = "analyst".to_string();
+        t.task_type = "pipeline-analyst".to_string();
+        t.working_dir = "~/projects/rigpa/werma".to_string();
+        db.insert_task(&t).unwrap();
+        task_id.to_string()
+    }
+
+    /// Helper: create a minimal reviewer task in `db`.
+    fn insert_reviewer_task(db: &crate::db::Db, task_id: &str, issue_id: &str) {
+        let mut t = crate::db::make_test_task(task_id);
+        t.status = Status::Completed;
+        t.linear_issue_id = issue_id.to_string();
+        t.pipeline_stage = "reviewer".to_string();
+        t.task_type = "pipeline-reviewer".to_string();
+        t.working_dir = "~/projects/rigpa/werma".to_string();
+        db.insert_task(&t).unwrap();
+    }
+
+    #[test]
+    fn decide_analyst_done_produces_correct_effects() {
+        // Analyst "done" transition in default.yaml has status=todo but NO spawn.
+        // Engineer is spawned later by the poll step when it sees the issue moved to "todo".
+        // So decide_callback for analyst must produce:
+        //   - MoveIssue (→ todo)
+        //   - RemoveLabel (analyze) + AddLabel (analyze:done)
+        //   - AddLabel (spec:done)
+        //   - UpdateEstimate (when ESTIMATE= present)
+        //   - PostComment (spec body)
+        //   - PostComment (callback summary)
+        // And NO spawn_task.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "DECIDE-100";
+        insert_analyst_task(&db, "decide-100-a", issue_id);
+
+        // Analyst output with estimate and spec body (>= 1 line since comments vec is empty)
+        let result = "## Spec\nImplement feature X\n- req 1\n- req 2\n\nESTIMATE=5";
+
+        let decision = decide_callback(
+            &db,
+            "decide-100-a",
+            "analyst",
+            result,
+            issue_id,
+            "~/projects/rigpa/werma",
+            &cmd,
+        )
+        .unwrap();
+
+        let effects = &decision.effects;
+
+        // Must have a MoveIssue effect (→ todo)
+        assert!(
+            effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "analyst done should queue MoveIssue, got: {effects:?}"
+        );
+
+        // Must have spec:done label added
+        assert!(
+            effects.iter().any(|e| {
+                e.effect_type == EffectType::AddLabel
+                    && e.payload
+                        .get("label")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|l| l.contains("spec:done"))
+            }),
+            "analyst done should add spec:done label, got: {effects:?}"
+        );
+
+        // Must have UpdateEstimate for estimate=5
+        assert!(
+            effects.iter().any(|e| {
+                e.effect_type == EffectType::UpdateEstimate
+                    && e.payload
+                        .get("estimate")
+                        .and_then(|v| v.as_i64())
+                        .is_some_and(|est| est == 5)
+            }),
+            "analyst done should queue UpdateEstimate=5, got: {effects:?}"
+        );
+
+        // InternalChanges: update_estimate set
+        assert_eq!(
+            decision.internal.update_estimate,
+            Some(("decide-100-a".to_string(), 5)),
+            "internal.update_estimate should be (task_id, 5)"
+        );
+
+        // InternalChanges: NO spawn_task — analyst stage has no spawn in config;
+        // engineer is created by the poll step after MoveIssue(todo) is processed.
+        assert!(
+            decision.internal.spawn_task.is_none(),
+            "analyst done must NOT spawn a task (poll handles it after status move)"
+        );
+    }
+
+    #[test]
+    fn decide_reviewer_rejected_spawns_engineer() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "DECIDE-101";
+        insert_reviewer_task(&db, "decide-101-r", issue_id);
+
+        let result = "## Review\n- blocker: missing tests\n- blocker: type errors\n\nREVIEW_VERDICT=REJECTED";
+
+        let decision = decide_callback(
+            &db,
+            "decide-101-r",
+            "reviewer",
+            result,
+            issue_id,
+            "~/projects/rigpa/werma",
+            &cmd,
+        )
+        .unwrap();
+
+        let effects = &decision.effects;
+
+        // Must move to in_progress (or equivalent rejection status)
+        assert!(
+            effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "reviewer rejected should queue MoveIssue, got: {effects:?}"
+        );
+
+        // Must spawn engineer
+        let spawned = decision.internal.spawn_task.as_ref();
+        assert!(
+            spawned.is_some(),
+            "reviewer rejected should spawn engineer task"
+        );
+        let spawned = spawned.unwrap();
+        assert_eq!(spawned.pipeline_stage, "engineer");
+        // Handoff must contain rejection feedback
+        assert!(
+            spawned.handoff_content.contains("blocker") || spawned.prompt.contains("blocker"),
+            "spawned engineer must carry rejection feedback: handoff={}, prompt={}",
+            spawned.handoff_content,
+            spawned.prompt
+        );
+    }
+
+    #[test]
+    fn decide_unknown_stage_returns_error() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        // Insert task for an unknown stage
+        let mut t = crate::db::make_test_task("decide-unk-1");
+        t.status = Status::Completed;
+        t.linear_issue_id = "DECIDE-UNK".to_string();
+        t.pipeline_stage = "unicorn".to_string();
+        db.insert_task(&t).unwrap();
+
+        let result = decide_callback(
+            &db,
+            "decide-unk-1",
+            "unicorn", // not in pipeline config
+            "some output",
+            "DECIDE-UNK",
+            "/tmp",
+            &cmd,
+        );
+
+        assert!(result.is_err(), "unknown stage must return Err, got Ok");
+    }
+
+    #[test]
+    fn decide_empty_output_returns_comment_effect() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        insert_analyst_task(&db, "decide-empty-1", "DECIDE-EMPTY");
+
+        let decision = decide_callback(
+            &db,
+            "decide-empty-1",
+            "analyst",
+            "   ", // whitespace-only = empty
+            "DECIDE-EMPTY",
+            "/tmp",
+            &cmd,
+        )
+        .unwrap();
+
+        let effects = &decision.effects;
+
+        // Must queue exactly one PostComment about empty output
+        assert!(
+            effects.iter().any(|e| {
+                e.effect_type == EffectType::PostComment
+                    && e.payload
+                        .get("body")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|b| b.contains("empty output"))
+            }),
+            "empty output should queue PostComment, got: {effects:?}"
+        );
+
+        // Must NOT queue MoveIssue
+        assert!(
+            !effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "empty output must not queue MoveIssue, got: {effects:?}"
+        );
+
+        // No spawn
+        assert!(
+            decision.internal.spawn_task.is_none(),
+            "empty output must not spawn next task"
+        );
+    }
+
+    #[test]
+    fn decide_max_turns_escalation() {
+        // After repeated failures, max_turns should escalate to blocked.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "DECIDE-MAX";
+
+        // Insert 3 prior failed reviewer tasks (meets DEFAULT_MAX_REVIEW_ROUNDS = 3)
+        for i in 0..3 {
+            let mut t = crate::db::make_test_task(&format!("decide-max-prev-{i}"));
+            t.linear_issue_id = issue_id.to_string();
+            t.pipeline_stage = "reviewer".to_string();
+            t.task_type = "pipeline-reviewer".to_string();
+            db.insert_task(&t).unwrap();
+            db.set_task_status(&format!("decide-max-prev-{i}"), Status::Failed)
+                .unwrap();
+        }
+
+        // The current task
+        insert_reviewer_task(&db, "decide-max-cur", issue_id);
+
+        let result = "Partial review.\nerror_max_turns";
+
+        let decision = decide_callback(
+            &db,
+            "decide-max-cur",
+            "reviewer",
+            result,
+            issue_id,
+            "/tmp",
+            &cmd,
+        )
+        .unwrap();
+
+        let effects = &decision.effects;
+
+        // Must queue MoveIssue (escalation to blocked/backlog)
+        assert!(
+            effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "max_turns escalation should queue MoveIssue, got: {effects:?}"
+        );
+
+        // Must queue PostComment about escalation
+        assert!(
+            effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::PostComment),
+            "max_turns escalation should queue PostComment, got: {effects:?}"
+        );
+
+        // No spawn — escalation blocks further automation
+        assert!(
+            decision.internal.spawn_task.is_none(),
+            "max_turns escalation must not spawn next task"
+        );
+    }
+
+    #[test]
+    fn decide_dedup_keys_are_deterministic() {
+        // Calling decide_callback twice with identical inputs must produce effects
+        // with identical dedup_keys — ensuring INSERT OR IGNORE deduplication works.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "DECIDE-DEDUP";
+        let task_id = "decide-dedup-t1";
+        insert_analyst_task(&db, task_id, issue_id);
+
+        let result = "## Spec\nSome content\n\nESTIMATE=3";
+
+        let d1 = decide_callback(&db, task_id, "analyst", result, issue_id, "/tmp", &cmd).unwrap();
+        let d2 = decide_callback(&db, task_id, "analyst", result, issue_id, "/tmp", &cmd).unwrap();
+
+        // Same number of effects
+        assert_eq!(
+            d1.effects.len(),
+            d2.effects.len(),
+            "identical inputs must produce same number of effects"
+        );
+
+        // All dedup_keys match
+        let keys1: Vec<&str> = d1.effects.iter().map(|e| e.dedup_key.as_str()).collect();
+        let keys2: Vec<&str> = d2.effects.iter().map(|e| e.dedup_key.as_str()).collect();
+        assert_eq!(
+            keys1, keys2,
+            "dedup_keys must be deterministic across identical calls"
+        );
+
+        // Dedup keys must contain the task_id prefix
+        for key in &keys1 {
+            assert!(
+                key.starts_with(task_id),
+                "dedup_key must start with task_id prefix: {key}"
+            );
+        }
     }
 }

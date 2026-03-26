@@ -21,17 +21,14 @@ mod tests {
 
     // ─── RIG-229: Analyst → Engineer → Reviewer full pipeline ──────────────────
 
-    /// Test the analyst → engineer → reviewer full pipeline cycle using
-    /// StatefulFakeLinearApi with real issue state transitions.
+    /// Test the analyst → engineer → reviewer full pipeline cycle using outbox pattern.
     ///
-    /// Actual pipeline flow (from default.yaml):
-    /// 1. Issue in backlog with "analyze" label → poll() creates analyst task, removes label,
-    ///    moves issue to "in_progress" (analyst on_start)
-    /// 2. Analyst DONE callback → moves issue to "todo" (no spawn)
-    /// 3. Human gate: Ar moves issue to "in_progress"
-    /// 4. poll() → engineer picks up issue in "in_progress", creates engineer task
-    /// 5. Engineer DONE callback → moves to "review", spawns reviewer
-    /// 6. Reviewer APPROVED callback → moves to "ready"
+    /// With the transactional outbox, callback() does NOT call Linear API directly.
+    /// Instead it writes effects to the outbox for deferred execution by the processor.
+    /// This test verifies:
+    /// 1. poll() still triggers task creation and calls linear directly (poll is synchronous)
+    /// 2. callback() queues correct effects for each stage
+    /// 3. spawn_task is written atomically to DB (reviewer task created by engineer callback)
     #[test]
     fn rig229_analyst_engineer_reviewer_full_pipeline() {
         ensure_working_dir();
@@ -40,7 +37,6 @@ mod tests {
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
 
-        // Seed the issue in Backlog with "analyze" label to trigger analyst
         linear.add_issue(
             "uuid-rig229",
             "RIG-229",
@@ -50,31 +46,27 @@ mod tests {
             vec!["analyze".to_string(), "repo:werma".to_string()],
         );
 
-        // Step 1: Poll — should create analyst task (label-based trigger)
+        // Step 1: Poll — creates analyst task (label-based trigger, calls linear synchronously)
         poll(&db, &linear, &cmd).unwrap();
 
         let analyst_tasks = db
             .tasks_by_linear_issue("RIG-229", Some("analyst"), false)
             .unwrap();
         assert_eq!(analyst_tasks.len(), 1, "analyst task should be created");
-        assert_eq!(analyst_tasks[0].pipeline_stage, "analyst");
         assert_eq!(analyst_tasks[0].status, Status::Pending);
 
-        // Label should be removed after task creation
         assert!(
             !linear
                 .issue_labels("RIG-229")
                 .contains(&"analyze".to_string()),
-            "trigger label should be removed"
+            "trigger label should be removed by poll"
         );
 
-        // Step 2: Simulate analyst completing with DONE verdict
-        // Mark task as completed so callback dedup passes
+        // Step 2: Analyst callback — queues effects (MoveIssue → todo, etc.)
         db.set_task_status(&analyst_tasks[0].id, Status::Completed)
             .unwrap();
 
-        let analyst_output =
-            "## Analysis\n\nThis feature needs X and Y.\n\nESTIMATE=3\nVERDICT=DONE";
+        let analyst_output = "## Analysis\nThis feature needs X and Y.\n\nESTIMATE=3\nVERDICT=DONE";
 
         callback(
             &db,
@@ -89,34 +81,31 @@ mod tests {
         )
         .unwrap();
 
-        // Issue should have moved to "todo" (analyst DONE transition)
-        let status_after_analyst = linear.issue_status("RIG-229");
-        assert_eq!(
-            status_after_analyst,
-            Some("todo".to_string()),
-            "analyst DONE should move issue to todo"
+        // Verify MoveIssue("todo") effect is in outbox.
+        let effects_after_analyst = db.pending_effects(100).unwrap();
+        assert!(
+            effects_after_analyst.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::MoveIssue
+                    && e.payload.get("target_status").and_then(|v| v.as_str()) == Some("todo")
+            }),
+            "analyst DONE should queue MoveIssue('todo'), got: {effects_after_analyst:?}"
         );
 
-        // Analyst does NOT spawn engineer directly — that's the human gate.
-        // No engineer task should exist yet.
+        // Analyst does NOT spawn engineer (no spawn in analyst config).
         let engineer_tasks_pre = db
             .tasks_by_linear_issue("RIG-229", Some("engineer"), false)
             .unwrap();
         assert_eq!(
             engineer_tasks_pre.len(),
             0,
-            "engineer should not be spawned by analyst — it's polled from in_progress"
+            "engineer should not be spawned by analyst"
         );
 
-        // Step 3: Simulate human gate — Ar reviews spec and moves to "in_progress"
+        // Step 3: Simulate processor executing the move (then human gate).
+        // In production: processor calls linear. In test: move directly.
         linear.move_issue_by_name_direct("RIG-229", "in_progress");
-        assert_eq!(
-            linear.issue_status("RIG-229"),
-            Some("in_progress".to_string()),
-            "issue should be in_progress after human gate"
-        );
 
-        // Step 4: Poll again — engineer should pick up the in_progress issue
+        // Step 4: Poll — engineer picks up in_progress issue.
         poll(&db, &linear, &cmd).unwrap();
 
         let engineer_tasks = db
@@ -128,9 +117,8 @@ mod tests {
             "engineer task should be created by poll"
         );
         assert_eq!(engineer_tasks[0].pipeline_stage, "engineer");
-        assert_eq!(engineer_tasks[0].status, Status::Pending);
 
-        // Step 5: Simulate engineer completing with DONE + PR_URL
+        // Step 5: Engineer callback — queues MoveIssue("review") + AttachUrl + spawns reviewer.
         db.set_task_status(&engineer_tasks[0].id, Status::Completed)
             .unwrap();
 
@@ -149,39 +137,39 @@ mod tests {
         )
         .unwrap();
 
-        // Issue should move to "review"
-        assert_eq!(
-            linear.issue_status("RIG-229"),
-            Some("review".to_string()),
-            "engineer DONE should move issue to review"
-        );
-
-        // Reviewer task should be spawned (engineer done transition has spawn: reviewer)
+        // Reviewer task spawned atomically in DB.
         let reviewer_tasks = db
             .tasks_by_linear_issue("RIG-229", Some("reviewer"), false)
             .unwrap();
-        assert_eq!(reviewer_tasks.len(), 1, "reviewer task should be spawned");
-        assert_eq!(reviewer_tasks[0].pipeline_stage, "reviewer");
-
-        // PR URL should be attached to Linear
-        let attach_calls: Vec<_> = linear
-            .calls
-            .borrow()
-            .iter()
-            .filter_map(|c| {
-                if let crate::traits::fakes::ApiCall::AttachUrl { url, .. } = c {
-                    Some(url.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        assert!(
-            attach_calls.iter().any(|u| u.contains("/pull/99")),
-            "PR URL should be attached, got: {attach_calls:?}"
+        assert_eq!(
+            reviewer_tasks.len(),
+            1,
+            "reviewer task should be spawned by engineer callback"
         );
 
-        // Step 6: Simulate reviewer approving
+        // MoveIssue("review") effect queued.
+        let effects_after_eng: Vec<_> = db.pending_effects(100).unwrap();
+        assert!(
+            effects_after_eng.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::MoveIssue
+                    && e.payload.get("target_status").and_then(|v| v.as_str()) == Some("review")
+            }),
+            "engineer DONE should queue MoveIssue('review'), got: {effects_after_eng:?}"
+        );
+
+        // AttachUrl effect queued for PR.
+        assert!(
+            effects_after_eng.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::AttachUrl
+                    && e.payload
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|u| u.contains("/pull/99"))
+            }),
+            "engineer DONE should queue AttachUrl, got: {effects_after_eng:?}"
+        );
+
+        // Step 6: Reviewer callback — queues MoveIssue("ready").
         db.set_task_status(&reviewer_tasks[0].id, Status::Completed)
             .unwrap();
 
@@ -200,24 +188,22 @@ mod tests {
         )
         .unwrap();
 
-        // Issue should move to "ready"
-        assert_eq!(
-            linear.issue_status("RIG-229"),
-            Some("ready".to_string()),
-            "reviewer APPROVED should move issue to ready"
+        // MoveIssue("ready") effect queued.
+        let effects_after_rev = db.pending_effects(100).unwrap();
+        assert!(
+            effects_after_rev.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::MoveIssue
+                    && e.payload.get("target_status").and_then(|v| v.as_str()) == Some("ready")
+            }),
+            "reviewer APPROVED should queue MoveIssue('ready'), got: {effects_after_rev:?}"
         );
     }
 
-    // ─── RIG-230: Callback failure → retry → success ────────────────────────────
+    // ─── RIG-230: Engineer callback with outbox — dedup guard + spawn ────────────
 
-    /// Test the full daemon-level retry cycle for engineer callback:
-    ///
-    /// 1. Engineer task completes with DONE + PR_URL
-    /// 2. First callback fires → all move_with_retry attempts fail (3 retries exhausted)
-    /// 3. callback_fired_at NOT set (verified) — allows daemon retry on next tick
-    /// 4. Second callback call → move succeeds, issue transitions to "review"
-    /// 5. callback_fired_at IS set after success
-    /// 6. poll() does NOT create a duplicate engineer task (dedup guard holds)
+    /// Test that callback() successfully queues effects on first call,
+    /// sets callback_fired_at, and spawns reviewer task atomically.
+    /// With outbox pattern, callback always succeeds — retry is processor's job.
     #[test]
     fn rig230_callback_failure_retry_success() {
         ensure_working_dir();
@@ -226,17 +212,16 @@ mod tests {
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
 
-        // Seed issue in "in_progress" (engineer polls this status)
         linear.add_issue(
             "uuid-rig230",
             "RIG-230",
             "Retry test",
-            "Test callback retry cycle",
+            "Test callback dedup cycle",
             "in_progress",
             vec!["repo:werma".to_string()],
         );
 
-        // Step 1: Poll creates engineer task for in_progress issue
+        // Step 1: Poll creates engineer task.
         poll(&db, &linear, &cmd).unwrap();
 
         let engineer_tasks = db
@@ -245,55 +230,14 @@ mod tests {
         assert_eq!(engineer_tasks.len(), 1, "poll should create engineer task");
         let task_id = &engineer_tasks[0].id;
 
-        // Mark task as completed (simulates agent finishing)
         db.set_task_status(task_id, Status::Completed).unwrap();
 
         let engineer_output = "## Implementation\nDone.\n\nPR_URL=https://github.com/RigpaLabs/werma/pull/230\nVERDICT=DONE";
 
-        // Step 2: First callback — all 3 retries fail (CALLBACK_MAX_RETRIES=3)
+        // fail_next_n_moves has no effect on callback — effects are durable outbox entries.
         linear.fail_next_n_moves(3);
 
-        let err = callback(
-            &db,
-            task_id,
-            "engineer",
-            engineer_output,
-            "RIG-230",
-            "~/projects/rigpa/werma",
-            &linear,
-            &cmd,
-            &notifier,
-        );
-        assert!(
-            err.is_err(),
-            "first callback should fail when all retries exhausted"
-        );
-
-        // Step 3: callback_fired_at must NOT be set — allows daemon retry
-        assert!(
-            !db.is_callback_recently_fired(task_id, 60).unwrap(),
-            "callback_fired_at should not be set after failure"
-        );
-
-        // Issue should still be in "in_progress" (move failed)
-        assert_eq!(
-            linear.issue_status("RIG-230"),
-            Some("in_progress".to_string()),
-            "issue should stay in_progress after failed callback"
-        );
-
-        // Failure notifications should have been sent
-        assert!(
-            !notifier.macos_calls.borrow().is_empty(),
-            "macOS notification should fire on retry exhaustion"
-        );
-        assert!(
-            !notifier.slack_calls.borrow().is_empty(),
-            "Slack notification should fire on retry exhaustion"
-        );
-
-        // Step 4: Second callback (daemon next tick) — moves succeed now
-        // (fail_next_n_moves counter exhausted, moves work)
+        // Step 2: First callback — always succeeds, queues effects.
         let ok = callback(
             &db,
             task_id,
@@ -305,52 +249,74 @@ mod tests {
             &cmd,
             &notifier,
         );
-        assert!(ok.is_ok(), "second callback should succeed: {ok:?}");
+        assert!(ok.is_ok(), "callback should always succeed: {ok:?}");
 
-        // Step 5: Issue should now be in "review" (engineer DONE transition)
-        assert_eq!(
-            linear.issue_status("RIG-230"),
-            Some("review".to_string()),
-            "engineer DONE should move issue to review after successful retry"
-        );
-
-        // callback_fired_at should be set after success
+        // callback_fired_at IS set.
         assert!(
             db.is_callback_recently_fired(task_id, 60).unwrap(),
-            "callback_fired_at should be set after successful retry"
+            "callback_fired_at should be set after first callback"
         );
 
-        // PR URL should be attached to Linear
-        let attach_calls: Vec<_> = linear
-            .calls
-            .borrow()
-            .iter()
-            .filter_map(|c| {
-                if let crate::traits::fakes::ApiCall::AttachUrl { url, .. } = c {
-                    Some(url.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // MoveIssue("review") effect queued.
+        let effects = db.pending_effects(100).unwrap();
         assert!(
-            attach_calls.iter().any(|u| u.contains("/pull/230")),
-            "PR URL should be attached on success, got: {attach_calls:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::MoveIssue
+                    && e.payload.get("target_status").and_then(|v| v.as_str()) == Some("review")
+            }),
+            "should queue MoveIssue('review'), got: {effects:?}"
         );
 
-        // Reviewer task should be spawned (engineer DONE transition spawns reviewer)
+        // AttachUrl effect for PR.
+        assert!(
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::AttachUrl
+                    && e.payload
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|u| u.contains("/pull/230"))
+            }),
+            "should queue AttachUrl for /pull/230, got: {effects:?}"
+        );
+
+        // Reviewer task spawned atomically.
         let reviewer_tasks = db
             .tasks_by_linear_issue("RIG-230", Some("reviewer"), false)
             .unwrap();
         assert_eq!(
             reviewer_tasks.len(),
             1,
-            "reviewer should be spawned after successful engineer callback"
+            "reviewer should be spawned by engineer callback"
         );
 
-        // Step 6: poll() should NOT create duplicate engineer task
-        // Issue is now in "review" (not "in_progress"), so engineer stage won't trigger.
-        // Additionally, there's already a completed engineer task (dedup guard).
+        // Step 3: Second callback — dedup guard blocks (no new effects).
+        let effects_count = db.pending_effects(100).unwrap().len();
+
+        let ok2 = callback(
+            &db,
+            task_id,
+            "engineer",
+            engineer_output,
+            "RIG-230",
+            "~/projects/rigpa/werma",
+            &linear,
+            &cmd,
+            &notifier,
+        );
+        assert!(
+            ok2.is_ok(),
+            "second callback should succeed (dedup guard): {ok2:?}"
+        );
+
+        let effects_count_after = db.pending_effects(100).unwrap().len();
+        assert_eq!(
+            effects_count, effects_count_after,
+            "dedup guard prevents duplicate effects"
+        );
+
+        // poll() should NOT create duplicate engineer or reviewer tasks.
+        // Simulate processor moving issue to "review" so poll sees the right state.
+        linear.move_issue_by_name_direct("RIG-230", "review");
         poll(&db, &linear, &cmd).unwrap();
 
         let engineer_tasks_after = db
@@ -359,17 +325,16 @@ mod tests {
         assert_eq!(
             engineer_tasks_after.len(),
             1,
-            "poll should not create duplicate engineer task after successful callback"
+            "poll should not duplicate engineer task"
         );
 
-        // Reviewer should also not be duplicated by poll (already has active reviewer)
         let reviewer_tasks_after = db
             .tasks_by_linear_issue("RIG-230", Some("reviewer"), false)
             .unwrap();
         assert_eq!(
             reviewer_tasks_after.len(),
             1,
-            "poll should not create duplicate reviewer task"
+            "poll should not duplicate reviewer task"
         );
     }
 
@@ -453,7 +418,7 @@ mod tests {
         assert_eq!(reviewer_tasks.len(), 1, "reviewer task should be created");
     }
 
-    /// Test review cycle limit: after max_review_rounds rejections, issue goes to Blocked.
+    /// Test review cycle limit: after max_review_rounds rejections, callback queues MoveIssue("backlog").
     #[test]
     fn rig231_review_cycle_limit_escalates_to_blocked() {
         let db = Db::open_in_memory().unwrap();
@@ -470,11 +435,8 @@ mod tests {
             vec![],
         );
 
-        // Insert completed reviewer tasks to simulate max_review_rounds (3) rejections
-        // Load config (to reference pipeline settings for review round limit)
         let _config = load_from_str(include_str!("../pipelines/default.yaml"), "<test>").unwrap();
 
-        // Create 3 completed reviewer tasks (= max_review_rounds)
         for i in 0..3 {
             let mut task = make_test_task(&format!("20260314-231c-{i:03}"));
             task.status = Status::Completed;
@@ -483,7 +445,6 @@ mod tests {
             db.insert_task(&task).unwrap();
         }
 
-        // Now simulate a 4th reviewer completing with REJECTED — should escalate to Blocked
         let mut reviewer_task = make_test_task("20260314-231c-004");
         reviewer_task.status = Status::Completed;
         reviewer_task.linear_issue_id = "RIG-231c".to_string();
@@ -505,35 +466,18 @@ mod tests {
         )
         .unwrap();
 
-        // The reviewer REJECTED transition first moves to "in_progress" (the normal transition).
-        // Then the cycle limit check fires and moves to "backlog" (from reviewer config's
-        // blocked transition) — RIG-280: no longer hardcodes "blocked".
-        let moves: Vec<String> = linear
-            .calls
-            .borrow()
-            .iter()
-            .filter_map(|c| {
-                if let crate::traits::fakes::ApiCall::Move { status, .. } = c {
-                    Some(status.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
+        // With outbox pattern, callback() does NOT call linear directly.
+        // Verify the MoveIssue("backlog") effect is queued (processor will execute it).
+        let effects = db.pending_effects(100).unwrap();
         assert!(
-            moves.contains(&"backlog".to_string()),
-            "review cycle limit should escalate to backlog (from config), got moves: {moves:?}"
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::MoveIssue
+                    && e.payload.get("target_status").and_then(|v| v.as_str()) == Some("backlog")
+            }),
+            "review cycle limit should queue MoveIssue('backlog'), got: {effects:?}"
         );
 
-        // Final issue status should be "backlog"
-        assert_eq!(
-            linear.issue_status("RIG-231c"),
-            Some("backlog".to_string()),
-            "issue should end up in backlog state"
-        );
-
-        // No new engineer task should be created (cycle limit was reached)
+        // No new engineer task should be spawned (cycle limit preempts spawn).
         let engineer_tasks = db
             .tasks_by_linear_issue("RIG-231c", Some("engineer"), false)
             .unwrap();
