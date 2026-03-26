@@ -1,5 +1,6 @@
 pub mod callback;
 pub mod config;
+pub mod effects;
 pub mod executor;
 pub mod helpers;
 pub mod loader;
