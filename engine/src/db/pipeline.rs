@@ -84,6 +84,18 @@ impl super::Db {
         )?)
     }
 
+    /// Count ALL tasks (any status) for a given Linear issue and pipeline stage.
+    /// Used as a circuit breaker to prevent infinite spawn loops (RIG-309).
+    pub fn count_all_tasks_for_issue_stage(&self, issue_id: &str, stage: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE linear_issue_id = ?1
+               AND pipeline_stage = ?2",
+            params![issue_id, stage],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Count failed tasks for a given Linear issue and pipeline stage.
     /// Used to detect repeated soft failures (e.g. max_turns exits) and escalate.
     pub fn count_failed_tasks_for_issue_stage(&self, issue_id: &str, stage: &str) -> Result<i64> {

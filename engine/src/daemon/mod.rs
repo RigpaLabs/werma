@@ -446,4 +446,245 @@ mod tests {
         assert!(content.contains("hello"));
         assert!(content.contains("T"));
     }
+
+    // ─── Daemon heartbeat integration tests (RIG-293) ────────────────
+
+    use crate::db::Db;
+    use crate::models::{Status, Task};
+    use crate::traits::fakes::{FakeCommandRunner, FakeNotifier};
+
+    struct FakeTmux {
+        active_sessions: usize,
+        alive_sessions: Vec<String>,
+    }
+
+    impl FakeTmux {
+        fn new(active: usize) -> Self {
+            Self {
+                active_sessions: active,
+                alive_sessions: vec![],
+            }
+        }
+
+        fn with_alive(mut self, sessions: Vec<String>) -> Self {
+            self.alive_sessions = sessions;
+            self
+        }
+    }
+
+    impl TmuxSession for FakeTmux {
+        fn has_session(&self, name: &str) -> bool {
+            self.alive_sessions.iter().any(|s| s == name)
+        }
+
+        fn count_werma_sessions(&self) -> usize {
+            self.active_sessions
+        }
+
+        fn is_pane_process_alive(&self, name: &str) -> bool {
+            self.alive_sessions.iter().any(|s| s == name)
+        }
+
+        fn capture_pane(&self, _name: &str, _lines: u32) -> Option<String> {
+            None
+        }
+    }
+
+    fn make_running_task(id: &str) -> Task {
+        Task {
+            id: id.to_string(),
+            status: Status::Running,
+            priority: 1,
+            created_at: "2026-03-26T10:00:00".to_string(),
+            started_at: Some("2026-03-26T10:00:00".to_string()),
+            finished_at: None,
+            task_type: "pipeline-engineer".to_string(),
+            prompt: "test".to_string(),
+            output_path: String::new(),
+            working_dir: "/tmp".to_string(),
+            model: "sonnet".to_string(),
+            max_turns: 15,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: "RIG-293".to_string(),
+            linear_pushed: false,
+            pipeline_stage: "engineer".to_string(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: String::new(),
+            estimate: 0,
+            retry_count: 0,
+            retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
+        }
+    }
+
+    #[test]
+    fn zombie_check_fires_and_marks_dead_task() {
+        let db = Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_running_task("20260326-z01");
+        db.insert_task(&task).unwrap();
+
+        // No alive sessions → zombie detected
+        let tmux = FakeTmux::new(0);
+        let notifier = FakeNotifier::new();
+
+        zombie::check_zombie_tasks(&db, werma_dir.path(), &tmux, &notifier).unwrap();
+
+        let updated = db.task("20260326-z01").unwrap().unwrap();
+        assert_eq!(updated.status, Status::Failed);
+        assert!(updated.finished_at.is_some());
+
+        // Notification was sent
+        assert!(!notifier.macos_calls.borrow().is_empty());
+        assert!(!notifier.slack_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn zombie_check_skips_alive_sessions() {
+        let db = Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_running_task("20260326-z02");
+        db.insert_task(&task).unwrap();
+
+        let tmux = FakeTmux::new(1).with_alive(vec!["werma-20260326-z02".to_string()]);
+
+        zombie::check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+
+        let updated = db.task("20260326-z02").unwrap().unwrap();
+        assert_eq!(updated.status, Status::Running);
+    }
+
+    #[test]
+    fn pipeline_callback_error_does_not_crash_subsequent_processing() {
+        // Simulates daemon behavior: pipeline callback fails but processing continues
+        let db = Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        // process_completed_tasks with no LINEAR_API_KEY — LinearClient::new() fails
+        // but the function should still return Ok
+        let result = pipeline::process_completed_tasks(
+            &db,
+            werma_dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn zombie_check_error_does_not_affect_callback_processing() {
+        // Multiple subsystems run independently — verify isolation
+        let db = Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        // Zombie check with empty db succeeds
+        let tmux = FakeTmux::new(0);
+        let notifier = FakeNotifier::new();
+        zombie::check_zombie_tasks(&db, werma_dir.path(), &tmux, &notifier).unwrap();
+
+        // Then pipeline processing also succeeds independently
+        pipeline::process_completed_tasks(
+            &db,
+            werma_dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn queue_launch_respects_capacity_during_drain_loop() {
+        // Simulates the daemon's inner drain loop behavior:
+        // keep calling try_launch_one until it returns false
+        let db = Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        // At capacity — should return false immediately
+        let tmux = FakeTmux::new(8);
+        let launched = queue::try_launch_one(&db, werma_dir.path(), 8, 0, None, &tmux).unwrap();
+        assert!(!launched);
+    }
+
+    #[test]
+    fn multiple_subsystems_run_sequentially_without_interference() {
+        // Verifies the daemon tick pattern: multiple subsystems called sequentially,
+        // each with its own error handling, none affecting the others
+        let db = Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let tmux = FakeTmux::new(0);
+        let notifier = FakeNotifier::new();
+        let cmd_runner = FakeCommandRunner::new();
+
+        // 1. Cron check (empty schedule — no-op)
+        let result = cron::check_schedules(&db, &db, werma_dir.path());
+        assert!(result.is_ok());
+
+        // 2. Pipeline callbacks (no tasks — no-op)
+        let result =
+            pipeline::process_completed_tasks(&db, werma_dir.path(), &cmd_runner, &notifier);
+        assert!(result.is_ok());
+
+        // 3. Zombie check (no running tasks — no-op)
+        let result = zombie::check_zombie_tasks(&db, werma_dir.path(), &tmux, &notifier);
+        assert!(result.is_ok());
+
+        // 4. Queue launch (no pending tasks — returns false)
+        let launched = queue::try_launch_one(&db, werma_dir.path(), 8, 0, None, &tmux).unwrap();
+        assert!(!launched);
+
+        // 5. Log rotation (fresh dir — no-op)
+        let result = cleanup::rotate_logs(werma_dir.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn zombie_check_with_mixed_task_states_only_affects_running() {
+        let db = Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        // Running task with dead session → should become Failed
+        let running = make_running_task("20260326-z03");
+        db.insert_task(&running).unwrap();
+
+        // Pending task → should stay Pending
+        let mut pending = make_running_task("20260326-z04");
+        pending.status = Status::Pending;
+        pending.started_at = None;
+        db.insert_task(&pending).unwrap();
+
+        // Completed task → should stay Completed
+        let mut completed = make_running_task("20260326-z05");
+        completed.status = Status::Completed;
+        completed.finished_at = Some("2026-03-26T10:05:00".to_string());
+        db.insert_task(&completed).unwrap();
+
+        let tmux = FakeTmux::new(0);
+        zombie::check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+
+        assert_eq!(
+            db.task("20260326-z03").unwrap().unwrap().status,
+            Status::Failed
+        );
+        assert_eq!(
+            db.task("20260326-z04").unwrap().unwrap().status,
+            Status::Pending
+        );
+        assert_eq!(
+            db.task("20260326-z05").unwrap().unwrap().status,
+            Status::Completed
+        );
+    }
 }

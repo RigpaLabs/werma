@@ -1,6 +1,6 @@
 [package]
 name = "werma"
-version = "0.44.0"
+version = "0.44.2"
 edition = "2024"
 rust-version = "1.88"
 

@@ -5,7 +5,10 @@ use anyhow::{Result, anyhow};
 use super::config::PipelineConfig;
 use super::helpers::{infer_working_dir_from_issue, truncate_lines};
 use super::loader::{load_default, resolve_prompt};
-use super::pr::{auto_create_pr, has_open_pr_for_issue, post_pr_comment, pr_title_from_url};
+use super::pr::{
+    auto_create_pr, get_pr_review_verdict, has_open_pr_for_issue, post_pr_comment,
+    pr_title_from_url,
+};
 use super::prompt::{build_vars, render_prompt};
 use super::verdict::{
     extract_rejection_feedback, extract_review_body, is_heavy_track, is_max_turns_exit,
@@ -21,7 +24,7 @@ const CALLBACK_MAX_RETRIES: u32 = 3;
 const CALLBACK_BACKOFF_MS: [u64; 3] = [50, 100, 200];
 
 /// Default maximum review cycles when not configured in YAML.
-const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 3;
+pub(crate) const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 3;
 
 /// Move a Linear issue to a new status with retry + backoff + reconciliation.
 ///
@@ -123,9 +126,44 @@ pub fn callback(
 
     let config = load_default()?;
 
-    // Guard: if output is empty, post a comment and return early.
+    // Guard: if output is empty, attempt fallback for reviewer stage (RIG-309),
+    // otherwise post a comment and return early.
     if result.trim().is_empty() {
-        eprintln!("callback: empty output for task {task_id} (stage={stage}), skipping transition");
+        eprintln!("callback: empty output for task {task_id} (stage={stage}), checking fallback");
+
+        // RIG-309: For reviewer stage, check if the agent posted a review via tool calls
+        // even though the final text result was empty. Claude Code --output-format json
+        // only captures the final assistant text — tool calls are not in `result`.
+        if stage == "reviewer" {
+            if let Some(gh_verdict) = get_pr_review_verdict(cmd, working_dir, linear_issue_id) {
+                eprintln!(
+                    "[CALLBACK] {linear_issue_id}: empty result but GitHub PR has review \
+                     decision={gh_verdict} — using as fallback verdict (task {task_id})"
+                );
+                let synthesized_result = format!(
+                    "Reviewer agent produced empty output but GitHub PR review found.\n\
+                     Fallback verdict from GitHub review decision.\n\n\
+                     REVIEW_VERDICT={gh_verdict}"
+                );
+                // Recurse with synthesized result
+                return callback(
+                    db,
+                    task_id,
+                    stage,
+                    &synthesized_result,
+                    linear_issue_id,
+                    working_dir,
+                    linear,
+                    cmd,
+                    notifier,
+                );
+            }
+            eprintln!(
+                "[CALLBACK] {linear_issue_id}: reviewer empty result and no GitHub review \
+                 decision found — treating as failed (task {task_id})"
+            );
+        }
+
         if let Err(e) = linear.comment(
             linear_issue_id,
             &format!(

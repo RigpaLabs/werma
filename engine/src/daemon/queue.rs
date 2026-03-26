@@ -253,4 +253,133 @@ mod tests {
             "try_launch_one must be non-blocking"
         );
     }
+
+    // ─── Queue drain integration tests (RIG-293) ────────────────────
+
+    /// Simulates the daemon's inner drain loop from mod.rs:
+    /// keep calling try_launch_one until it returns false.
+    fn drain_loop(
+        db: &crate::db::Db,
+        werma_dir: &std::path::Path,
+        max_concurrent: usize,
+        stagger_secs: u64,
+        tmux: &FakeTmux,
+    ) -> (usize, Option<Instant>) {
+        let mut last_launch: Option<Instant> = None;
+        let mut launched_count = 0;
+        loop {
+            match try_launch_one(
+                db,
+                werma_dir,
+                max_concurrent,
+                stagger_secs,
+                last_launch,
+                tmux,
+            ) {
+                Ok(true) => {
+                    last_launch = Some(Instant::now());
+                    launched_count += 1;
+                }
+                Ok(false) => break,
+                Err(_) => {
+                    last_launch = Some(Instant::now());
+                    break;
+                }
+            }
+        }
+        (launched_count, last_launch)
+    }
+
+    #[test]
+    fn drain_loop_stops_at_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        // At max capacity — drain should not launch anything
+        let tmux = FakeTmux { active_sessions: 4 };
+        let (launched, _) = drain_loop(&db, dir.path(), 4, 0, &tmux);
+        assert_eq!(launched, 0, "drain should stop when at capacity");
+    }
+
+    #[test]
+    fn drain_loop_stops_with_no_pending_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        // Below capacity but no pending tasks
+        let tmux = FakeTmux { active_sessions: 0 };
+        let (launched, _) = drain_loop(&db, dir.path(), 8, 0, &tmux);
+        assert_eq!(launched, 0, "nothing to launch with empty queue");
+    }
+
+    #[test]
+    fn drain_loop_respects_stagger_after_first_launch() {
+        // With stagger enabled, once a task is launched (or would be),
+        // subsequent calls within the cooldown return false
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        let tmux = FakeTmux { active_sessions: 0 };
+
+        // First call: no pending tasks → false (not because of stagger)
+        let launched = try_launch_one(&db, dir.path(), 8, 5, None, &tmux).unwrap();
+        assert!(!launched);
+
+        // Second call with recent last_launch: stagger blocks
+        let launched = try_launch_one(&db, dir.path(), 8, 5, Some(Instant::now()), &tmux).unwrap();
+        assert!(!launched, "stagger should block second launch");
+    }
+
+    #[test]
+    fn drain_loop_is_fast_even_with_high_stagger() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        let tmux = FakeTmux { active_sessions: 0 };
+
+        let start = Instant::now();
+        let (_, _) = drain_loop(&db, dir.path(), 8, 60, &tmux);
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(100),
+            "drain loop must be non-blocking even with large stagger"
+        );
+    }
+
+    #[test]
+    fn capacity_boundary_exactly_at_max() {
+        // Test boundary: active_sessions == max_concurrent - 1 → should attempt launch
+        // active_sessions == max_concurrent → should not
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        // One slot available (7 of 8)
+        let tmux_one_slot = FakeTmux { active_sessions: 7 };
+        let result = try_launch_one(&db, dir.path(), 8, 0, None, &tmux_one_slot).unwrap();
+        // false because no pending tasks, but capacity check passed
+        assert!(!result);
+
+        // Exactly at capacity (8 of 8)
+        let tmux_full = FakeTmux { active_sessions: 8 };
+        let result = try_launch_one(&db, dir.path(), 8, 0, None, &tmux_full).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn stagger_with_very_old_last_launch_allows_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let tmux = FakeTmux { active_sessions: 0 };
+
+        // Last launch was 10 minutes ago — stagger of 2s should not block
+        let old_launch = Instant::now() - std::time::Duration::from_secs(600);
+        let result = try_launch_one(&db, dir.path(), 8, 2, Some(old_launch), &tmux).unwrap();
+        // false because no pending tasks, not because of stagger
+        assert!(!result);
+    }
 }

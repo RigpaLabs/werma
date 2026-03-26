@@ -557,8 +557,13 @@ impl LinearClient {
             let description = issue["description"].as_str().unwrap_or("");
             let priority_num = issue["priority"].as_i64().unwrap_or(0);
 
-            // Skip if already in db
-            let existing = db.tasks_by_linear_issue(issue_id, None, false)?;
+            // RIG-307: skip issues with empty id or identifier to prevent ghost tasks
+            if issue_id.is_empty() || identifier.is_empty() {
+                continue;
+            }
+
+            // Skip if already in db (use identifier, not UUID, for consistency with poll dedup)
+            let existing = db.tasks_by_linear_issue(identifier, None, false)?;
             if !existing.is_empty() {
                 skipped += 1;
                 continue;
@@ -623,7 +628,7 @@ impl LinearClient {
                 max_turns,
                 allowed_tools,
                 session_id: String::new(),
-                linear_issue_id: issue_id.to_string(),
+                linear_issue_id: identifier.to_string(),
                 linear_pushed: false,
                 pipeline_stage: String::new(),
                 depends_on: vec![],
