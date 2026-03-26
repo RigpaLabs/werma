@@ -75,9 +75,7 @@ mod tests {
             analyst_output,
             "RIG-229",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
@@ -131,9 +129,7 @@ mod tests {
             engineer_output,
             "RIG-229",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
@@ -182,9 +178,7 @@ mod tests {
             reviewer_output,
             "RIG-229",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
@@ -245,9 +239,7 @@ mod tests {
             engineer_output,
             "RIG-230",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         );
         assert!(ok.is_ok(), "callback should always succeed: {ok:?}");
 
@@ -299,9 +291,7 @@ mod tests {
             engineer_output,
             "RIG-230",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         );
         assert!(
             ok2.is_ok(),
@@ -460,9 +450,7 @@ mod tests {
             reviewer_output,
             "RIG-231c",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 

@@ -180,9 +180,7 @@ fn callback_done_moves_issue() {
         result,
         "RIG-200",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -226,9 +224,7 @@ fn callback_move_failure_returns_error() {
         result,
         "RIG-201",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     );
     assert!(
         ok.is_ok(),
@@ -473,9 +469,7 @@ fn callback_retry_after_move_failure() {
         result,
         "RIG-300",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     );
     assert!(ok.is_ok(), "callback should always succeed: {ok:?}");
 
@@ -513,9 +507,7 @@ fn callback_all_retries_exhausted() {
         result,
         "RIG-301",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     );
     assert!(ok.is_ok(), "callback always succeeds: effects are durable");
 
@@ -557,9 +549,7 @@ fn callback_daemon_retry_after_failure() {
         result,
         "RIG-302",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &notifier,
     );
     assert!(ok.is_ok(), "callback should succeed: {ok:?}");
 
@@ -582,9 +572,7 @@ fn callback_daemon_retry_after_failure() {
         result,
         "RIG-302",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &notifier,
     );
     assert!(
         ok2.is_ok(),
@@ -626,9 +614,7 @@ fn callback_failure_sends_notifications() {
         result,
         "RIG-303",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &notifier,
     );
     assert!(ok.is_ok(), "callback always succeeds: {ok:?}");
 
@@ -951,9 +937,7 @@ fn callback_dedup_guard_blocks_duplicate() {
         result,
         "RIG-217",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -967,9 +951,7 @@ fn callback_dedup_guard_blocks_duplicate() {
         result,
         "RIG-217",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1002,9 +984,7 @@ fn callback_empty_output_posts_comment() {
         "   ",
         "RIG-218",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1037,9 +1017,7 @@ fn callback_unknown_stage_noop() {
         "Some output\nVERDICT=DONE",
         "RIG-219",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     );
 
     assert!(result.is_err(), "unknown stage should return Err");
@@ -1069,9 +1047,7 @@ fn callback_analyst_estimate_updates_linear() {
         result,
         "RIG-220",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1105,9 +1081,7 @@ fn callback_analyst_adds_done_label() {
         result,
         "RIG-219b-done",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1142,9 +1116,7 @@ fn callback_analyst_blocked_adds_blocked_label() {
         result,
         "RIG-219B-blk",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1182,9 +1154,7 @@ fn callback_missing_verdict_warns() {
         result,
         "RIG-221",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1221,9 +1191,7 @@ fn callback_already_done_blocked_by_open_pr() {
         result,
         "RIG-222",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1257,9 +1225,7 @@ fn callback_engineer_done_with_pr_url() {
         result,
         "RIG-223",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1300,9 +1266,7 @@ fn callback_engineer_done_auto_pr() {
         result,
         "RIG-224",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1339,9 +1303,7 @@ fn callback_engineer_done_no_pr_warns() {
         result,
         "RIG-225",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1373,9 +1335,7 @@ fn callback_reviewer_rejected_spawns_engineer() {
         result,
         "RIG-226",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1436,9 +1396,7 @@ fn callback_review_cycle_limit_escalates() {
         result,
         "RIG-227",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
@@ -1496,12 +1454,85 @@ fn callback_review_escalation_retries_on_failure() {
         result,
         "RIG-228",
         "~/projects/rigpa/werma",
-        &linear,
         &cmd,
-        &FakeNotifier::new(),
     )
     .unwrap();
 
     // MoveIssue effect queued for "backlog" (escalation from cycle limit).
     assert_move_effect(&db, "backlog");
+}
+
+// ─── Full outbox cycle test ──────────────────────────────────────────────────
+
+#[test]
+fn outbox_full_cycle_callback_to_processor() {
+    // Phase 1: callback() writes effects to outbox — no Linear calls.
+    // Phase 2: process_effects() drains outbox — Linear called, task marked pushed.
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+    let notifier = FakeNotifier::new();
+
+    linear.set_issue_status("FAT-CYCLE", "Todo");
+
+    let mut task = make_test_task("20260326-cycle");
+    task.status = Status::Completed;
+    task.linear_issue_id = "FAT-CYCLE".to_string();
+    task.pipeline_stage = "analyst".to_string();
+    task.task_type = "pipeline-analyst".to_string();
+    task.working_dir = "/tmp".to_string();
+    db.insert_task(&task).unwrap();
+
+    // Phase 1: callback writes effects to outbox.
+    let analyst_output = "## Spec\nDo the thing.\n\nESTIMATE=3";
+    callback(
+        &db,
+        "20260326-cycle",
+        "analyst",
+        analyst_output,
+        "FAT-CYCLE",
+        "/tmp",
+        &cmd,
+    )
+    .unwrap();
+
+    // Verify effects are in the outbox.
+    let effects = db.pending_effects(100).unwrap();
+    assert!(
+        !effects.is_empty(),
+        "effects should be queued after callback"
+    );
+
+    // Verify Linear was NOT called during callback.
+    assert!(
+        linear.move_calls.borrow().is_empty(),
+        "Linear must not be called during callback (outbox pattern)"
+    );
+
+    // Phase 2: process_effects drains the outbox.
+    let result = crate::pipeline::effects::process_effects(&db, &linear, &cmd, &notifier).unwrap();
+    assert!(
+        result.processed > 0,
+        "processor should have executed effects"
+    );
+
+    // Verify Linear was called by the processor.
+    assert!(
+        !linear.move_calls.borrow().is_empty(),
+        "Linear.move_issue should be called by effect processor"
+    );
+
+    // Verify task is now marked linear_pushed (all blocking effects done).
+    let updated_task = db.task("20260326-cycle").unwrap().unwrap();
+    assert!(
+        updated_task.linear_pushed,
+        "task.linear_pushed should be true after all effects processed"
+    );
+
+    // No effects remain pending.
+    let remaining = db.pending_effects(100).unwrap();
+    assert!(
+        remaining.is_empty(),
+        "no effects should remain pending after processor run, got: {remaining:?}"
+    );
 }

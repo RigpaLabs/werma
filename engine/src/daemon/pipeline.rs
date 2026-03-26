@@ -19,7 +19,7 @@ pub fn process_completed_tasks(
     db: &Db,
     werma_dir: &Path,
     cmd_runner: &dyn CommandRunner,
-    notifier: &dyn Notifier,
+    _notifier: &dyn Notifier,
 ) -> Result<()> {
     let log_path = werma_dir.join("logs/daemon.log");
     let tasks = db.unpushed_linear_tasks()?;
@@ -71,10 +71,10 @@ pub fn process_completed_tasks(
         }
 
         if !task.pipeline_stage.is_empty() {
-            let Some(ref linear_client) = linear_client else {
-                continue;
-            };
-            // Pipeline task: read output and call pipeline::callback()
+            // Pipeline task: read output and call pipeline::callback().
+            // callback() now only writes to the DB (effects outbox + internal changes).
+            // The effect processor (called separately in the daemon tick) handles
+            // all Linear/GitHub mutations and sets linear_pushed when effects are done.
             let output_file = werma_dir.join(format!("logs/{}-output.md", task.id));
             let output = std::fs::read_to_string(&output_file).unwrap_or_default();
 
@@ -85,16 +85,15 @@ pub fn process_completed_tasks(
                 &output,
                 &task.linear_issue_id,
                 &task.working_dir,
-                linear_client,
                 cmd_runner,
-                notifier,
             ) {
                 Ok(()) => {
-                    db.set_linear_pushed(&task.id, true)?;
+                    // linear_pushed is NOT set here — the effect processor sets it
+                    // once all blocking effects are executed successfully.
                     log_daemon(
                         &log_path,
                         &format!(
-                            "[CALLBACK] {}: {} stage={} -> OK",
+                            "[CALLBACK] {}: {} stage={} -> queued effects",
                             task.linear_issue_id, task.id, task.pipeline_stage
                         ),
                     );

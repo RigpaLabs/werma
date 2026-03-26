@@ -52,6 +52,14 @@ pub fn model_flag(model: &str) -> &str {
 pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result<String> {
     let mut prompt = String::new();
 
+    // Inject pipeline handoff content from DB column (set by decide_callback).
+    // Backward compatible: old tasks have handoff_content = "" and fall through to context_files.
+    if !task.handoff_content.is_empty() {
+        prompt.push_str("\n--- Pipeline Handoff ---\n");
+        prompt.push_str(&task.handoff_content);
+        prompt.push_str("\n--- End Handoff ---\n\n");
+    }
+
     if !task.context_files.is_empty() {
         prompt.push_str("Use the following context files for reference:\n");
         for ctx_path in &task.context_files {

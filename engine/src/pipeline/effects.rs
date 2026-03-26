@@ -10,16 +10,12 @@ use crate::models::{Effect, EffectType};
 use crate::traits::{CommandRunner, Notifier};
 
 /// Result of a single `process_effects()` call.
-// Used by Task 5 daemon integration; allow dead_code until daemon/mod.rs is updated.
-#[allow(dead_code)]
 pub struct ProcessResult {
     pub processed: usize,
     pub failed: usize,
 }
 
 /// Drain the effects outbox: fetch pending effects, execute them, mark done/failed.
-// Used by Task 5 daemon integration; allow dead_code until daemon/mod.rs is updated.
-#[allow(dead_code)]
 ///
 /// Groups effects by task_id and processes them in id order. If a blocking effect
 /// fails, the remaining effects for that task are skipped until next processor run.
@@ -85,8 +81,6 @@ pub fn process_effects(
 /// Execute a single effect, dispatching on its type.
 ///
 /// All EffectType variants are matched explicitly — no catch-all.
-// Used by process_effects and tests; allow dead_code in non-test builds until Task 5.
-#[allow(dead_code)]
 pub fn execute_effect(
     effect: &Effect,
     linear: &dyn LinearApi,
@@ -170,7 +164,6 @@ pub fn execute_effect(
 }
 
 /// Extract a string field from an effect payload, returning `Err` if absent or not a string.
-#[allow(dead_code)]
 fn payload_str<'a>(payload: &'a serde_json::Value, key: &str) -> Result<&'a str> {
     payload[key]
         .as_str()

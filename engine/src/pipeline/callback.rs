@@ -15,7 +15,7 @@ use super::verdict::{
 use crate::db::Db;
 use crate::linear::LinearApi;
 use crate::models::{Effect, EffectStatus, EffectType};
-use crate::traits::{CommandRunner, Notifier};
+use crate::traits::CommandRunner;
 
 /// The decision produced by `decide_callback()`: internal DB changes + outbox effects.
 pub struct CallbackDecision {
@@ -667,9 +667,7 @@ pub fn callback(
     result: &str,
     linear_issue_id: &str,
     working_dir: &str,
-    linear: &dyn LinearApi,
     cmd: &dyn CommandRunner,
-    notifier: &dyn Notifier,
 ) -> Result<()> {
     // Dedup guard: if callback SUCCEEDED recently, skip to prevent duplicate
     // effects from overlapping daemon ticks.
@@ -734,11 +732,6 @@ pub fn callback(
             decision.effects.len()
         );
     }
-
-    // Suppress unused param warnings — linear and notifier are used by the
-    // effect processor (Task 4), not here. The params remain in the signature
-    // for backward compatibility with all call sites.
-    let _ = (linear, notifier);
 
     Ok(())
 }
@@ -1728,9 +1721,7 @@ stages:
             result,
             "RIG-232b",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
@@ -1781,9 +1772,7 @@ stages:
             result,
             "RIG-253",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
@@ -1840,9 +1829,7 @@ stages:
             result,
             "RIG-274",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
@@ -1882,9 +1869,7 @@ stages:
             result,
             "RIG-274c",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
@@ -1921,9 +1906,7 @@ stages:
             result,
             "RIG-274b",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
@@ -2023,9 +2006,7 @@ stages:
             result,
             "RIG-ESC",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
@@ -2098,9 +2079,7 @@ stages:
             result,
             "RIG-UNK",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
@@ -2142,9 +2121,7 @@ stages:
             result,
             "RIG-252a",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
@@ -2193,9 +2170,7 @@ stages:
             result,
             "RIG-252b",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
@@ -2231,9 +2206,7 @@ stages:
             result,
             "RIG-252c",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
@@ -2285,9 +2258,7 @@ stages:
             result,
             "RIG-202a",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
@@ -2352,9 +2323,7 @@ stages:
             result,
             "RIG-202b",
             "~/projects/rigpa/werma",
-            &linear,
             &cmd,
-            &notifier,
         )
         .unwrap();
 
