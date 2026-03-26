@@ -176,7 +176,10 @@ impl super::Db {
         Ok(())
     }
 
-    /// Returns true if all blocking effects for a task are done or dead (no pending/failed/running).
+    /// Returns true if all blocking effects for a task are done (no pending/failed/running/dead).
+    ///
+    /// A `dead` blocking effect (permanently failed, e.g. MoveIssue after max retries) keeps
+    /// this returning false — a task with a permanently failed move should NOT be marked pushed.
     ///
     /// A task with no blocking effects at all is considered "done" (returns true).
     pub fn blocking_effects_done(&self, task_id: &str) -> Result<bool> {
@@ -184,7 +187,7 @@ impl super::Db {
             "SELECT COUNT(*) FROM effects
              WHERE task_id = ?1
                AND blocking = 1
-               AND status NOT IN ('done', 'dead')",
+               AND status NOT IN ('done')",
             params![task_id],
             |row| row.get(0),
         )?;
@@ -336,6 +339,39 @@ mod tests {
 
         // Should be true: blocking is done, non-blocking doesn't count
         assert!(db.blocking_effects_done("t6").unwrap());
+    }
+
+    #[test]
+    fn blocking_effects_dead_blocks_pushed() {
+        // A dead blocking effect (permanently failed, e.g. MoveIssue after max retries)
+        // must keep blocking_effects_done() returning false. A task with a permanently
+        // failed MoveIssue should NOT be marked linear_pushed — it needs human attention.
+        let db = setup_db_with_task("t6d");
+
+        let mut e = make_effect("t6d", "t6d:move", EffectType::MoveIssue);
+        e.max_attempts = 1; // one attempt → immediately dead on first failure
+        db.insert_effects(&[e]).unwrap();
+
+        let effect_id = db.pending_effects(1).unwrap()[0].id;
+        db.mark_effect_failed(effect_id, "permanent API error")
+            .unwrap();
+
+        // Verify the effect is now dead
+        let status: String = db
+            .conn
+            .query_row(
+                "SELECT status FROM effects WHERE id = ?1",
+                params![effect_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "dead");
+
+        // blocking_effects_done must return false — dead != done
+        assert!(
+            !db.blocking_effects_done("t6d").unwrap(),
+            "dead blocking effect should keep blocking_effects_done() returning false"
+        );
     }
 
     #[test]

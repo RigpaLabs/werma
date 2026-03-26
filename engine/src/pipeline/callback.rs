@@ -110,11 +110,8 @@ fn make_effect(
 }
 
 /// Max retries for Linear status move operations.
-// Used by Task 4 effect processor; allow dead_code until effects.rs is implemented.
-#[allow(dead_code)]
 const CALLBACK_MAX_RETRIES: u32 = 3;
 /// Backoff delays in milliseconds between retries: 50ms, 100ms, 200ms.
-#[allow(dead_code)]
 const CALLBACK_BACKOFF_MS: [u64; 3] = [50, 100, 200];
 
 /// Default maximum review cycles when not configured in YAML.
@@ -126,8 +123,6 @@ pub(crate) const DEFAULT_MAX_REVIEW_ROUNDS: u32 = 3;
 /// After a successful move, performs a read-after-write check to verify
 /// the status actually changed. Returns an error only if all retries
 /// are exhausted or reconciliation fails.
-// Used by Task 4 effect processor; allow dead_code until effects.rs is implemented.
-#[allow(dead_code)]
 pub(crate) fn move_with_retry(
     linear: &dyn LinearApi,
     issue_id: &str,
@@ -569,7 +564,7 @@ pub fn decide_callback(
                     linear_issue_id,
                     EffectType::PostPrComment,
                     "reviewer_pr_comment",
-                    serde_json::json!({ "body": review_body }),
+                    serde_json::json!({ "body": review_body, "working_dir": working_dir }),
                 ));
             }
         }
