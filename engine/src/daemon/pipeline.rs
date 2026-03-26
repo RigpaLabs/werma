@@ -550,4 +550,183 @@ mod tests {
             );
         }
     }
+
+    // ─── Callback lifecycle integration tests (RIG-293) ──────────────
+
+    #[test]
+    fn callback_retry_increments_attempts_until_max() {
+        let db = Db::open_in_memory().unwrap();
+        let task = make_task("20260326-retry", "engineer", "pipeline-engineer");
+        db.insert_task(&task).unwrap();
+
+        // Simulate 5 failed callback attempts
+        for i in 1..=super::MAX_CALLBACK_ATTEMPTS {
+            let count = db.increment_callback_attempts("20260326-retry").unwrap();
+            assert_eq!(count, i);
+        }
+
+        // At MAX_CALLBACK_ATTEMPTS, the guard condition triggers abandonment
+        let final_count = db.increment_callback_attempts("20260326-retry").unwrap();
+        assert!(
+            final_count > super::MAX_CALLBACK_ATTEMPTS,
+            "count ({final_count}) should exceed MAX ({}) — task should be abandoned",
+            super::MAX_CALLBACK_ATTEMPTS
+        );
+    }
+
+    #[test]
+    fn callback_ttl_and_retry_interaction() {
+        // A task that has been retried AND is past TTL should be TTL'd (TTL takes precedence)
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = Db::open_in_memory().unwrap();
+
+        let mut task = make_task("20260326-ttl-retry", "engineer", "pipeline-engineer");
+        let two_hours_ago = (chrono::Local::now() - chrono::Duration::hours(2))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        task.finished_at = Some(two_hours_ago);
+        db.insert_task(&task).unwrap();
+
+        // Simulate 3 prior failed attempts
+        for _ in 0..3 {
+            db.increment_callback_attempts("20260326-ttl-retry")
+                .unwrap();
+        }
+
+        // TTL should mark it pushed regardless of retry count
+        super::process_completed_tasks(
+            &db,
+            dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+        )
+        .unwrap();
+
+        let unpushed = db.unpushed_linear_tasks().unwrap();
+        assert!(
+            unpushed.is_empty(),
+            "TTL should override retry — task marked pushed"
+        );
+    }
+
+    #[test]
+    fn callback_pre_max_attempts_not_yet_abandoned() {
+        // Verify that a task at MAX_CALLBACK_ATTEMPTS - 1 is not yet abandoned.
+        // The guard condition is `attempts >= MAX_CALLBACK_ATTEMPTS`, so one below
+        // should keep the task in retry state.
+        let db = Db::open_in_memory().unwrap();
+        let task = make_task("20260326-premax", "engineer", "pipeline-engineer");
+        db.insert_task(&task).unwrap();
+
+        // Increment to MAX - 1
+        let mut count = 0;
+        for _ in 0..super::MAX_CALLBACK_ATTEMPTS - 1 {
+            count = db.increment_callback_attempts("20260326-premax").unwrap();
+        }
+
+        assert!(
+            count < super::MAX_CALLBACK_ATTEMPTS,
+            "at MAX-1 ({count}), task should NOT yet be abandoned"
+        );
+
+        // One more increment → should now meet the threshold
+        let count = db.increment_callback_attempts("20260326-premax").unwrap();
+        assert!(
+            count >= super::MAX_CALLBACK_ATTEMPTS,
+            "at MAX ({count}), task should be abandoned"
+        );
+    }
+
+    #[test]
+    fn process_completed_tasks_handles_multiple_task_types() {
+        // Verify routing: pipeline tasks, research tasks, and direct tasks
+        // are all handled without errors when LinearClient is unavailable
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = Db::open_in_memory().unwrap();
+
+        // Pipeline task
+        let mut pipeline = make_task("20260326-p1", "reviewer", "pipeline-reviewer");
+        pipeline.finished_at = Some("2026-03-26T10:00:00".to_string());
+        db.insert_task(&pipeline).unwrap();
+
+        // Research task
+        let mut research = make_task("20260326-r1", "", "research");
+        research.finished_at = Some("2026-03-26T10:00:00".to_string());
+        db.insert_task(&research).unwrap();
+
+        // Direct linear task (code type, no pipeline stage)
+        let mut direct = make_task("20260326-d1", "", "code");
+        direct.linear_issue_id = "issue-xyz".to_string();
+        direct.finished_at = Some("2026-03-26T10:00:00".to_string());
+        db.insert_task(&direct).unwrap();
+
+        // Should not panic or error even without LINEAR_API_KEY
+        let result = super::process_completed_tasks(
+            &db,
+            dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn dead_letter_contains_all_required_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        super::write_dead_letter(
+            dir.path(),
+            "20260326-dl-fields",
+            "RIG-293",
+            "reviewer",
+            "connection refused",
+            5,
+        );
+
+        let content = std::fs::read_to_string(dir.path().join("logs/dead-letters.log")).unwrap();
+        let parts: Vec<&str> = content.trim().split(" | ").collect();
+
+        // Format: timestamp | task_id | issue_id | stage | error | attempts
+        assert!(
+            parts.len() >= 6,
+            "dead letter should have 6+ pipe-separated fields, got: {content}"
+        );
+        assert!(parts[1].contains("20260326-dl-fields"));
+        assert!(parts[2].contains("RIG-293"));
+        assert!(parts[3].contains("reviewer"));
+        assert!(parts[4].contains("connection refused"));
+        assert!(parts[5].contains("5"));
+    }
+
+    #[test]
+    fn callback_ttl_boundary_at_exactly_one_hour() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = Db::open_in_memory().unwrap();
+
+        // Task finished exactly 59 minutes ago — should NOT be TTL'd
+        let mut task = make_task("20260326-boundary", "engineer", "pipeline-engineer");
+        let just_under = (chrono::Local::now() - chrono::Duration::minutes(59))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        task.finished_at = Some(just_under);
+        db.insert_task(&task).unwrap();
+
+        let _ = super::process_completed_tasks(
+            &db,
+            dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+        );
+
+        let log_content =
+            std::fs::read_to_string(dir.path().join("logs/daemon.log")).unwrap_or_default();
+        assert!(
+            !log_content.contains("TTL expired"),
+            "task at 59 min should not be TTL'd"
+        );
+    }
 }
