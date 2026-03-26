@@ -83,7 +83,22 @@ fn insert_task_with_conn(conn: &Connection, task: &crate::models::Task) -> Resul
     Ok(())
 }
 
+/// Returns true if an effect of the given type is blocking (failure halts the chain).
+///
+/// Blocking: MoveIssue, CreatePr, AttachUrl, UpdateEstimate — state-mutating, must succeed.
+/// Non-blocking (best-effort): PostComment, AddLabel, RemoveLabel, Notify, PostPrComment.
+fn is_blocking_effect(effect_type: EffectType) -> bool {
+    matches!(
+        effect_type,
+        EffectType::MoveIssue
+            | EffectType::CreatePr
+            | EffectType::AttachUrl
+            | EffectType::UpdateEstimate
+    )
+}
+
 /// Helper: build a `Vec<Effect>` entry with deterministic dedup_key.
+/// The `blocking` flag is set automatically based on EffectType.
 fn make_effect(
     task_id: &str,
     issue_id: &str,
@@ -98,7 +113,7 @@ fn make_effect(
         issue_id: issue_id.to_string(),
         effect_type,
         payload,
-        blocking: true,
+        blocking: is_blocking_effect(effect_type),
         status: EffectStatus::Pending,
         attempts: 0,
         max_attempts: 5,
@@ -664,13 +679,6 @@ pub fn callback(
     working_dir: &str,
     cmd: &dyn CommandRunner,
 ) -> Result<()> {
-    // Dedup guard: if callback SUCCEEDED recently, skip to prevent duplicate
-    // effects from overlapping daemon ticks.
-    if db.is_callback_recently_fired(task_id, 60)? {
-        eprintln!("callback: skipping duplicate for task {task_id} (fired <60s ago)");
-        return Ok(());
-    }
-
     let decision = decide_callback(
         db,
         task_id,
@@ -2663,6 +2671,72 @@ stages:
             assert!(
                 key.starts_with(task_id),
                 "dedup_key must start with task_id prefix: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn decide_analyst_done_effects_have_correct_blocking() {
+        // Verify that MoveIssue is blocking=true and PostComment is blocking=false
+        // in effects produced by a typical analyst "done" callback decision.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "BLOCK-TEST";
+        let task_id = "block-test-t1";
+        insert_analyst_task(&db, task_id, issue_id);
+
+        // Analyst done output — triggers MoveIssue + PostComment (spec body)
+        let result =
+            "## Spec\nImplement the feature.\n\nEstimate: 3 SP\n\nESTIMATE=3\n\nVERDICT=done";
+
+        let decision =
+            decide_callback(&db, task_id, "analyst", result, issue_id, "/tmp", &cmd).unwrap();
+
+        // Must have at least a MoveIssue and a PostComment
+        let move_effects: Vec<_> = decision
+            .effects
+            .iter()
+            .filter(|e| e.effect_type == EffectType::MoveIssue)
+            .collect();
+        let comment_effects: Vec<_> = decision
+            .effects
+            .iter()
+            .filter(|e| e.effect_type == EffectType::PostComment)
+            .collect();
+        let estimate_effects: Vec<_> = decision
+            .effects
+            .iter()
+            .filter(|e| e.effect_type == EffectType::UpdateEstimate)
+            .collect();
+
+        assert!(
+            !move_effects.is_empty(),
+            "analyst done must produce a MoveIssue effect"
+        );
+        assert!(
+            !comment_effects.is_empty(),
+            "analyst done must produce a PostComment effect"
+        );
+
+        for e in &move_effects {
+            assert!(
+                e.blocking,
+                "MoveIssue must be blocking=true, got blocking={} for effect {:?}",
+                e.blocking, e.dedup_key
+            );
+        }
+        for e in &comment_effects {
+            assert!(
+                !e.blocking,
+                "PostComment must be blocking=false, got blocking={} for effect {:?}",
+                e.blocking, e.dedup_key
+            );
+        }
+        for e in &estimate_effects {
+            assert!(
+                e.blocking,
+                "UpdateEstimate must be blocking=true, got blocking={} for effect {:?}",
+                e.blocking, e.dedup_key
             );
         }
     }

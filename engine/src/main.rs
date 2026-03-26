@@ -328,6 +328,20 @@ fn main() -> anyhow::Result<()> {
             let db = open_db()?;
             commands::misc::cmd_migrate(&db)?;
         }
+
+        cli::Commands::Effects { action } => {
+            let db = open_db()?;
+            match action {
+                None => commands::effects::cmd_effects_list(&db)?,
+                Some(cli::EffectsAction::Dead) => commands::effects::cmd_effects_dead(&db)?,
+                Some(cli::EffectsAction::Retry { id }) => {
+                    commands::effects::cmd_effects_retry(&db, id)?;
+                }
+                Some(cli::EffectsAction::History { task_id }) => {
+                    commands::effects::cmd_effects_history(&db, &task_id)?;
+                }
+            }
+        }
     }
 
     Ok(())
@@ -963,6 +977,44 @@ mod tests {
             match parse(&["version"]) {
                 Commands::Version => {}
                 other => panic!("expected Version, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_effects_no_subcommand() {
+            match parse(&["effects"]) {
+                Commands::Effects { action: None } => {}
+                other => panic!("expected Effects (no action), got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_effects_dead() {
+            match parse(&["effects", "dead"]) {
+                Commands::Effects {
+                    action: Some(crate::cli::EffectsAction::Dead),
+                } => {}
+                other => panic!("expected Effects Dead, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_effects_retry() {
+            match parse(&["effects", "retry", "42"]) {
+                Commands::Effects {
+                    action: Some(crate::cli::EffectsAction::Retry { id }),
+                } => assert_eq!(id, 42),
+                other => panic!("expected Effects Retry, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_effects_history() {
+            match parse(&["effects", "history", "20260326-001"]) {
+                Commands::Effects {
+                    action: Some(crate::cli::EffectsAction::History { task_id }),
+                } => assert_eq!(task_id, "20260326-001"),
+                other => panic!("expected Effects History, got {other:?}"),
             }
         }
     }

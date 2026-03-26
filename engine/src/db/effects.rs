@@ -176,6 +176,74 @@ impl super::Db {
         Ok(())
     }
 
+    /// Fetch all dead-lettered (permanently failed) effects, ordered by id ASC.
+    pub fn dead_effects(&self) -> Result<Vec<Effect>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, dedup_key, task_id, issue_id, effect_type, payload,
+                    blocking, status, attempts, max_attempts, created_at,
+                    next_retry_at, executed_at, error
+             FROM effects
+             WHERE status = 'dead'
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], effect_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Fetch pending and failed effects (visible queue), ordered by id ASC.
+    pub fn pending_and_failed_effects(&self) -> Result<Vec<Effect>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, dedup_key, task_id, issue_id, effect_type, payload,
+                    blocking, status, attempts, max_attempts, created_at,
+                    next_retry_at, executed_at, error
+             FROM effects
+             WHERE status IN ('pending', 'failed')
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], effect_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    /// Reset a dead or failed effect back to pending for retry.
+    ///
+    /// Clears attempts, status, next_retry_at, and error so it will be picked
+    /// up on the next processor run.
+    pub fn retry_effect(&self, id: i64) -> Result<bool> {
+        let rows_changed = self.conn.execute(
+            "UPDATE effects
+             SET status = 'pending', attempts = 0, next_retry_at = NULL, error = NULL
+             WHERE id = ?1 AND status IN ('dead', 'failed')",
+            params![id],
+        )?;
+        Ok(rows_changed > 0)
+    }
+
+    /// Fetch all effects for a given task_id, ordered by id ASC.
+    pub fn effects_for_task(&self, task_id: &str) -> Result<Vec<Effect>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, dedup_key, task_id, issue_id, effect_type, payload,
+                    blocking, status, attempts, max_attempts, created_at,
+                    next_retry_at, executed_at, error
+             FROM effects
+             WHERE task_id = ?1
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![task_id], effect_from_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
     /// Returns true if all blocking effects for a task are done (no pending/failed/running/dead).
     ///
     /// A `dead` blocking effect (permanently failed, e.g. MoveIssue after max retries) keeps
@@ -411,5 +479,121 @@ mod tests {
 
         let pending = db.pending_effects(100).unwrap();
         assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn dead_effects_returns_only_dead() {
+        let db = setup_db_with_task("t10");
+
+        let mut e_dead = make_effect("t10", "t10:dead", EffectType::MoveIssue);
+        e_dead.max_attempts = 1;
+        let mut e_pending = make_effect("t10", "t10:pending", EffectType::PostComment);
+        e_pending.max_attempts = 5;
+
+        db.insert_effects(&[e_dead, e_pending]).unwrap();
+
+        // Kill the first effect by failing it once (max_attempts=1 → dead immediately)
+        let dead_id = db.pending_effects(1).unwrap()[0].id;
+        db.mark_effect_failed(dead_id, "fatal").unwrap();
+
+        let dead = db.dead_effects().unwrap();
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].effect_type, EffectType::MoveIssue);
+    }
+
+    #[test]
+    fn retry_effect_resets_dead_to_pending() {
+        let db = setup_db_with_task("t11");
+
+        let mut e = make_effect("t11", "t11:move", EffectType::MoveIssue);
+        e.max_attempts = 1;
+        db.insert_effects(&[e]).unwrap();
+
+        let effect_id = db.pending_effects(1).unwrap()[0].id;
+        db.mark_effect_failed(effect_id, "fatal").unwrap();
+
+        // Verify it's dead
+        let status: String = db
+            .conn
+            .query_row(
+                "SELECT status FROM effects WHERE id = ?1",
+                params![effect_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "dead");
+
+        // Reset via retry
+        let changed = db.retry_effect(effect_id).unwrap();
+        assert!(changed, "retry_effect should return true for a dead effect");
+
+        // Should be pending again with attempts=0
+        let (attempts, new_status, next_retry): (i32, String, Option<String>) = db
+            .conn
+            .query_row(
+                "SELECT attempts, status, next_retry_at FROM effects WHERE id = ?1",
+                params![effect_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(new_status, "pending");
+        assert_eq!(attempts, 0);
+        assert!(next_retry.is_none());
+    }
+
+    #[test]
+    fn retry_effect_returns_false_for_done_effect() {
+        let db = setup_db_with_task("t12");
+        let e = make_effect("t12", "t12:move", EffectType::MoveIssue);
+        db.insert_effects(&[e]).unwrap();
+
+        let effect_id = db.pending_effects(1).unwrap()[0].id;
+        db.mark_effect_done(effect_id).unwrap();
+
+        // retry_effect should NOT reset a done effect
+        let changed = db.retry_effect(effect_id).unwrap();
+        assert!(
+            !changed,
+            "retry_effect should return false for a done effect"
+        );
+    }
+
+    #[test]
+    fn effects_for_task_returns_all_statuses() {
+        let db = setup_db_with_task("t13");
+
+        let e1 = make_effect("t13", "t13:move", EffectType::MoveIssue);
+        let e2 = make_effect("t13", "t13:comment", EffectType::PostComment);
+        db.insert_effects(&[e1, e2]).unwrap();
+
+        // Mark e1 done
+        let effects = db.pending_effects(10).unwrap();
+        db.mark_effect_done(effects[0].id).unwrap();
+
+        // effects_for_task should return both (done + pending)
+        let all = db.effects_for_task("t13").unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn pending_and_failed_effects_excludes_done_and_dead() {
+        let db = setup_db_with_task("t14");
+
+        let e1 = make_effect("t14", "t14:move", EffectType::MoveIssue);
+        let mut e2 = make_effect("t14", "t14:dead", EffectType::PostComment);
+        e2.max_attempts = 1;
+        let e3 = make_effect("t14", "t14:comment", EffectType::AddLabel);
+        db.insert_effects(&[e1, e2, e3]).unwrap();
+
+        let pending = db.pending_effects(100).unwrap();
+        // Mark e1 done
+        db.mark_effect_done(pending[0].id).unwrap();
+        // Kill e2 (max_attempts=1 → dead on first failure)
+        db.mark_effect_failed(pending[1].id, "fatal").unwrap();
+
+        // Only e3 (pending AddLabel) remains
+        let visible = db.pending_and_failed_effects().unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].effect_type, EffectType::AddLabel);
     }
 }

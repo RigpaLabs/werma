@@ -1,6 +1,7 @@
 pub mod config_cmd;
 pub mod daemon_cmd;
 pub mod display;
+pub mod effects;
 pub mod linear_cmd;
 pub mod misc;
 pub mod pipeline_cmd;
