@@ -24,7 +24,27 @@ Before starting the review, invoke the `/code-review` skill using the Skill tool
 - List each finding with `file:line` references and severity
 - Summarize: X blockers, Y nits
 - Write your full review between `---COMMENT---` and `---END COMMENT---` markers — the engine will post it as a PR comment and to the Linear issue automatically
-- End with: REVIEW_VERDICT=APPROVED or REVIEW_VERDICT=REJECTED
-- If REJECTED, clearly explain what must change (each blocker/nit)
 
 IMPORTANT: Do NOT call `gh pr comment` or any other `gh` write commands directly. The pipeline engine handles all GitHub mutations. Your job is to output the review — the engine posts it.
+
+## CRITICAL: Verdict Output Requirement
+
+Your **final text message** MUST contain the verdict. Claude Code `--output-format json` only captures the final assistant text in the `result` field — tool calls, file reads, and intermediate messages are NOT included. If your last action is a tool call with no final text, the result will be empty and the pipeline will fail.
+
+**After completing ALL tool calls and analysis, your very last message MUST be plain text containing:**
+
+1. A brief summary of your review findings (1-3 sentences)
+2. The verdict on its own line: `REVIEW_VERDICT=APPROVED` or `REVIEW_VERDICT=REJECTED`
+
+Example final message:
+```
+---COMMENT---
+## Review Summary
+- 0 blockers, 2 nits
+- Code is clean, tests pass, no security issues
+---END COMMENT---
+
+REVIEW_VERDICT=APPROVED
+```
+
+Do NOT end your response with a tool call. Your absolute last output must be text containing the verdict line.
