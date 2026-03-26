@@ -813,6 +813,19 @@ stages:
     }
 
     #[test]
+    fn analyst_prompt_contains_sub_issues_placeholder() {
+        // RIG-236: analyst prompt must contain {sub_issues} placeholder
+        // so that runner can late-inject sub-issue data for epics
+        let config = test_config();
+        let stage_cfg = config.stage("analyst").unwrap();
+        let prompt = build_poll_prompt(&config, stage_cfg, "RIG-236", "Epic issue", "Description");
+        assert!(
+            prompt.contains("{sub_issues}"),
+            "analyst prompt must contain {{sub_issues}} placeholder for epic support, got: {prompt}"
+        );
+    }
+
+    #[test]
     fn poll_circuit_breaker_blocks_excessive_reviewer_spawns() {
         // RIG-309: after max_review_rounds * 2 reviewer tasks, poller should stop spawning
         let db = crate::db::Db::open_in_memory().unwrap();

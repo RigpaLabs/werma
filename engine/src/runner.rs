@@ -216,6 +216,37 @@ fn fetch_linear_comments(linear: &dyn crate::linear::LinearApi, db: &Db, task: &
     out.replace("\\n", "\n").replace("\\t", "\t")
 }
 
+/// Fetch child (sub) issues for a parent issue at execution time.
+/// Returns formatted markdown listing all sub-issues, or empty string if none.
+fn fetch_sub_issues(linear: &dyn crate::linear::LinearApi, identifier: &str) -> String {
+    let children = match linear.get_sub_issues(identifier) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("warning: could not fetch sub-issues for {identifier}: {e}");
+            return String::new();
+        }
+    };
+
+    if children.is_empty() {
+        return String::new();
+    }
+
+    let mut out = format!(
+        "## Sub-issues ({count} children)\n\nThis is an **epic/parent issue**. Analyze all sub-issues holistically.\n\n",
+        count = children.len()
+    );
+    for (ident, title, status, description) in &children {
+        out.push_str(&format!("### [{ident}] {title}\n**Status:** {status}\n"));
+        if !description.is_empty() {
+            // Sanitize escaped newlines from Linear
+            let desc = description.replace("\\n", "\n").replace("\\t", "\t");
+            out.push_str(&format!("\n{desc}\n"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// Run the next pending task in a tmux session.
 /// Uses claim_next_pending for atomic find+mark-running (no TOCTOU).
 /// Returns the task ID if launched, None if no tasks available.
@@ -371,6 +402,19 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
             String::new()
         };
         full_prompt = full_prompt.replace("{linear_comments}", &comments_text);
+    }
+
+    // Late-inject sub-issues for analyst stage (epic detection).
+    // Fetches child issues from Linear so analyst can analyze epics holistically.
+    if full_prompt.contains("{sub_issues}") {
+        let sub_issues_text = if task.linear_issue_id.is_empty() {
+            String::new()
+        } else if let Ok(client) = crate::linear::LinearClient::new() {
+            fetch_sub_issues(&client, &task.linear_issue_id)
+        } else {
+            String::new()
+        };
+        full_prompt = full_prompt.replace("{sub_issues}", &sub_issues_text);
     }
 
     // Write prompt to file — never interpolated into shell
@@ -1441,6 +1485,83 @@ mod tests {
 
         let result = fetch_linear_comments(&linear, &db, &task);
         assert!(result.is_empty(), "should be empty when no comments");
+    }
+
+    // ─── RIG-236: Sub-issue (epic) fetch tests ─────────────────────────────
+
+    #[test]
+    fn fetch_sub_issues_formats_children() {
+        let linear = crate::traits::fakes::FakeLinearApi::new();
+        linear.set_sub_issues(
+            "RIG-236",
+            vec![
+                (
+                    "RIG-237".to_string(),
+                    "Add GraphQL query".to_string(),
+                    "Todo".to_string(),
+                    "Fetch children from Linear API".to_string(),
+                ),
+                (
+                    "RIG-238".to_string(),
+                    "Update prompt".to_string(),
+                    "In Progress".to_string(),
+                    String::new(),
+                ),
+            ],
+        );
+
+        let result = fetch_sub_issues(&linear, "RIG-236");
+        assert!(
+            result.contains("2 children"),
+            "should show child count, got: {result}"
+        );
+        assert!(
+            result.contains("[RIG-237] Add GraphQL query"),
+            "should contain first child, got: {result}"
+        );
+        assert!(
+            result.contains("**Status:** Todo"),
+            "should show status, got: {result}"
+        );
+        assert!(
+            result.contains("Fetch children from Linear API"),
+            "should include description, got: {result}"
+        );
+        assert!(
+            result.contains("[RIG-238] Update prompt"),
+            "should contain second child, got: {result}"
+        );
+        assert!(
+            result.contains("epic/parent issue"),
+            "should indicate this is an epic, got: {result}"
+        );
+    }
+
+    #[test]
+    fn fetch_sub_issues_empty_when_no_children() {
+        let linear = crate::traits::fakes::FakeLinearApi::new();
+        let result = fetch_sub_issues(&linear, "RIG-100");
+        assert!(result.is_empty(), "should be empty when no children");
+    }
+
+    #[test]
+    fn fetch_sub_issues_sanitizes_escaped_newlines() {
+        let linear = crate::traits::fakes::FakeLinearApi::new();
+        linear.set_sub_issues(
+            "RIG-300",
+            vec![(
+                "RIG-301".to_string(),
+                "Child".to_string(),
+                "Todo".to_string(),
+                "Line one\\nLine two".to_string(),
+            )],
+        );
+
+        let result = fetch_sub_issues(&linear, "RIG-300");
+        assert!(
+            result.contains("Line one\nLine two"),
+            "should unescape \\n, got: {result}"
+        );
     }
 
     // ─── RIG-299: Fallback model tests ──────────────────────────────────────

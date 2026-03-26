@@ -180,6 +180,9 @@ pub mod fakes {
         /// Maps issue_id -> vec of (author, created_at, body) comments.
         pub issue_comments:
             RefCell<std::collections::HashMap<String, Vec<(String, String, String)>>>,
+        /// Maps identifier -> vec of (identifier, title, status, description) sub-issues.
+        pub sub_issues:
+            RefCell<std::collections::HashMap<String, Vec<(String, String, String, String)>>>,
         fail_next_moves: RefCell<u32>,
     }
 
@@ -199,8 +202,20 @@ pub mod fakes {
                 issue_status: RefCell::new(std::collections::HashMap::new()),
                 issue_state_and_team: RefCell::new(std::collections::HashMap::new()),
                 issue_comments: RefCell::new(std::collections::HashMap::new()),
+                sub_issues: RefCell::new(std::collections::HashMap::new()),
                 fail_next_moves: RefCell::new(0),
             }
+        }
+
+        /// Set sub-issues that will be returned by get_sub_issues for an identifier.
+        pub fn set_sub_issues(
+            &self,
+            identifier: &str,
+            children: Vec<(String, String, String, String)>,
+        ) {
+            self.sub_issues
+                .borrow_mut()
+                .insert(identifier.to_string(), children);
         }
 
         /// Set comments that will be returned by list_comments for an issue.
@@ -407,6 +422,18 @@ pub mod fakes {
             } else {
                 Ok(all)
             }
+        }
+
+        fn get_sub_issues(
+            &self,
+            identifier: &str,
+        ) -> Result<Vec<(String, String, String, String)>> {
+            Ok(self
+                .sub_issues
+                .borrow()
+                .get(identifier)
+                .cloned()
+                .unwrap_or_default())
         }
     }
 
@@ -786,6 +813,14 @@ pub mod fakes {
             _after_iso: Option<&str>,
         ) -> anyhow::Result<Vec<(String, String, String)>> {
             // StatefulFakeLinearApi doesn't track comments — return empty
+            Ok(vec![])
+        }
+
+        fn get_sub_issues(
+            &self,
+            _identifier: &str,
+        ) -> anyhow::Result<Vec<(String, String, String, String)>> {
+            // StatefulFakeLinearApi doesn't track sub-issues — return empty
             Ok(vec![])
         }
     }
