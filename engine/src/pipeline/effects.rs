@@ -125,6 +125,7 @@ pub fn execute_effect(
             // Returns Option<String> — we log but don't fail if no PR created.
             if let Some(url) = auto_create_pr(cmd, working_dir, issue_id, task_id)? {
                 eprintln!("[effects] CreatePr: created PR {url} for {issue_id}");
+                linear.attach_url(issue_id, &url, &url)?;
             } else {
                 eprintln!(
                     "[effects] CreatePr: no PR created for {issue_id} (skipped — already exists or on main)"
@@ -519,6 +520,43 @@ mod tests {
         assert!(
             result.is_ok(),
             "CreatePr should not fail on graceful skip: {result:?}"
+        );
+    }
+
+    #[test]
+    fn execute_effect_create_pr_attaches_url_to_linear() {
+        // Arrange: FakeCommandRunner scripted to produce a PR URL from auto_create_pr.
+        // auto_create_pr calls (in order):
+        //   1. git branch --show-current  → non-main branch name
+        //   2. git log origin/main..HEAD  → has commits ahead
+        //   3. git push -u origin <branch> → success
+        //   4. gh pr view --json url -q .url → empty (no existing PR)
+        //   5. gh pr create ...           → PR URL
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        cmd.push_success("feat/rig-315-fix-create-pr"); // git branch --show-current
+        cmd.push_success("abc1234 RIG-315 feat: implementation"); // git log origin/main..HEAD
+        cmd.push_success(""); // git push
+        cmd.push_success(""); // gh pr view (no existing PR)
+        cmd.push_success("https://github.com/org/repo/pull/99"); // gh pr create
+
+        let effect = make_effect(
+            "eff-cp-url-t",
+            "EFF-CP-URL",
+            EffectType::CreatePr,
+            serde_json::json!({ "working_dir": "/tmp" }),
+        );
+
+        execute_effect(&effect, &linear, &cmd, &notifier).unwrap();
+
+        let attaches = linear.attach_calls.borrow();
+        assert_eq!(attaches.len(), 1, "attach_url should be called once");
+        assert_eq!(attaches[0].0, "EFF-CP-URL");
+        assert!(
+            attaches[0].1.contains("pull/99"),
+            "attached URL should be the PR URL"
         );
     }
 
