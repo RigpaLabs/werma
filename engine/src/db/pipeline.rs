@@ -717,6 +717,84 @@ mod tests {
         assert!(none.is_empty());
     }
 
+    /// RIG-310: pipeline task insert must persist linear_issue_id.
+    #[test]
+    fn pipeline_task_persists_linear_issue_id() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut task = make_test_task("20260326-310");
+        task.linear_issue_id = "FAT-59".to_string();
+        task.pipeline_stage = "engineer".to_string();
+        task.task_type = "pipeline-engineer".to_string();
+        db.insert_task(&task).unwrap();
+
+        let read_back = db.task("20260326-310").unwrap().expect("task must exist");
+        assert_eq!(
+            read_back.linear_issue_id, "FAT-59",
+            "linear_issue_id must survive insert+read round-trip"
+        );
+    }
+
+    /// RIG-310: tasks_by_linear_issue must find FAT-team pipeline tasks.
+    #[test]
+    fn tasks_by_linear_issue_finds_fat_engineer_task() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut task = make_test_task("20260326-311");
+        task.linear_issue_id = "FAT-59".to_string();
+        task.pipeline_stage = "engineer".to_string();
+        task.task_type = "pipeline-engineer".to_string();
+        db.insert_task(&task).unwrap();
+
+        let found = db
+            .tasks_by_linear_issue("FAT-59", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(found.len(), 1, "must find exactly one engineer task");
+        assert_eq!(found[0].id, "20260326-311");
+        assert_eq!(found[0].linear_issue_id, "FAT-59");
+    }
+
+    /// RIG-310: migration 004 must NOT clear FAT-* identifiers.
+    #[test]
+    fn migration_004_preserves_fat_identifiers() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut fat_task = make_test_task("20260326-312");
+        fat_task.linear_issue_id = "FAT-42".to_string();
+        fat_task.pipeline_stage = "analyst".to_string();
+        db.insert_task(&fat_task).unwrap();
+
+        let mut rig_task = make_test_task("20260326-313");
+        rig_task.linear_issue_id = "RIG-100".to_string();
+        rig_task.pipeline_stage = "engineer".to_string();
+        db.insert_task(&rig_task).unwrap();
+
+        // Re-run migration 004 to verify it doesn't nuke FAT identifiers
+        db.conn
+            .execute_batch(include_str!(
+                "../../migrations/004_normalize_linear_ids.sql"
+            ))
+            .unwrap();
+
+        let fat_read = db
+            .task("20260326-312")
+            .unwrap()
+            .expect("FAT task must exist");
+        assert_eq!(
+            fat_read.linear_issue_id, "FAT-42",
+            "migration 004 must preserve FAT-* identifiers"
+        );
+
+        let rig_read = db
+            .task("20260326-313")
+            .unwrap()
+            .expect("RIG task must exist");
+        assert_eq!(
+            rig_read.linear_issue_id, "RIG-100",
+            "migration 004 must preserve RIG-* identifiers"
+        );
+    }
+
     #[test]
     fn count_active_pipeline_tasks_empty() {
         let db = Db::open_in_memory().unwrap();

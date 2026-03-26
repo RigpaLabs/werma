@@ -3,7 +3,12 @@
 -- Clear UUIDs from completed/failed tasks to prevent dedup false negatives.
 -- Active tasks (pending/running) with UUIDs are also cleared since they'll
 -- be re-created with proper identifiers on next pipeline poll.
+--
+-- RIG-310: The original query only preserved 'RIG-%' identifiers, which
+-- nuked FAT-XX (and any future team) identifiers on every DB open.
+-- Fix: preserve any value matching the TEAM-NUMBER pattern (uppercase
+-- letters followed by a dash and digits).
 UPDATE tasks
 SET linear_issue_id = ''
 WHERE linear_issue_id <> ''
-  AND linear_issue_id NOT LIKE 'RIG-%';
+  AND linear_issue_id NOT GLOB '[A-Z]*-[0-9]*';
