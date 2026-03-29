@@ -91,14 +91,11 @@ pub fn clone_test_repo() -> Result<(tempfile::TempDir, PathBuf)> {
     let checkout = tmp.path().join("werma-test");
 
     let url = format!("https://github.com/{TEST_REPO}.git");
-    Command::new("git")
-        .args(["clone", "--depth=1", &url, &checkout.to_string_lossy()])
-        .output()
-        .context("git clone")?;
+    run_git(
+        &["clone", "--depth=1", &url, &checkout.to_string_lossy()],
+        tmp.path(),
+    )?;
 
-    if !checkout.exists() {
-        bail!("clone failed — {checkout:?} does not exist");
-    }
     Ok((tmp, checkout))
 }
 
