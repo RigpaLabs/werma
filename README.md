@@ -8,7 +8,7 @@ AI can write code. Werma makes sure it ships.
 
 ## What It Does
 
-- **Full delivery pipeline** — Linear issue &rarr; analyst &rarr; engineer &rarr; reviewer &rarr; QA &rarr; deploy &rarr; done. Each stage is an AI agent running in tmux with appropriate permissions (read-only for review, edit for code, full shell for deploy).
+- **Full delivery pipeline** — Linear issue &rarr; analyst &rarr; engineer &rarr; reviewer &rarr; deployer &rarr; done. Each stage is an AI agent running in tmux with appropriate permissions (read-only for review, edit for code, full shell for deploy).
 - **Transactional outbox** — External API calls (Linear, GitHub, Slack) go through a durable outbox with exponential retry and dead-letter queue. No more lost state transitions.
 - **Single binary + SQLite** — No external services, no Docker, no Kubernetes. One Rust binary, one database file. Install and run in 30 seconds.
 
@@ -68,8 +68,8 @@ werma daemon install
 # Check pipeline status — which issues are at which stage
 werma pipeline status
 
-# Approve an issue for deployment
-werma pipeline approve RIG-42
+# Manually trigger a pipeline stage for an issue
+werma pipeline run RIG-42 --stage analyst
 ```
 
 ## Architecture
@@ -109,8 +109,7 @@ Issues flow through a YAML-configured pipeline. Each stage runs a specialized ag
 | **Analyst** | read-only | Writes technical spec, sets labels |
 | **Engineer** | edit | Creates branch, writes code, opens PR |
 | **Reviewer** | read-only | Reviews PR on GitHub, approves or requests changes |
-| **QA** | edit | Verifies CI green, runs tests |
-| **DevOps** | full (shell) | Merges PR, triggers deploy, runs health checks |
+| **Deployer** | full (shell) | Merges PR, triggers deploy, runs health checks |
 
 Each agent emits a **verdict** on its last output line (e.g., `VERDICT=DONE`, `REVIEW_VERDICT=APPROVED`). The pipeline engine parses verdicts and transitions issues to the next stage automatically.
 
@@ -144,8 +143,7 @@ Werma stores runtime data in `~/.werma/`:
 ├── config.toml     # User configuration (optional)
 ├── .env            # Credentials (LINEAR_API_KEY, etc.)
 ├── logs/           # Per-task agent logs + daemon.log
-├── backups/        # Automatic DB backups
-└── pipelines/      # Pipeline config overrides (optional)
+└── backups/        # Automatic DB backups
 ```
 
 ### Environment Variables
@@ -158,20 +156,19 @@ Copy `.env.example` to `~/.werma/.env` and fill in your keys:
 | `SLACK_BOT_TOKEN` | No | Slack bot token for notifications |
 | `GITHUB_TOKEN` | No | GitHub token for self-update / private repos |
 
-### Custom Pipeline
+### Pipeline Configuration
 
-The default pipeline is compiled into the binary. To customize, copy the built-in config and edit it:
+The pipeline config is compiled into the binary (`engine/pipelines/default.yaml`). To inspect it:
 
 ```bash
-# View the current pipeline configuration
+# View the current pipeline stages and transitions
 werma pipeline show
 
-# Place your custom config at ~/.werma/pipelines/default.yaml
-# (runtime overrides take precedence over the compiled-in default)
-
-# Validate your changes
+# Validate the config
 werma pipeline validate
 ```
+
+To customize stages, edit `engine/pipelines/default.yaml` and rebuild.
 
 ## Effects Outbox
 
