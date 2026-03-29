@@ -3,6 +3,12 @@ name = "werma"
 version = "0.46.3"
 edition = "2024"
 rust-version = "1.88"
+description = "CLI for orchestrating AI coding agents in tmux"
+license = "MIT"
+repository = "https://github.com/RigpaLabs/werma"
+homepage = "https://github.com/RigpaLabs/werma"
+authors = ["RigpaLabs"]
+readme = "../README.md"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="380" viewBox="0 0 820 380">
+  <style>
+    .bg { fill: #1e1e2e; }
+    .title-bar { fill: #313244; }
+    .text { font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace; font-size: 13px; }
+    .header { fill: #cdd6f4; font-weight: bold; }
+    .id { fill: #89b4fa; }
+    .type { fill: #a6adc8; }
+    .running { fill: #f9e2af; }
+    .completed { fill: #a6e3a1; }
+    .failed { fill: #f38ba8; }
+    .issue { fill: #cba6f7; }
+    .time { fill: #6c7086; }
+    .prompt { fill: #a6adc8; }
+    .dot-red { fill: #f38ba8; }
+    .dot-yellow { fill: #f9e2af; }
+    .dot-green { fill: #a6e3a1; }
+    .title-text { fill: #a6adc8; font-family: 'SF Mono', monospace; font-size: 13px; }
+  </style>
+  <rect class="bg" width="820" height="380" rx="10"/>
+  <rect class="title-bar" width="820" height="32" rx="10 10 0 0"/>
+  <circle class="dot-red" cx="20" cy="16" r="6"/>
+  <circle class="dot-yellow" cx="40" cy="16" r="6"/>
+  <circle class="dot-green" cx="60" cy="16" r="6"/>
+  <text class="title-text" x="360" y="21" text-anchor="middle">werma st</text>
+
+  <text class="text header" x="20" y="64">ID              TYPE               STATUS     ISSUE    TIME  PROMPT</text>
+  <line x1="20" y1="70" x2="800" y2="70" stroke="#45475a" stroke-width="1"/>
+
+  <text class="text" x="20" y="90"><tspan class="id">20260329-014</tspan>  <tspan class="type">pipeline-engineer</tspan>  <tspan class="running">running  </tspan>  <tspan class="issue">RIG-320</tspan>  <tspan class="time"> 4m</tspan>  <tspan class="prompt">OSS release hygiene</tspan></text>
+  <text class="text" x="20" y="112"><tspan class="id">20260329-013</tspan>  <tspan class="type">pipeline-reviewer</tspan>  <tspan class="completed">completed</tspan>  <tspan class="issue">FAT-78 </tspan>  <tspan class="time">13m</tspan>  <tspan class="prompt">Code Review Stage</tspan></text>
+  <text class="text" x="20" y="134"><tspan class="id">20260329-012</tspan>  <tspan class="type">pipeline-engineer</tspan>  <tspan class="completed">completed</tspan>  <tspan class="issue">FAT-78 </tspan>  <tspan class="time"> 6m</tspan>  <tspan class="prompt">Pipeline: Engineer</tspan></text>
+  <text class="text" x="20" y="156"><tspan class="id">20260329-011</tspan>  <tspan class="type">pipeline-reviewer</tspan>  <tspan class="completed">completed</tspan>  <tspan class="issue">RIG-318</tspan>  <tspan class="time">12m</tspan>  <tspan class="prompt">Code Review Stage</tspan></text>
+  <text class="text" x="20" y="178"><tspan class="id">20260329-010</tspan>  <tspan class="type">pipeline-engineer</tspan>  <tspan class="completed">completed</tspan>  <tspan class="issue">RIG-318</tspan>  <tspan class="time"> 6m</tspan>  <tspan class="prompt">Pipeline: Engineer</tspan></text>
+  <text class="text" x="20" y="200"><tspan class="id">20260329-007</tspan>  <tspan class="type">pipeline-engineer</tspan>  <tspan class="completed">completed</tspan>  <tspan class="issue">FAT-69 </tspan>  <tspan class="time">&lt;1m</tspan>  <tspan class="prompt">Pipeline: Engineer</tspan></text>
+  <text class="text" x="20" y="222"><tspan class="id">20260329-006</tspan>  <tspan class="type">pipeline-reviewer</tspan>  <tspan class="completed">completed</tspan>  <tspan class="issue">FAT-69 </tspan>  <tspan class="time">12m</tspan>  <tspan class="prompt">Code Review Stage</tspan></text>
+  <text class="text" x="20" y="244"><tspan class="id">20260329-005</tspan>  <tspan class="type">pipeline-engineer</tspan>  <tspan class="completed">completed</tspan>  <tspan class="issue">FAT-69 </tspan>  <tspan class="time">&lt;1m</tspan>  <tspan class="prompt">Pipeline: Engineer</tspan></text>
+  <text class="text" x="20" y="266"><tspan class="id">20260329-004</tspan>  <tspan class="type">pipeline-reviewer</tspan>  <tspan class="completed">completed</tspan>  <tspan class="issue">FAT-56 </tspan>  <tspan class="time"> 7m</tspan>  <tspan class="prompt">Code Review Stage</tspan></text>
+  <text class="text" x="20" y="288"><tspan class="id">20260329-003</tspan>  <tspan class="type">pipeline-reviewer</tspan>  <tspan class="completed">completed</tspan>  <tspan class="issue">FAT-69 </tspan>  <tspan class="time"> 6m</tspan>  <tspan class="prompt">Code Review Stage</tspan></text>
+  <text class="text" x="20" y="310"><tspan class="id">20260329-002</tspan>  <tspan class="type">pipeline-engineer</tspan>  <tspan class="completed">completed</tspan>  <tspan class="issue">FAT-56 </tspan>  <tspan class="time"> 3m</tspan>  <tspan class="prompt">Pipeline: Engineer</tspan></text>
+  <text class="text" x="20" y="332"><tspan class="id">20260329-001</tspan>  <tspan class="type">pipeline-engineer</tspan>  <tspan class="completed">completed</tspan>  <tspan class="issue">FAT-69 </tspan>  <tspan class="time"> 3m</tspan>  <tspan class="prompt">Pipeline: Engineer</tspan></text>
+
+  <text class="text time" x="20" y="362">12 tasks completed | 1 running | 0 pending</text>
+</svg>
