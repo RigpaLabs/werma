@@ -46,9 +46,14 @@ implicit_clone = "warn"
 single_match_else = "warn"
 semicolon_if_nothing_returned = "warn"
 
+[features]
+e2e = []
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+scopeguard = "1"
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 lto = true
