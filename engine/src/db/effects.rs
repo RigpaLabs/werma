@@ -130,11 +130,14 @@ impl super::Db {
         Ok(out)
     }
 
-    /// Mark an effect as done and record the execution timestamp.
+    /// Mark an effect as done, increment attempts, and record the execution timestamp.
+    ///
+    /// RIG-321: `attempts` is incremented on success too, so `attempts > 0` proves the
+    /// effect was actually executed (not silently skipped).
     pub fn mark_effect_done(&self, id: i64) -> Result<()> {
         let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
         self.conn.execute(
-            "UPDATE effects SET status = 'done', executed_at = ?1, error = NULL WHERE id = ?2",
+            "UPDATE effects SET status = 'done', attempts = attempts + 1, executed_at = ?1, error = NULL WHERE id = ?2",
             params![now, id],
         )?;
         Ok(())

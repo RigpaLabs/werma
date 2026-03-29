@@ -561,4 +561,161 @@ mod regression {
              this allows the outbox to retry when the PR hasn't been created yet"
         );
     }
+
+    // ─── RIG-321 ─────────────────────────────────────────────────────────────
+
+    /// CreatePr effect must return Err when `gh pr create` fails, not silently
+    /// mark the effect as done.
+    ///
+    /// Bug: `auto_create_pr()` returned `Ok(None)` when `gh pr create` failed
+    /// (non-zero exit). The effect executor treated `Ok(None)` as "nothing to do"
+    /// and called `mark_effect_done()` — so the effect was marked `done` with
+    /// `attempts=0` and no PR was ever created on GitHub.
+    ///
+    /// Fix: `auto_create_pr()` now returns `Err` when push or PR creation fails,
+    /// which propagates through `execute_effect()` to the outbox retry machinery.
+    #[test]
+    fn regression_rig321_create_pr_push_failure_returns_error() {
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        // Script auto_create_pr calls:
+        //   1. git branch --show-current → feature branch (not main)
+        //   2. git log origin/main..HEAD → has commits
+        //   3. git push -u origin <branch> → FAILURE
+        cmd.push_success("feat/rig-321-fix-create-pr");
+        cmd.push_success("abc1234 some commit");
+        cmd.push_failure("Permission denied (publickey)");
+
+        let effect = Effect {
+            id: 1,
+            dedup_key: "rig321:CreatePr:push".to_string(),
+            task_id: "rig321-push-t".to_string(),
+            issue_id: "RIG-321".to_string(),
+            effect_type: EffectType::CreatePr,
+            payload: serde_json::json!({ "working_dir": "/tmp" }),
+            blocking: true,
+            status: EffectStatus::Pending,
+            attempts: 0,
+            max_attempts: 5,
+            created_at: "2026-03-29T10:00:00".to_string(),
+            next_retry_at: None,
+            executed_at: None,
+            error: None,
+        };
+
+        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        assert!(
+            result.is_err(),
+            "RIG-321 regression: CreatePr must return Err when git push fails; \
+             the old code returned Ok(None) which silently marked the effect done"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("git push failed"),
+            "error message should indicate push failure"
+        );
+    }
+
+    #[test]
+    fn regression_rig321_create_pr_gh_failure_returns_error() {
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        // Script auto_create_pr calls:
+        //   1. git branch --show-current → feature branch
+        //   2. git log origin/main..HEAD → has commits
+        //   3. git push → success
+        //   4. gh pr view → no existing PR
+        //   5. gh pr create → FAILURE
+        cmd.push_success("feat/rig-321-fix-create-pr");
+        cmd.push_success("abc1234 some commit");
+        cmd.push_success(""); // push ok
+        cmd.push_success(""); // no existing PR
+        cmd.push_failure("GraphQL: Resource not accessible by integration");
+
+        let effect = Effect {
+            id: 2,
+            dedup_key: "rig321:CreatePr:gh".to_string(),
+            task_id: "rig321-gh-t".to_string(),
+            issue_id: "RIG-321".to_string(),
+            effect_type: EffectType::CreatePr,
+            payload: serde_json::json!({ "working_dir": "/tmp" }),
+            blocking: true,
+            status: EffectStatus::Pending,
+            attempts: 0,
+            max_attempts: 5,
+            created_at: "2026-03-29T10:00:00".to_string(),
+            next_retry_at: None,
+            executed_at: None,
+            error: None,
+        };
+
+        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        assert!(
+            result.is_err(),
+            "RIG-321 regression: CreatePr must return Err when gh pr create fails; \
+             the old code returned Ok(None) which silently marked the effect done"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("gh pr create failed"),
+            "error message should indicate gh pr create failure"
+        );
+    }
+
+    /// mark_effect_done must increment attempts so completed effects show attempts > 0.
+    ///
+    /// Bug: `mark_effect_done()` did not touch `attempts`, leaving it at 0 even
+    /// after execution. This made it impossible to distinguish "executed and done"
+    /// from "never executed" when debugging outbox effects.
+    ///
+    /// Fix: `mark_effect_done()` now includes `attempts = attempts + 1` in its
+    /// UPDATE statement.
+    #[test]
+    fn regression_rig321_mark_done_increments_attempts() {
+        let db = Db::open_in_memory().unwrap();
+        let task = crate::db::make_test_task("rig321-attempts-t");
+        db.insert_task(&task).unwrap();
+
+        let effect = Effect {
+            id: 0,
+            dedup_key: "rig321:attempts".to_string(),
+            task_id: "rig321-attempts-t".to_string(),
+            issue_id: "RIG-321".to_string(),
+            effect_type: EffectType::PostComment,
+            payload: serde_json::json!({ "body": "test" }),
+            blocking: false,
+            status: EffectStatus::Pending,
+            attempts: 0,
+            max_attempts: 5,
+            created_at: "2026-03-29T10:00:00".to_string(),
+            next_retry_at: None,
+            executed_at: None,
+            error: None,
+        };
+        db.insert_effects(&[effect]).unwrap();
+
+        let effect_id = db.pending_effects(1).unwrap()[0].id;
+        db.mark_effect_done(effect_id).unwrap();
+
+        let (attempts, status): (i32, String) = db
+            .conn
+            .query_row(
+                "SELECT attempts, status FROM effects WHERE id = ?1",
+                rusqlite::params![effect_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            attempts, 1,
+            "RIG-321 regression: mark_effect_done must increment attempts to 1; \
+             the old code left it at 0, making executed effects indistinguishable from unexecuted"
+        );
+        assert_eq!(status, "done");
+    }
 }
