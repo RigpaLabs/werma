@@ -395,15 +395,25 @@ pub fn decide_callback(
             None
         };
 
-        // RIG-281: Post reviewer's review as a PR comment.
+        // RIG-281: Post reviewer's review as a proper GitHub PR review.
+        // RIG-318: use `gh pr review` (not `gh pr comment`) with the correct review event.
         if stage == "reviewer" {
             if let Some(review_body) = extract_review_body(result) {
+                let review_event = match verdict_str.as_str() {
+                    "approved" => "approve",
+                    "rejected" => "request-changes",
+                    _ => "comment",
+                };
                 effects.push(make_effect(
                     task_id,
                     linear_issue_id,
                     EffectType::PostPrComment,
                     "reviewer_pr_comment",
-                    serde_json::json!({ "body": review_body, "working_dir": working_dir }),
+                    serde_json::json!({
+                        "body": review_body,
+                        "working_dir": working_dir,
+                        "review_event": review_event,
+                    }),
                 ));
             }
         }
