@@ -1,10 +1,119 @@
-# Werma ཝེར་མ
+# Werma
 
-Agent identity, memory & orchestration for RigpaLabs pipeline.
+**AI delivery engine that turns Linear issues into merged PRs through a reliable multi-stage pipeline.**
 
-**Werma** (ཝེར་མ) — warrior spirits from the Bön tradition. They protect, execute, and maintain order.
+AI can write code. Werma makes sure it ships.
 
-## Agents
+![werma st](docs/images/werma-st.svg)
+
+## What It Does
+
+- **Full delivery pipeline** — Linear issue &rarr; analyst &rarr; engineer &rarr; reviewer &rarr; deployer &rarr; done. Each stage is an AI agent running in tmux with appropriate permissions (read-only for review, edit for code, full shell for deploy).
+- **Transactional outbox** — External API calls (Linear, GitHub, Slack) go through a durable outbox with exponential retry and dead-letter queue. No more lost state transitions.
+- **Single binary + SQLite** — No external services, no Docker, no Kubernetes. One Rust binary, one database file. Install and run in 30 seconds.
+
+## Install
+
+### GitHub Releases (recommended)
+
+Download the latest binary from [Releases](https://github.com/RigpaLabs/werma/releases).
+
+### Build from source
+
+```bash
+cargo install --git https://github.com/RigpaLabs/werma werma
+```
+
+Or clone and build:
+
+```bash
+git clone https://github.com/RigpaLabs/werma
+cd werma/engine
+cargo build --release
+# Binary at target/release/werma
+```
+
+### Requirements
+
+- Rust 1.88+ (build from source)
+- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (agent runtime)
+- tmux (agent sessions)
+- macOS or Linux
+
+## Quick Start
+
+```bash
+# Add a task to the queue
+werma add "Research best practices for error handling in async Rust" -t research
+
+# Run the next pending task (launches a Claude Code agent in tmux)
+werma run
+
+# Run all pending tasks in parallel
+werma run-all
+
+# Check status of all tasks
+werma st
+
+# Review a pull request with an AI reviewer agent
+werma review 42
+```
+
+### Pipeline Mode (Linear Integration)
+
+```bash
+# Install the daemon (polls Linear, processes completions, drains outbox)
+werma daemon install
+
+# Check pipeline status — which issues are at which stage
+werma pipeline status
+
+# Manually trigger a pipeline stage for an issue
+werma pipeline run RIG-42 --stage analyst
+```
+
+## Architecture
+
+```
+                    ┌─────────────┐
+                    │   Linear    │  Issue tracker
+                    └──────┬──────┘
+                           │ poll (30s)
+                    ┌──────▼──────┐
+                    │   Daemon    │  Tick loop: poll, callbacks, effects
+                    └──────┬──────┘
+                           │
+              ┌────────────┼────────────┐
+              │            │            │
+        ┌─────▼─────┐ ┌───▼───┐ ┌─────▼─────┐
+        │  Pipeline  │ │ Queue │ │  Effects  │
+        │  Callback  │ │       │ │  Outbox   │
+        └─────┬──────┘ └───┬───┘ └─────┬─────┘
+              │            │            │
+              │      ┌─────▼─────┐     │
+              └─────►│  Runner   │◄────┘
+                     └─────┬─────┘
+                           │ spawn
+                     ┌─────▼─────┐
+                     │   tmux    │  Isolated agent sessions
+                     │ sessions  │  (one per task)
+                     └───────────┘
+```
+
+### Pipeline Stages
+
+Issues flow through a YAML-configured pipeline. Each stage runs a specialized agent:
+
+| Stage | Agent Type | What It Does |
+|-------|-----------|--------------|
+| **Analyst** | read-only | Writes technical spec, sets labels |
+| **Engineer** | edit | Creates branch, writes code, opens PR |
+| **Reviewer** | read-only | Reviews PR on GitHub, approves or requests changes |
+| **Deployer** | full (shell) | Merges PR, triggers deploy, runs health checks |
+
+Each agent emits a **verdict** on its last output line (e.g., `VERDICT=DONE`, `REVIEW_VERDICT=APPROVED`). The pipeline engine parses verdicts and transitions issues to the next stage automatically.
+
+### Agent Roles
 
 | Agent | Role | Personality |
 |-------|------|-------------|
@@ -15,45 +124,101 @@ Agent identity, memory & orchestration for RigpaLabs pipeline.
 | **QA** | Quality assurance | Meticulous tester, no shortcuts |
 | **DevOps** | Deploy & monitoring | Calm operator, safety-first |
 
-## Architecture
+### Task Types
 
-### Two-Layer Orchestration
+| Type | Permissions | Use For |
+|------|------------|---------|
+| `research` | Read-only | Research, documentation, analysis |
+| `analyze` | Read-only | Code review, audits, specs |
+| `code` | Edit files | Writing/modifying code |
+| `full` | Edit + shell | Deploy, infra, anything needing bash |
+
+## Configuration
+
+Werma stores runtime data in `~/.werma/`:
 
 ```
-Layer 1: heartbeat.sh (bash, */1 min, 0 tokens)
-├── Unstick stuck agents
-├── Enforce resource limits
-├── Restart failed tasks
-├── Queue drain check
-└── Stale detection
-
-Layer 2: werma.md (Opus, */15 min)
-├── Pattern recognition across agents
-├── Slack pulse reporting
-├── Strategic task proposals
-└── Cross-agent coordination
+~/.werma/
+├── werma.db        # SQLite database (tasks, effects, schedules)
+├── config.toml     # User configuration (optional)
+├── .env            # Credentials (LINEAR_API_KEY, etc.)
+├── logs/           # Per-task agent logs + daemon.log
+└── backups/        # Automatic DB backups
 ```
 
-### Agent Files
+### Environment Variables
 
-Each agent has two files:
-- `character.md` — personality scaffold, communication style, decision-making traits
-- `memory.md` — persistent learnings, accumulated knowledge, patterns discovered
+Copy `.env.example` to `~/.werma/.env` and fill in your keys:
 
-### Shared State
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `LINEAR_API_KEY` | For pipeline | Linear API key for issue tracking |
+| `SLACK_BOT_TOKEN` | No | Slack bot token for notifications |
+| `GITHUB_TOKEN` | No | GitHub token for self-update / private repos |
 
-- `shared/signals.md` — inter-agent communication (status, handoffs, flags)
-- `identity.json` — external identity (how Werma presents on Slack/Linear/GitHub)
-- `limits.json` — resource constraints per agent
+### Pipeline Configuration
 
-## Setup
+The pipeline config is compiled into the binary (`engine/pipelines/default.yaml`). To inspect it:
 
 ```bash
-./install.sh
+# View the current pipeline stages and transitions
+werma pipeline show
+
+# Validate the config
+werma pipeline validate
 ```
 
-Creates symlinks and registers launchd agents for heartbeat scheduling.
+To customize stages, edit `engine/pipelines/default.yaml` and rebuild.
 
-## Related
+## Effects Outbox
 
-- [RigpaLabs/forge](https://github.com/RigpaLabs/forge) — Pipeline engine that invokes these agents
+External side effects (Linear state changes, GitHub PR creation, Slack notifications) are processed through a durable outbox:
+
+```bash
+# List pending and failed effects
+werma effects
+
+# Show dead-lettered effects (exhausted retries)
+werma effects dead
+
+# Retry a failed effect
+werma effects retry <id>
+```
+
+Effects use exponential backoff (5s &rarr; 30s &rarr; 120s &rarr; 300s &rarr; 600s) and are classified as **blocking** (must succeed for pipeline to continue) or **best-effort** (retried independently).
+
+## Scheduling
+
+Run tasks on a cron schedule via the daemon:
+
+```bash
+# Add a daily research task
+werma sched add daily-review "0 9 * * 1-5" "Review open PRs and summarize status" --type research
+
+# List schedules
+werma sched ls
+
+# Enable/disable without deleting
+werma sched on daily-review
+werma sched off daily-review
+```
+
+## Contributing
+
+See [CLAUDE.md](CLAUDE.md) for agent conventions, pipeline configuration format, and development workflow.
+
+```bash
+cd engine
+cargo build
+cargo test
+cargo clippy -- -D warnings
+cargo fmt -- --check
+```
+
+## Philosophy
+
+Werma (&#x0F5D;&#x0F7A;&#x0F62;&#x0F58;) means "warrior spirit" in the Bon tradition. They protect, execute, and maintain order. This tool embodies the same principle: reliable execution of well-defined tasks, with clear boundaries and accountability at each stage.
+
+## License
+
+[MIT](LICENSE)

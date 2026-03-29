@@ -481,7 +481,7 @@ mod tests {
             "/home/user/project/.trees/feat--RIG-42-thing"
         )));
         assert!(is_inside_worktree(Path::new(
-            "/Users/ar/projects/rigpa/werma/.trees/fix--RIG-99-bug"
+            "/home/user/project/.trees/fix--RIG-99-bug"
         )));
     }
 

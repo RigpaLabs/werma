@@ -8,6 +8,6 @@ on:
 
 jobs:
   ci:
-    uses: RigpaLabs/.github/.github/workflows/rust-ci.yml@main
+    uses: RigpaLabs/.github/.github/workflows/rust-ci.yml@944423fb53ad636173626ea9775c1be5200e9306 # main
     with:
       working-directory: engine

@@ -13,9 +13,6 @@ permissions:
   contents: read
   pull-requests: write
 
-env:
-  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-
 jobs:
   verdict-parsing:
     name: Verdict Format Tests
@@ -54,10 +51,11 @@ jobs:
   golden-dataset:
     name: Golden Dataset Eval
     runs-on: ubuntu-latest
-    # Only run LLM evals on prompt changes, not on every PR
+    # Only run on internal PRs (fork PRs don't have secrets) + prompt-eval label or manual
     if: |
-      contains(github.event.pull_request.labels.*.name, 'prompt-eval') ||
-      github.event_name == 'workflow_dispatch'
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       contains(github.event.pull_request.labels.*.name, 'prompt-eval'))
     steps:
       - uses: actions/checkout@v4
 
@@ -70,6 +68,8 @@ jobs:
 
       - name: Run golden dataset eval
         working-directory: engine/pipelines/evals
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           promptfoo eval \
             --output golden-results.json \

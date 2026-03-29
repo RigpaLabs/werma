@@ -9,3 +9,5 @@ CHANGELOG.md
 .idea/
 engine/pipelines/evals/.promptfoo/
 engine/pipelines/evals/*-results.json
+werma.db
+docs/prd/
