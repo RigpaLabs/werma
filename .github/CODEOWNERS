@@ -1,8 +1,8 @@
 # Werma CODEOWNERS — sensitive paths require maintainer review
 
-engine/src/              @RigpaLabs/maintainers
-engine/migrations/       @RigpaLabs/maintainers
-agents/*/character.md    @RigpaLabs/maintainers
-identity.json            @RigpaLabs/maintainers
-limits.json              @RigpaLabs/maintainers
-CLAUDE.md                @RigpaLabs/maintainers
+engine/src/              @arleyar @RigpaLabs/maintainers
+engine/migrations/       @arleyar @RigpaLabs/maintainers
+agents/*/character.md    @arleyar @RigpaLabs/maintainers
+identity.json            @arleyar @RigpaLabs/maintainers
+limits.json              @arleyar @RigpaLabs/maintainers
+CLAUDE.md                @arleyar @RigpaLabs/maintainers

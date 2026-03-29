@@ -10,7 +10,6 @@ AI can write code. Werma makes sure it ships.
 
 - **Full delivery pipeline** — Linear issue &rarr; analyst &rarr; engineer &rarr; reviewer &rarr; QA &rarr; deploy &rarr; done. Each stage is an AI agent running in tmux with appropriate permissions (read-only for review, edit for code, full shell for deploy).
 - **Transactional outbox** — External API calls (Linear, GitHub, Slack) go through a durable outbox with exponential retry and dead-letter queue. No more lost state transitions.
-- **Wave execution** — Batch issues and run them in parallel with dependency tracking. One command to launch a sprint's worth of work.
 - **Single binary + SQLite** — No external services, no Docker, no Kubernetes. One Rust binary, one database file. Install and run in 30 seconds.
 
 ## Install
@@ -81,7 +80,7 @@ werma pipeline approve RIG-42
                     └──────┬──────┘
                            │ poll (30s)
                     ┌──────▼──────┐
-                    │   Daemon    │  Tick loop: poll, callbacks, effects, waves
+                    │   Daemon    │  Tick loop: poll, callbacks, effects
                     └──────┬──────┘
                            │
               ┌────────────┼────────────┐
@@ -161,13 +160,15 @@ Copy `.env.example` to `~/.werma/.env` and fill in your keys:
 
 ### Custom Pipeline
 
-The default pipeline is compiled into the binary. To customize:
+The default pipeline is compiled into the binary. To customize, copy the built-in config and edit it:
 
 ```bash
-# Export the built-in pipeline config
-werma pipeline eject
+# View the current pipeline configuration
+werma pipeline show
 
-# Edit ~/.werma/pipelines/default.yaml
+# Place your custom config at ~/.werma/pipelines/default.yaml
+# (runtime overrides take precedence over the compiled-in default)
+
 # Validate your changes
 werma pipeline validate
 ```
