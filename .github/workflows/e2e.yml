@@ -1,0 +1,23 @@
+name: E2E Tests
+
+on:
+  workflow_dispatch: # manual only initially
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.E2E_GITHUB_TOKEN }}
+      LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
+      WERMA_E2E: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # GH_TOKEN enables gh CLI, but git push needs HTTPS credential helper
+      - run: gh auth setup-git
+
+      - name: Run e2e tests
+        working-directory: engine
+        run: cargo test --features e2e -- --test-threads=1

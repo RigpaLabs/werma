@@ -31,6 +31,12 @@ mod full_cycle_tests;
 #[cfg(test)]
 mod regression_tests;
 
+#[cfg(all(test, feature = "e2e"))]
+mod e2e_helpers;
+
+#[cfg(all(test, feature = "e2e"))]
+mod e2e_tests;
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
