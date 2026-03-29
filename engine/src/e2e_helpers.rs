@@ -92,7 +92,7 @@ pub fn clone_test_repo() -> Result<(tempfile::TempDir, PathBuf)> {
 
     let url = format!("https://github.com/{TEST_REPO}.git");
     run_git(
-        &["clone", "--depth=1", &url, &checkout.to_string_lossy()],
+        &["clone", &url, &checkout.to_string_lossy()],
         tmp.path(),
     )?;
 
