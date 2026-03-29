@@ -18,6 +18,11 @@ jobs:
       # GH_TOKEN enables gh CLI, but git push needs HTTPS credential helper
       - run: gh auth setup-git
 
+      - name: Configure git identity
+        run: |
+          git config --global user.email "e2e@rigpalabs.dev"
+          git config --global user.name "Werma E2E"
+
       - name: Run e2e tests
         working-directory: engine
         run: cargo test --features e2e -- --test-threads=1
