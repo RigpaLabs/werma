@@ -121,7 +121,7 @@ pub(crate) fn auto_create_pr(
         return Ok(None);
     }
 
-    // 4. Push branch (ignore errors if already up-to-date)
+    // 4. Push branch — failure is retriable (network, auth), not a skip.
     let push_output = cmd
         .run(
             "git",
@@ -131,8 +131,9 @@ pub(crate) fn auto_create_pr(
         .context("git push")?;
     if !push_output.success {
         let stderr = push_output.stderr_str();
-        eprintln!("auto-PR: push failed: {stderr}");
-        return Ok(None);
+        return Err(anyhow::anyhow!(
+            "git push failed for {branch_name}: {stderr}"
+        ));
     }
 
     // 5. Check if PR already exists for this branch
@@ -179,8 +180,9 @@ pub(crate) fn auto_create_pr(
         Ok(Some(url))
     } else {
         let stderr = output.stderr_str();
-        eprintln!("auto-PR failed: {stderr}");
-        Ok(None)
+        Err(anyhow::anyhow!(
+            "gh pr create failed for {linear_issue_id}: {stderr}"
+        ))
     }
 }
 
