@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use super::callback::move_with_retry;
-use super::pr::{auto_create_pr, post_pr_comment, pr_title_from_url};
+use super::pr::{auto_create_pr, post_pr_review, pr_title_from_url};
 use crate::db::Db;
 use crate::linear::LinearApi;
 use crate::models::{Effect, EffectType};
@@ -148,13 +148,13 @@ pub fn execute_effect(
                 .get("working_dir")
                 .and_then(|v| v.as_str())
                 .unwrap_or("/tmp");
-            // Returns bool — we log but don't fail if no PR found.
-            if !post_pr_comment(cmd, working_dir, body)? {
-                eprintln!(
-                    "[effects] PostPrComment: no PR found in {working_dir}, skipping comment"
-                );
-            }
-            Ok(())
+            let review_event = payload
+                .get("review_event")
+                .and_then(|v| v.as_str())
+                .unwrap_or("comment");
+            // RIG-318: post a proper PR review (not an issue comment).
+            // Errors propagate so the outbox retries (e.g. PR not yet created).
+            post_pr_review(cmd, working_dir, body, review_event)
         }
 
         EffectType::Notify => {
@@ -566,25 +566,116 @@ mod tests {
         );
     }
 
+    // ─── RIG-318: PostPrComment uses proper PR review, propagates errors ──
+
     #[test]
-    fn execute_effect_post_pr_comment_no_pr_skips_gracefully() {
-        // FakeCommandRunner returns empty stdout, so post_pr_comment returns Ok(false).
+    fn execute_effect_post_pr_review_success() {
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
 
+        // gh pr view → PR number
+        cmd.push_success("42");
+        // gh pr review → success
+        cmd.push_success("");
+
         let effect = make_effect(
-            "eff-ppc-t",
-            "EFF-PPC",
+            "eff-ppc-ok-t",
+            "EFF-PPC-OK",
+            EffectType::PostPrComment,
+            serde_json::json!({
+                "body": "Review findings here.",
+                "working_dir": "/tmp",
+                "review_event": "approve",
+            }),
+        );
+
+        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        assert!(
+            result.is_ok(),
+            "should succeed when PR review is posted: {result:?}"
+        );
+
+        // Verify gh pr review was called with --approve
+        let calls = cmd.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[1].1.contains(&"review".to_string()));
+        assert!(calls[1].1.contains(&"--approve".to_string()));
+    }
+
+    #[test]
+    fn execute_effect_post_pr_review_no_pr_returns_error() {
+        // RIG-318: no PR → Err (not silent Ok), so the outbox retries.
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        // FakeCommandRunner returns empty stdout → no PR found
+        let effect = make_effect(
+            "eff-ppc-nopr-t",
+            "EFF-PPC-NOPR",
             EffectType::PostPrComment,
             serde_json::json!({ "body": "Review posted.", "working_dir": "/tmp" }),
         );
 
         let result = execute_effect(&effect, &linear, &cmd, &notifier);
         assert!(
-            result.is_ok(),
-            "PostPrComment with no PR should not fail: {result:?}"
+            result.is_err(),
+            "PostPrComment with no PR should return Err for retry"
         );
+    }
+
+    #[test]
+    fn execute_effect_post_pr_review_api_error_returns_error() {
+        // RIG-318: GitHub API error → Err, triggers retry.
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        // gh pr view → PR number
+        cmd.push_success("42");
+        // gh pr review → API failure
+        cmd.push_failure("HTTP 422: Validation Failed");
+
+        let effect = make_effect(
+            "eff-ppc-err-t",
+            "EFF-PPC-ERR",
+            EffectType::PostPrComment,
+            serde_json::json!({
+                "body": "Review findings.",
+                "working_dir": "/tmp",
+                "review_event": "comment",
+            }),
+        );
+
+        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        assert!(result.is_err(), "PostPrComment should fail on API error");
+    }
+
+    #[test]
+    fn execute_effect_post_pr_review_defaults_to_comment_event() {
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        // gh pr view → PR number
+        cmd.push_success("42");
+        // gh pr review → success
+        cmd.push_success("");
+
+        // No review_event in payload → should default to "comment"
+        let effect = make_effect(
+            "eff-ppc-def-t",
+            "EFF-PPC-DEF",
+            EffectType::PostPrComment,
+            serde_json::json!({ "body": "Review text.", "working_dir": "/tmp" }),
+        );
+
+        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        assert!(result.is_ok(), "should succeed: {result:?}");
+
+        let calls = cmd.calls.borrow();
+        assert!(calls[1].1.contains(&"--comment".to_string()));
     }
 
     #[test]

@@ -184,17 +184,24 @@ pub(crate) fn auto_create_pr(
     }
 }
 
-/// Post a comment on a GitHub PR for the given working directory.
+/// Post a pull request review on GitHub using `gh pr review`.
 ///
-/// Finds the PR number from the current branch, then posts the comment body.
-/// Returns Ok(true) if comment was posted, Ok(false) if no PR found, Err on failure.
-// Used by Task 4 effect processor (PostPrComment effect); allow dead_code until effects.rs lands.
-#[allow(dead_code)]
-pub(crate) fn post_pr_comment(
+/// Uses the proper PR review endpoint (not issue comments), so the review appears
+/// in the "Reviews" section on GitHub. The `review_event` parameter controls the
+/// review type: "comment", "approve", or "request-changes".
+///
+/// Returns `Ok(())` on success. Returns `Err` if:
+/// - No PR is found for the current branch (caller should retry — PR may not exist yet)
+/// - The `gh pr review` command fails (API error, auth issue, etc.)
+///
+/// RIG-318: replaces the old `post_pr_comment` which used `gh pr comment` (issue
+/// comment endpoint), causing reviews to silently not appear in GitHub's Reviews tab.
+pub(crate) fn post_pr_review(
     cmd: &dyn CommandRunner,
     working_dir: &str,
-    comment_body: &str,
-) -> Result<bool> {
+    review_body: &str,
+    review_event: &str,
+) -> Result<()> {
     let working_dir = resolve_home(working_dir);
 
     // Find PR number for the current branch
@@ -206,31 +213,41 @@ pub(crate) fn post_pr_comment(
         )
         .context("gh pr view")?;
 
-    if !pr_output.success {
-        return Ok(false);
+    if !pr_output.success || pr_output.stdout_str().is_empty() {
+        return Err(anyhow::anyhow!(
+            "no PR found for branch in {}: {}",
+            working_dir.display(),
+            pr_output.stderr_str()
+        ));
     }
 
     let pr_num = pr_output.stdout_str();
-    if pr_num.is_empty() {
-        return Ok(false);
-    }
 
-    // Post comment
+    // Map review_event to gh pr review flags
+    let event_flag = match review_event {
+        "approve" => "--approve",
+        "request-changes" => "--request-changes",
+        _ => "--comment", // default: COMMENT
+    };
+
+    // Post review using `gh pr review` — this hits the correct GitHub PR reviews API
     let result = cmd
         .run(
             "gh",
-            &["pr", "comment", &pr_num, "--body", comment_body],
+            &["pr", "review", &pr_num, event_flag, "--body", review_body],
             Some(&working_dir),
         )
-        .context("gh pr comment")?;
+        .context("gh pr review")?;
 
     if !result.success {
-        let stderr = result.stderr_str();
-        eprintln!("post_pr_comment: gh pr comment failed: {stderr}");
-        return Ok(false);
+        return Err(anyhow::anyhow!(
+            "gh pr review failed for PR #{pr_num}: {}",
+            result.stderr_str()
+        ));
     }
 
-    Ok(true)
+    eprintln!("[pr] posted {review_event} review on PR #{pr_num}");
+    Ok(())
 }
 
 /// Check the latest review state on the open PR for a given issue.
@@ -416,36 +433,92 @@ mod tests {
         );
     }
 
-    // ─── post_pr_comment ─────────────────────────────────────────────────
+    // ─── post_pr_review (RIG-318) ─────────────────────────────────────────
 
     #[test]
-    fn post_pr_comment_success() {
+    fn post_pr_review_success_comment() {
         let cmd = FakeCommandRunner::new();
         // gh pr view returns PR number
         cmd.push_success("42");
-        // gh pr comment succeeds
+        // gh pr review succeeds
         cmd.push_success("");
 
-        let result = post_pr_comment(&cmd, "/tmp", "Great code!").unwrap();
-        assert!(result, "should return true on success");
+        post_pr_review(&cmd, "/tmp", "Great code!", "comment").unwrap();
 
         let calls = cmd.calls.borrow();
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].0, "gh");
         assert_eq!(calls[1].0, "gh");
-        assert!(calls[1].1.contains(&"comment".to_string()));
+        assert!(calls[1].1.contains(&"review".to_string()));
         assert!(calls[1].1.contains(&"42".to_string()));
+        assert!(calls[1].1.contains(&"--comment".to_string()));
         assert!(calls[1].1.contains(&"Great code!".to_string()));
     }
 
     #[test]
-    fn post_pr_comment_no_pr() {
+    fn post_pr_review_success_approve() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("42");
+        cmd.push_success("");
+
+        post_pr_review(&cmd, "/tmp", "LGTM!", "approve").unwrap();
+
+        let calls = cmd.calls.borrow();
+        assert!(calls[1].1.contains(&"--approve".to_string()));
+    }
+
+    #[test]
+    fn post_pr_review_success_request_changes() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("42");
+        cmd.push_success("");
+
+        post_pr_review(&cmd, "/tmp", "Needs fixes", "request-changes").unwrap();
+
+        let calls = cmd.calls.borrow();
+        assert!(calls[1].1.contains(&"--request-changes".to_string()));
+    }
+
+    #[test]
+    fn post_pr_review_no_pr_returns_error() {
         let cmd = FakeCommandRunner::new();
         // gh pr view fails (no PR for current branch)
         cmd.push_failure("no pull requests found");
 
-        let result = post_pr_comment(&cmd, "/tmp", "Review text").unwrap();
-        assert!(!result, "should return false when no PR found");
+        let result = post_pr_review(&cmd, "/tmp", "Review text", "comment");
+        assert!(result.is_err(), "should return Err when no PR found");
+        assert!(
+            result.unwrap_err().to_string().contains("no PR found"),
+            "error should mention no PR found"
+        );
+    }
+
+    #[test]
+    fn post_pr_review_empty_pr_number_returns_error() {
+        let cmd = FakeCommandRunner::new();
+        // gh pr view returns empty (edge case)
+        cmd.push_success("");
+
+        let result = post_pr_review(&cmd, "/tmp", "Review text", "comment");
+        assert!(result.is_err(), "should return Err on empty PR number");
+    }
+
+    #[test]
+    fn post_pr_review_api_error_returns_error() {
+        let cmd = FakeCommandRunner::new();
+        // gh pr view returns PR number
+        cmd.push_success("42");
+        // gh pr review fails (API error)
+        cmd.push_failure("HTTP 422: Validation Failed");
+
+        let result = post_pr_review(&cmd, "/tmp", "Review text", "comment");
+        assert!(result.is_err(), "should return Err on API failure");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("gh pr review failed"),
+            "error should mention gh pr review failure"
+        );
     }
 
     // ─── RIG-309: get_pr_review_verdict ────────────────────────────────
@@ -515,12 +588,15 @@ mod tests {
     }
 
     #[test]
-    fn post_pr_comment_empty_pr_number() {
+    fn post_pr_review_default_event_is_comment() {
         let cmd = FakeCommandRunner::new();
-        // gh pr view returns empty (edge case)
+        cmd.push_success("42");
         cmd.push_success("");
 
-        let result = post_pr_comment(&cmd, "/tmp", "Review text").unwrap();
-        assert!(!result, "should return false on empty PR number");
+        // Unknown event falls back to --comment
+        post_pr_review(&cmd, "/tmp", "Review text", "unknown_event").unwrap();
+
+        let calls = cmd.calls.borrow();
+        assert!(calls[1].1.contains(&"--comment".to_string()));
     }
 }

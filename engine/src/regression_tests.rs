@@ -6,9 +6,10 @@
 #[cfg(test)]
 mod regression {
     use crate::db::Db;
-    use crate::models::{EffectType, Status};
+    use crate::models::{Effect, EffectStatus, EffectType, Status};
     use crate::pipeline::callback::decide_callback;
-    use crate::traits::fakes::FakeCommandRunner;
+    use crate::pipeline::effects::execute_effect;
+    use crate::traits::fakes::{FakeCommandRunner, FakeLinearApi, FakeNotifier};
 
     // ─── RIG-310 ─────────────────────────────────────────────────────────────
 
@@ -440,6 +441,124 @@ mod regression {
             "RIG-312 regression: analyst DONE must NOT remove unrelated labels; \
              effects={:?}",
             decision.effects
+        );
+    }
+
+    // ─── RIG-318 ─────────────────────────────────────────────────────────────
+
+    /// PostPrComment effect must include `review_event` in payload and the effect
+    /// processor must use `gh pr review` (not `gh pr comment`).
+    ///
+    /// Bug: PostPrComment used `gh pr comment` (issue comment endpoint) instead of
+    /// `gh pr review` (PR review endpoint). Reviews appeared as regular comments
+    /// and never showed in GitHub's Reviews tab. Additionally, "no PR" was treated
+    /// as success (silent data loss).
+    ///
+    /// Fix: (1) reviewer callback includes `review_event` in PostPrComment payload
+    /// (approve/request-changes/comment), (2) effect processor calls `gh pr review`
+    /// with the correct event flag, (3) errors propagate for outbox retry.
+    #[test]
+    fn regression_rig318_reviewer_approved_includes_review_event() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut task = crate::db::make_test_task("20260329-rig318-rev-approve");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-318".to_string();
+        task.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&task).unwrap();
+
+        let cmd = FakeCommandRunner::new();
+
+        let result = "Excellent code.\n\n---REVIEW---\nAll checks pass.\n---END REVIEW---\n\nREVIEW_VERDICT=APPROVED";
+        let decision =
+            decide_callback(&db, &task.id, "reviewer", result, "RIG-318", "/tmp", &cmd).unwrap();
+
+        let pr_comment = decision
+            .effects
+            .iter()
+            .find(|e| e.effect_type == EffectType::PostPrComment);
+        assert!(
+            pr_comment.is_some(),
+            "RIG-318 regression: reviewer APPROVED must produce PostPrComment; effects={:?}",
+            decision.effects
+        );
+
+        let payload = &pr_comment.unwrap().payload;
+        assert_eq!(
+            payload.get("review_event").and_then(|v| v.as_str()),
+            Some("approve"),
+            "RIG-318 regression: APPROVED reviewer must set review_event=approve; payload={payload}"
+        );
+    }
+
+    #[test]
+    fn regression_rig318_reviewer_rejected_includes_review_event() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut task = crate::db::make_test_task("20260329-rig318-rev-reject");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-318".to_string();
+        task.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&task).unwrap();
+
+        let cmd = FakeCommandRunner::new();
+
+        let result = "Issues found.\n\n---REVIEW---\nMissing tests.\n---END REVIEW---\n\nREVIEW_VERDICT=REJECTED";
+        let decision =
+            decide_callback(&db, &task.id, "reviewer", result, "RIG-318", "/tmp", &cmd).unwrap();
+
+        let pr_comment = decision
+            .effects
+            .iter()
+            .find(|e| e.effect_type == EffectType::PostPrComment);
+        assert!(
+            pr_comment.is_some(),
+            "RIG-318 regression: reviewer REJECTED must produce PostPrComment; effects={:?}",
+            decision.effects
+        );
+
+        let payload = &pr_comment.unwrap().payload;
+        assert_eq!(
+            payload.get("review_event").and_then(|v| v.as_str()),
+            Some("request-changes"),
+            "RIG-318 regression: REJECTED reviewer must set review_event=request-changes; payload={payload}"
+        );
+    }
+
+    #[test]
+    fn regression_rig318_post_pr_review_no_pr_fails_for_retry() {
+        // Effect processor must return Err when no PR exists, so the outbox retries.
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+        // FakeCommandRunner with no scripted responses → empty stdout → no PR found
+
+        let effect = Effect {
+            id: 1,
+            dedup_key: "rig318:PostPrComment".to_string(),
+            task_id: "rig318-t".to_string(),
+            issue_id: "RIG-318".to_string(),
+            effect_type: EffectType::PostPrComment,
+            payload: serde_json::json!({
+                "body": "Review findings.",
+                "working_dir": "/tmp",
+                "review_event": "approve",
+            }),
+            blocking: false,
+            status: EffectStatus::Pending,
+            attempts: 0,
+            max_attempts: 5,
+            created_at: "2026-03-29T10:00:00".to_string(),
+            next_retry_at: None,
+            executed_at: None,
+            error: None,
+        };
+
+        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        assert!(
+            result.is_err(),
+            "RIG-318 regression: PostPrComment with no PR must return Err (not silent Ok); \
+             this allows the outbox to retry when the PR hasn't been created yet"
         );
     }
 }
