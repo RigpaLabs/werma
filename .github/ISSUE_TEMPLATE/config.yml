@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussions
+    url: https://github.com/RigpaLabs/werma/discussions
+    about: Ask questions, share ideas, or show what you've built with Werma
+  - name: Documentation
+    url: https://github.com/RigpaLabs/werma#readme
+    about: Check the README before filing an issue
