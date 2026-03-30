@@ -418,6 +418,25 @@ pub fn decide_callback(
             }
         }
 
+        // RIG-333: Store reviewer's feedback in the reviewer task's handoff_content
+        // so the next reviewer (after engineer fixes) can see what was flagged.
+        if stage == "reviewer" {
+            let reviewer_feedback = super::super::verdict::extract_rejection_feedback(result);
+            if !reviewer_feedback.is_empty() {
+                let handoff = format!(
+                    "## Previous Review (REVIEW_VERDICT={verdict})\n\n{feedback}",
+                    verdict = verdict_str.to_uppercase(),
+                    feedback = truncate_lines(&reviewer_feedback, 150),
+                );
+                if let Err(e) = db.update_task_field(task_id, "handoff_content", &handoff) {
+                    eprintln!(
+                        "[CALLBACK] {linear_issue_id}: failed to store reviewer handoff \
+                         for task {task_id}: {e}"
+                    );
+                }
+            }
+        }
+
         // Queue the callback summary comment.
         let comment = format_callback_comment(
             task_id,
@@ -925,6 +944,37 @@ mod tests {
                 .any(|e| e.effect_type == EffectType::CreatePr),
             "engineer DONE with PR_URL must not emit CreatePr, got: {:?}",
             decision.effects
+        );
+    }
+
+    /// RIG-333: Reviewer callback stores feedback in the reviewer task's handoff_content.
+    #[test]
+    fn decide_reviewer_stores_handoff_content() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "DECIDE-333";
+        let task_id = "decide-333-r";
+        insert_reviewer_task(&db, task_id, issue_id);
+
+        let result =
+            "## Review\n- blocker: missing tests\n- nit: typo in docs\n\nREVIEW_VERDICT=REJECTED";
+
+        decide_callback(&db, task_id, "reviewer", result, issue_id, "/tmp", &cmd).unwrap();
+
+        // Verify the reviewer task's handoff_content was updated
+        let tasks = db
+            .tasks_by_linear_issue(issue_id, Some("reviewer"), false)
+            .unwrap();
+        let reviewer_task = tasks.iter().find(|t| t.id == task_id).unwrap();
+        assert!(
+            reviewer_task.handoff_content.contains("Previous Review"),
+            "reviewer task handoff should contain review summary, got: {}",
+            reviewer_task.handoff_content
+        );
+        assert!(
+            reviewer_task.handoff_content.contains("REJECTED"),
+            "reviewer task handoff should contain verdict, got: {}",
+            reviewer_task.handoff_content
         );
     }
 }

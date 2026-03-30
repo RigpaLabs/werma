@@ -7,6 +7,8 @@ The issue context is provided above in the ---ISSUE--- block.
 
 {linear_comments}
 
+{previous_review}
+
 ## FIRST: Invoke the Code Review skill
 Before starting the review, invoke the `/code-review` skill using the Skill tool (skill: "code-review:code-review"). This loads the full review checklist and standards you MUST follow.
 

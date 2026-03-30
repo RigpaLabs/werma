@@ -64,6 +64,14 @@ pub(super) fn build_next_stage_task(
         .effective_model(estimate, review_round)
         .to_string();
 
+    // RIG-333: For reviewer stage, look up previous reviewer's handoff_content
+    // to inject context about what was flagged in prior review rounds.
+    let previous_review = if next_stage == "reviewer" {
+        lookup_previous_reviewer_handoff(db, linear_issue_id)
+    } else {
+        None
+    };
+
     // Build the prompt without issue metadata (no Linear API call).
     let prompt = build_handoff_prompt(
         config,
@@ -73,6 +81,7 @@ pub(super) fn build_next_stage_task(
         "", // issue_title: unknown without Linear API call
         "", // issue_description: unknown without Linear API call
         previous_output,
+        previous_review.as_deref(),
     );
 
     let pr_section = pr_url.map(|url| format!("PR: {url}\n")).unwrap_or_default();
@@ -213,6 +222,7 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         &issue_title,
         &issue_description,
         previous_output,
+        None, // previous_review: not available in legacy create path
     );
 
     let logs_dir = match p.logs_dir {
@@ -290,6 +300,7 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
 }
 
 /// Build the stage prompt for a spawned task (handoff context).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_handoff_prompt(
     config: &PipelineConfig,
     next_stage: &str,
@@ -298,6 +309,7 @@ pub(super) fn build_handoff_prompt(
     issue_title: &str,
     issue_description: &str,
     previous_output: &str,
+    previous_review: Option<&str>,
 ) -> String {
     let stage_cfg = match config.stage(next_stage) {
         Some(s) => s,
@@ -337,6 +349,10 @@ pub(super) fn build_handoff_prompt(
         "rejection_feedback".to_string(),
         feedback.clone().unwrap_or_default(),
     );
+    runtime.insert(
+        "previous_review".to_string(),
+        previous_review.unwrap_or_default().to_string(),
+    );
     runtime.insert("working_dir".to_string(), String::new());
 
     let vars = build_vars(&config.templates, &runtime);
@@ -364,6 +380,31 @@ pub(super) fn build_handoff_prompt(
     }
 
     rendered
+}
+
+/// RIG-333: Look up the most recent completed reviewer task for an issue
+/// and return its handoff_content (which contains the review summary)
+/// wrapped with re-review instructions.
+fn lookup_previous_reviewer_handoff(db: &Db, linear_issue_id: &str) -> Option<String> {
+    let reviewer_tasks = db
+        .tasks_by_linear_issue(linear_issue_id, Some("reviewer"), false)
+        .ok()?;
+
+    // tasks_by_linear_issue returns ordered by created_at DESC.
+    // Find the most recent completed reviewer task with non-empty handoff_content.
+    let handoff = reviewer_tasks
+        .into_iter()
+        .filter(|t| t.status == crate::models::Status::Completed)
+        .find(|t| !t.handoff_content.is_empty())
+        .map(|t| t.handoff_content)?;
+
+    Some(format!(
+        "## Re-Review Context\n\n\
+         This is a **re-review** — a previous reviewer flagged issues that the engineer has \
+         attempted to fix. Your priority is to verify the previously flagged issues are resolved, \
+         then do a light pass for any new issues introduced by the fix.\n\n\
+         {handoff}"
+    ))
 }
 
 #[cfg(test)]
@@ -530,6 +571,7 @@ mod tests {
             "Test Issue Title",
             "Test description",
             "spec output",
+            None,
         );
         assert!(prompt.contains("issue-123"));
     }
@@ -547,6 +589,7 @@ mod tests {
             "Title",
             "Desc",
             reviewer_output,
+            None,
         );
         assert!(
             prompt.contains("blocker")
@@ -573,6 +616,7 @@ stages:
             "Title",
             "Desc",
             "prev output",
+            None,
         );
         assert!(prompt.contains("RIG-99"));
         assert!(prompt.contains("nonexistent"));
@@ -590,6 +634,7 @@ stages:
                 "QA Failed Issue",
                 "Description",
                 "QA found bugs\nVERDICT=REJECTED",
+                None,
             );
             assert!(
                 prompt.contains("issue-456")
@@ -760,5 +805,109 @@ stages:
         assert_eq!(reviewer.pipeline_stage, "reviewer");
         assert_eq!(reviewer.linear_issue_id, "RIG-232");
         assert_eq!(reviewer.status, Status::Pending);
+    }
+
+    /// RIG-333: build_handoff_prompt for reviewer includes previous review context.
+    #[test]
+    fn build_handoff_prompt_reviewer_with_previous_review() {
+        let config = test_config();
+        let previous_review = "## Re-Review Context\n\n## Previous Review (REVIEW_VERDICT=REJECTED)\n\n- blocker: missing tests\n- blocker: SQL injection";
+        let prompt = build_handoff_prompt(
+            &config,
+            "reviewer",
+            "engineer",
+            "RIG-333",
+            "Title",
+            "Desc",
+            "engineer output",
+            Some(previous_review),
+        );
+        assert!(
+            prompt.contains("Re-Review Context"),
+            "reviewer prompt should contain re-review context, got:\n{prompt}"
+        );
+        assert!(
+            prompt.contains("missing tests"),
+            "reviewer prompt should contain previous review issues, got:\n{prompt}"
+        );
+    }
+
+    /// RIG-333: build_handoff_prompt for reviewer without previous review (round 1).
+    #[test]
+    fn build_handoff_prompt_reviewer_no_previous_review() {
+        let config = test_config();
+        let prompt = build_handoff_prompt(
+            &config,
+            "reviewer",
+            "engineer",
+            "RIG-333",
+            "Title",
+            "Desc",
+            "engineer output",
+            None,
+        );
+        assert!(
+            !prompt.contains("Re-Review"),
+            "first review should not contain re-review context"
+        );
+    }
+
+    /// RIG-333: lookup_previous_reviewer_handoff returns None when no previous reviewer.
+    #[test]
+    fn lookup_previous_reviewer_handoff_empty() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let result = lookup_previous_reviewer_handoff(&db, "RIG-333");
+        assert!(result.is_none());
+    }
+
+    /// RIG-333: lookup_previous_reviewer_handoff returns handoff from completed reviewer.
+    #[test]
+    fn lookup_previous_reviewer_handoff_found() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let issue_id = "RIG-333-LOOKUP";
+
+        // Insert a completed reviewer task with handoff_content
+        let mut t = crate::db::make_test_task("333-rev-1");
+        t.status = Status::Completed;
+        t.linear_issue_id = issue_id.to_string();
+        t.pipeline_stage = "reviewer".to_string();
+        t.task_type = "pipeline-reviewer".to_string();
+        t.handoff_content =
+            "## Previous Review (REVIEW_VERDICT=REJECTED)\n\n- blocker: no tests".to_string();
+        db.insert_task(&t).unwrap();
+
+        let result = lookup_previous_reviewer_handoff(&db, issue_id);
+        assert!(result.is_some(), "should find previous reviewer handoff");
+        let content = result.unwrap();
+        assert!(
+            content.contains("Re-Review Context"),
+            "should wrap with re-review instructions"
+        );
+        assert!(
+            content.contains("no tests"),
+            "should contain the original review feedback"
+        );
+    }
+
+    /// RIG-333: lookup skips reviewer tasks without handoff_content.
+    #[test]
+    fn lookup_previous_reviewer_handoff_skips_empty() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let issue_id = "RIG-333-SKIP";
+
+        // Completed reviewer with empty handoff (e.g. approved on first try)
+        let mut t = crate::db::make_test_task("333-rev-empty");
+        t.status = Status::Completed;
+        t.linear_issue_id = issue_id.to_string();
+        t.pipeline_stage = "reviewer".to_string();
+        t.task_type = "pipeline-reviewer".to_string();
+        t.handoff_content = String::new();
+        db.insert_task(&t).unwrap();
+
+        let result = lookup_previous_reviewer_handoff(&db, issue_id);
+        assert!(
+            result.is_none(),
+            "should return None when reviewer has no handoff"
+        );
     }
 }
