@@ -57,6 +57,10 @@ pub enum Commands {
         /// Pipeline stage
         #[arg(long)]
         stage: Option<String>,
+
+        /// Agent runtime: claude-code|codex (default: claude-code)
+        #[arg(long, default_value = "claude-code")]
+        runtime: String,
     },
 
     /// List tasks (alias: ls)

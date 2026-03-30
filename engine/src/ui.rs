@@ -593,6 +593,7 @@ mod tests {
             cost_usd: None,
             turns_used: 0,
             handoff_content: String::new(),
+            runtime: crate::models::AgentRuntime::default(),
         }];
 
         let table = task_list_table(&tasks, 100);

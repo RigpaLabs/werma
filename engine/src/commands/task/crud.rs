@@ -20,10 +20,12 @@ pub struct AddParams {
     pub context: Option<String>,
     pub linear: Option<String>,
     pub stage: Option<String>,
+    pub runtime: String,
 }
 
 pub fn cmd_add(db: &Db, p: AddParams) -> Result<()> {
     let id = db.next_task_id()?;
+    let runtime: crate::models::AgentRuntime = p.runtime.parse()?;
     let max_turns = p.turns.unwrap_or_else(|| default_turns(&p.task_type));
     let has_output = p.output.is_some();
     let allowed_tools = p
@@ -70,12 +72,18 @@ pub fn cmd_add(db: &Db, p: AddParams) -> Result<()> {
         cost_usd: None,
         turns_used: 0,
         handoff_content: String::new(),
+        runtime,
     };
 
     db.insert_task(&task)?;
 
+    let runtime_suffix = if runtime != crate::models::AgentRuntime::ClaudeCode {
+        format!(", {runtime}")
+    } else {
+        String::new()
+    };
     println!(
-        "added: {id} ({}, p{}, {}, {max_turns}t)",
+        "added: {id} ({}, p{}, {}, {max_turns}t{runtime_suffix})",
         p.task_type, p.priority, p.model
     );
     if !output_path.is_empty() {
@@ -131,6 +139,9 @@ pub fn cmd_view(db: &Db, id: &str) -> Result<()> {
         task.model,
         runner::model_flag(&task.model)
     );
+    if task.runtime != crate::models::AgentRuntime::ClaudeCode {
+        println!("  runtime:     {}", task.runtime);
+    }
     println!("  max_turns:   {}", task.max_turns);
     println!("  working_dir: {}", task.working_dir);
     println!("  created_at:  {}", task.created_at);
@@ -262,6 +273,7 @@ mod tests {
                 context: None,
                 linear: None,
                 stage: None,
+                runtime: "claude-code".into(),
             },
         )
         .unwrap();
@@ -291,6 +303,7 @@ mod tests {
                 context: Some("file1.md,file2.md".into()),
                 linear: Some("RIG-42".into()),
                 stage: Some("engineer".into()),
+                runtime: "claude-code".into(),
             },
         )
         .unwrap();

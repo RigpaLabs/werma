@@ -2,6 +2,38 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+/// Agent execution runtime: Claude Code (default) or OpenAI Codex CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentRuntime {
+    #[default]
+    ClaudeCode,
+    Codex,
+}
+
+impl fmt::Display for AgentRuntime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ClaudeCode => write!(f, "claude-code"),
+            Self::Codex => write!(f, "codex"),
+        }
+    }
+}
+
+impl FromStr for AgentRuntime {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "claude-code" | "claude" => Ok(Self::ClaudeCode),
+            "codex" => Ok(Self::Codex),
+            _ => Err(anyhow::anyhow!(
+                "unknown runtime: {s} (expected claude-code or codex)"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -88,6 +120,9 @@ pub struct Task {
     /// Handoff content stored in DB instead of filesystem (pipeline tasks).
     #[serde(default)]
     pub handoff_content: String,
+    /// Agent execution runtime (claude-code or codex). Default: claude-code.
+    #[serde(default)]
+    pub runtime: AgentRuntime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +260,48 @@ pub struct DailyUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_display() {
+        assert_eq!(AgentRuntime::ClaudeCode.to_string(), "claude-code");
+        assert_eq!(AgentRuntime::Codex.to_string(), "codex");
+    }
+
+    #[test]
+    fn runtime_from_str_roundtrip() {
+        for rt in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+            let s = rt.to_string();
+            let parsed: AgentRuntime = s.parse().unwrap();
+            assert_eq!(parsed, rt);
+        }
+        // "claude" alias
+        let parsed: AgentRuntime = "claude".parse().unwrap();
+        assert_eq!(parsed, AgentRuntime::ClaudeCode);
+    }
+
+    #[test]
+    fn runtime_from_str_invalid() {
+        let result: Result<AgentRuntime, _> = "gemini".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn runtime_serde_roundtrip() {
+        let rt = AgentRuntime::Codex;
+        let json = serde_json::to_string(&rt).unwrap();
+        assert_eq!(json, "\"codex\"");
+        let parsed: AgentRuntime = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, rt);
+
+        let rt2 = AgentRuntime::ClaudeCode;
+        let json2 = serde_json::to_string(&rt2).unwrap();
+        assert_eq!(json2, "\"claude-code\"");
+    }
+
+    #[test]
+    fn runtime_default_is_claude_code() {
+        assert_eq!(AgentRuntime::default(), AgentRuntime::ClaudeCode);
+    }
 
     #[test]
     fn status_display() {

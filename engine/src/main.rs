@@ -118,6 +118,7 @@ fn main() -> anyhow::Result<()> {
             context,
             linear,
             stage,
+            runtime,
         } => {
             let db = open_db()?;
             commands::task::cmd_add(
@@ -135,6 +136,7 @@ fn main() -> anyhow::Result<()> {
                     context,
                     linear,
                     stage,
+                    runtime,
                 },
             )?;
         }
@@ -455,6 +457,26 @@ mod tests {
                     assert_eq!(stage, Some("engineer".into()));
                     assert_eq!(output, Some("/tmp/out.md".into()));
                     assert_eq!(dir, Some("/tmp/work".into()));
+                }
+                other => panic!("expected Add, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_add_with_runtime() {
+            match parse(&["add", "test prompt", "--runtime", "codex"]) {
+                Commands::Add { runtime, .. } => {
+                    assert_eq!(runtime, "codex");
+                }
+                other => panic!("expected Add, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_add_default_runtime() {
+            match parse(&["add", "test prompt"]) {
+                Commands::Add { runtime, .. } => {
+                    assert_eq!(runtime, "claude-code");
                 }
                 other => panic!("expected Add, got {other:?}"),
             }

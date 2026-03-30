@@ -110,6 +110,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             cost_usd: None,
             turns_used: 0,
             handoff_content: String::new(),
+            runtime: crate::models::AgentRuntime::default(),
         };
 
         db.insert_task(&task)?;
@@ -330,6 +331,9 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     cost_usd: None,
                     turns_used: 0,
                     handoff_content: String::new(),
+                    runtime: stage_cfg
+                        .runtime
+                        .unwrap_or(crate::models::AgentRuntime::ClaudeCode),
                 };
 
                 db.insert_task(&task)?;
@@ -553,6 +557,9 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 cost_usd: None,
                 turns_used: 0,
                 handoff_content: String::new(),
+                runtime: stage_cfg
+                    .runtime
+                    .unwrap_or(crate::models::AgentRuntime::ClaudeCode),
             };
 
             db.insert_task(&task)?;

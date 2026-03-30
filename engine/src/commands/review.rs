@@ -153,6 +153,7 @@ pub fn cmd_review(
         cost_usd: None,
         turns_used: 0,
         handoff_content: String::new(),
+        runtime: crate::models::AgentRuntime::default(),
     };
 
     db.insert_task(&task)?;

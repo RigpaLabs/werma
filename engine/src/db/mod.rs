@@ -25,6 +25,7 @@ const MIGRATION_007_SQL: &str =
 const MIGRATION_008_SQL: &str = include_str!("../../migrations/008_retry.sql");
 const MIGRATION_009_SQL: &str = include_str!("../../migrations/009_cost_tracking.sql");
 const MIGRATION_010_SQL: &str = include_str!("../../migrations/010_effects_and_handoff.sql");
+const MIGRATION_011_SQL: &str = include_str!("../../migrations/011_runtime.sql");
 
 pub struct Db {
     pub(super) conn: Connection,
@@ -134,6 +135,13 @@ impl Db {
                 return Err(e).context("migration 010_effects_and_handoff");
             }
         }
+        // 011: add runtime column for multi-runtime support (claude-code, codex).
+        if let Err(e) = self.conn.execute_batch(MIGRATION_011_SQL) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(e).context("migration 011_runtime");
+            }
+        }
         Ok(())
     }
 
@@ -197,6 +205,11 @@ pub(super) fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         cost_usd: row.get(23).ok().flatten(),
         turns_used: row.get(24).unwrap_or(0),
         handoff_content: row.get(25).unwrap_or_default(),
+        runtime: row
+            .get::<_, String>(26)
+            .unwrap_or_else(|_| "claude-code".to_string())
+            .parse()
+            .unwrap_or_default(),
     })
 }
 
@@ -230,6 +243,7 @@ pub(crate) fn make_test_task(id: &str) -> Task {
         cost_usd: None,
         turns_used: 0,
         handoff_content: String::new(),
+        runtime: crate::models::AgentRuntime::default(),
     }
 }
 

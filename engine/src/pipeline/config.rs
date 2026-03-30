@@ -1,6 +1,8 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
+use crate::models::AgentRuntime;
+
 /// Default global max concurrent pipeline tasks.
 pub const DEFAULT_GLOBAL_MAX_CONCURRENT: u32 = 5;
 pub const DEFAULT_LAUNCH_STAGGER_SECS: u32 = 4;
@@ -84,6 +86,9 @@ pub struct StageConfig {
     /// SP threshold: if task estimate <= this, use light_model. Default: 2.
     #[serde(default)]
     pub light_threshold: Option<u32>,
+    /// Agent runtime for this stage (claude-code or codex). Absent = use default (claude-code).
+    #[serde(default)]
+    pub runtime: Option<AgentRuntime>,
 }
 
 /// Action to take when a pipeline stage picks up an issue.
@@ -567,6 +572,7 @@ stages:
         assert!(stage.max_turns.is_none());
         assert!(stage.light_model.is_none());
         assert!(stage.light_threshold.is_none());
+        assert!(stage.runtime.is_none());
     }
 
     #[test]
@@ -646,5 +652,27 @@ stages:
             config.stage(spawn_name).is_none(),
             "spawn target should not exist in this config"
         );
+    }
+
+    #[test]
+    fn runtime_parsed_from_yaml() {
+        let yaml = r#"
+pipeline: test
+stages:
+  codex_stage:
+    agent: pipeline-engineer
+    model: o3
+    runtime: codex
+  default_stage:
+    agent: pipeline-reviewer
+    model: sonnet
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+
+        let codex = config.stage("codex_stage").unwrap();
+        assert_eq!(codex.runtime, Some(AgentRuntime::Codex));
+
+        let default = config.stage("default_stage").unwrap();
+        assert!(default.runtime.is_none());
     }
 }

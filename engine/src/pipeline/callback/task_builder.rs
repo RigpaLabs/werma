@@ -105,7 +105,7 @@ pub(super) fn build_next_stage_task(
         working_dir.to_string()
     };
 
-    use crate::models::{Status, Task};
+    use crate::models::{AgentRuntime, Status, Task};
     let task = Task {
         id: task_id,
         status: Status::Pending,
@@ -133,6 +133,7 @@ pub(super) fn build_next_stage_task(
         cost_usd: None,
         turns_used: 0,
         handoff_content,
+        runtime: stage_cfg.runtime.unwrap_or(AgentRuntime::ClaudeCode),
     };
 
     Ok(Some(task))
@@ -260,7 +261,7 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         working_dir.to_string()
     };
 
-    use crate::models::{Status, Task};
+    use crate::models::{AgentRuntime, Status, Task};
     let task = Task {
         id: task_id.clone(),
         status: Status::Pending,
@@ -288,6 +289,7 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         cost_usd: None,
         turns_used: 0,
         handoff_content: String::new(),
+        runtime: stage_cfg.runtime.unwrap_or(AgentRuntime::ClaudeCode),
     };
 
     db.insert_task(&task)?;
@@ -449,6 +451,7 @@ mod tests {
             cost_usd: None,
             turns_used: 0,
             handoff_content: String::new(),
+            runtime: crate::models::AgentRuntime::default(),
         };
         db.insert_task(&analyst_task).unwrap();
 
