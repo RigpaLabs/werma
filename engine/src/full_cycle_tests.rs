@@ -11,10 +11,10 @@ mod tests {
     use crate::pipeline::loader::load_from_str;
     use crate::traits::fakes::{FakeCommandRunner, FakeNotifier, StatefulFakeLinearApi};
 
-    /// Ensure `~/projects/rigpa/werma` exists for validate_working_dir on CI.
+    /// Ensure `~/projects/werma` exists for validate_working_dir on CI.
     fn ensure_working_dir() {
         if let Some(home) = dirs::home_dir() {
-            let dir = home.join("projects/rigpa/werma");
+            let dir = home.join("projects/werma");
             let _ = std::fs::create_dir_all(dir);
         }
     }
@@ -74,7 +74,7 @@ mod tests {
             "analyst",
             analyst_output,
             "RIG-229",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -128,7 +128,7 @@ mod tests {
             "engineer",
             engineer_output,
             "RIG-229",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -177,7 +177,7 @@ mod tests {
             "reviewer",
             reviewer_output,
             "RIG-229",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -238,7 +238,7 @@ mod tests {
             "engineer",
             engineer_output,
             "RIG-230",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         );
         assert!(ok.is_ok(), "callback should always succeed: {ok:?}");
@@ -290,7 +290,7 @@ mod tests {
             "engineer",
             engineer_output,
             "RIG-230",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         );
         assert!(
@@ -449,7 +449,7 @@ mod tests {
             "reviewer",
             reviewer_output,
             "RIG-231c",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();

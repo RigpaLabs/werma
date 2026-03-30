@@ -30,7 +30,7 @@ pub(crate) fn truncate_lines(text: &str, max: usize) -> String {
 pub(crate) fn infer_working_dir_from_issue(db: &Db, linear_issue_id: &str) -> String {
     if let Ok(tasks) = db.tasks_by_linear_issue(linear_issue_id, None, false) {
         for task in &tasks {
-            if !task.working_dir.is_empty() && task.working_dir != "~/projects/rigpa/werma" {
+            if !task.working_dir.is_empty() && task.working_dir != "~/projects/werma" {
                 return task.working_dir.clone();
             }
         }
@@ -38,7 +38,7 @@ pub(crate) fn infer_working_dir_from_issue(db: &Db, linear_issue_id: &str) -> St
             return task.working_dir.clone();
         }
     }
-    "~/projects/rigpa/werma".to_string()
+    "~/projects/werma".to_string()
 }
 
 #[cfg(test)]
@@ -103,7 +103,7 @@ mod tests {
             task_type: "pipeline-analyst".to_string(),
             prompt: "test".to_string(),
             output_path: String::new(),
-            working_dir: "~/projects/rigpa/werma".to_string(),
+            working_dir: "~/projects/werma".to_string(),
             model: "opus".to_string(),
             max_turns: 20,
             allowed_tools: String::new(),
@@ -125,9 +125,9 @@ mod tests {
         db.insert_task(&task).unwrap();
 
         let dir = infer_working_dir_from_issue(&db, "issue-xyz");
-        assert_eq!(dir, "~/projects/rigpa/werma");
+        assert_eq!(dir, "~/projects/werma");
 
         let dir = infer_working_dir_from_issue(&db, "unknown-issue");
-        assert_eq!(dir, "~/projects/rigpa/werma");
+        assert_eq!(dir, "~/projects/werma");
     }
 }

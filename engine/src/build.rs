@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 
-use crate::update::{GITHUB_REPO, current_target, github_token};
+use crate::update::{current_target, github_repo, github_token};
 
 /// A GitHub release that is missing the platform binary asset.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,7 +18,8 @@ pub(crate) fn find_pending_releases(token: &str) -> Result<Vec<PendingRelease>> 
     }
     let asset_name = format!("werma-{target}.tar.gz");
 
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=20");
+    let repo = github_repo();
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=20");
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("werma-builder")
@@ -169,6 +170,7 @@ pub fn build() -> Result<()> {
 
         // Upload via gh CLI
         println!("uploading to {}...", release.tag);
+        let repo = github_repo();
         let upload_status = std::process::Command::new("gh")
             .args([
                 "release",
@@ -176,7 +178,7 @@ pub fn build() -> Result<()> {
                 &release.tag,
                 &archive_path.to_string_lossy(),
                 "--repo",
-                GITHUB_REPO,
+                &repo,
                 "--clobber",
             ])
             .status()
@@ -199,7 +201,7 @@ fn find_engine_dir() -> Result<std::path::PathBuf> {
     let repo = std::env::var("WERMA_REPO").unwrap_or_else(|_| {
         dirs::home_dir()
             .map(|h| {
-                h.join("projects/rigpa/werma")
+                h.join("projects/werma")
                     .to_string_lossy()
                     .into_owned()
             })

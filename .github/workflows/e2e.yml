@@ -20,7 +20,7 @@ jobs:
 
       - name: Configure git identity
         run: |
-          git config --global user.email "e2e@rigpalabs.dev"
+          git config --global user.email "werma-e2e@users.noreply.github.com"
           git config --global user.name "Werma E2E"
 
       - name: Run e2e tests

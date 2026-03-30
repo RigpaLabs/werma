@@ -195,7 +195,11 @@ jobs:
         run: |
           TAG="${{ steps.bump.outputs.tag }}"
           ISSUES="${{ steps.linear_issues.outputs.issues }}"
-          TEAM_ID="d199cc43-40ef-4e63-9caa-467506b781f6"
+          TEAM_ID="${{ vars.LINEAR_TEAM_ID }}"
+          if [ -z "$TEAM_ID" ]; then
+            echo "LINEAR_TEAM_ID repository variable not set, skipping Linear labeling"
+            exit 0
+          fi
 
           if [ -z "$LINEAR_API_KEY" ]; then
             echo "LINEAR_API_KEY not set, skipping Linear labeling"

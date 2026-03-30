@@ -4,7 +4,7 @@
 //! Runtime: requires `WERMA_E2E=1` environment variable
 //! Execution: `WERMA_E2E=1 cargo test --features e2e -- --test-threads=1`
 //!
-//! These tests create real PRs in RigpaLabs/werma-test and real TEST-XX issues
+//! These tests create real PRs in the test repo and real TEST-XX issues
 //! in Linear. All resources are cleaned up via scopeguard even on panic.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
@@ -21,10 +21,12 @@ use crate::traits::RealCommandRunner;
 fn e2e_create_pr_full_cycle() {
     e2e_preflight();
 
+    let repo = test_repo();
     let (_tmp, checkout) = clone_test_repo().expect("clone failed");
     let branch = unique_name("e2e-pr-cycle");
 
     let branch_clone = branch.clone();
+    let repo_clone = repo.clone();
 
     create_test_branch(&checkout, &branch).expect("branch creation failed");
 
@@ -36,13 +38,13 @@ fn e2e_create_pr_full_cycle() {
             "close",
             "--delete-branch",
             "-R",
-            TEST_REPO,
+            &repo_clone,
             &branch_clone,
         ]);
         // Also try to delete the branch directly (belt and suspenders)
         let _ = run_gh(&[
             "api",
-            &format!("repos/{TEST_REPO}/git/refs/heads/{branch_clone}"),
+            &format!("repos/{repo_clone}/git/refs/heads/{branch_clone}"),
             "-X",
             "DELETE",
         ]);
@@ -71,16 +73,8 @@ fn e2e_create_pr_full_cycle() {
     let pr_num = pr_number_from_url(&url).unwrap_or_else(|| url.clone());
 
     // Verify PR actually exists on GitHub
-    let pr_json = run_gh(&[
-        "pr",
-        "view",
-        &pr_num,
-        "-R",
-        TEST_REPO,
-        "--json",
-        "state,title",
-    ])
-    .expect("PR should exist on GitHub");
+    let pr_json = run_gh(&["pr", "view", &pr_num, "-R", &repo, "--json", "state,title"])
+        .expect("PR should exist on GitHub");
     assert!(
         pr_json.contains("OPEN"),
         "PR should be in OPEN state, got: {pr_json}"
@@ -95,12 +89,14 @@ fn e2e_create_pr_full_cycle() {
 fn e2e_create_pr_wrong_dir() {
     e2e_preflight();
 
+    let repo = test_repo();
     let (tmp, checkout) = clone_test_repo().expect("clone failed");
     let branch = unique_name("e2e-pr-wrongdir");
 
     create_test_branch(&checkout, &branch).expect("branch creation failed");
 
     let branch_clone = branch.clone();
+    let repo_clone = repo.clone();
     let _cleanup = scopeguard::guard((), |_| {
         // Clean up the remote branch (no PR expected, but be safe)
         let _ = run_gh(&[
@@ -108,12 +104,12 @@ fn e2e_create_pr_wrong_dir() {
             "close",
             "--delete-branch",
             "-R",
-            TEST_REPO,
+            &repo_clone,
             &branch_clone,
         ]);
         let _ = run_gh(&[
             "api",
-            &format!("repos/{TEST_REPO}/git/refs/heads/{branch_clone}"),
+            &format!("repos/{repo_clone}/git/refs/heads/{branch_clone}"),
             "-X",
             "DELETE",
         ]);
@@ -154,24 +150,26 @@ fn e2e_create_pr_wrong_dir() {
 fn e2e_post_pr_review() {
     e2e_preflight();
 
+    let repo = test_repo();
     let (_tmp, checkout) = clone_test_repo().expect("clone failed");
     let branch = unique_name("e2e-pr-review");
 
     create_test_branch(&checkout, &branch).expect("branch creation failed");
 
     let branch_clone = branch.clone();
+    let repo_clone = repo.clone();
     let _cleanup = scopeguard::guard((), |_| {
         let _ = run_gh(&[
             "pr",
             "close",
             "--delete-branch",
             "-R",
-            TEST_REPO,
+            &repo_clone,
             &branch_clone,
         ]);
         let _ = run_gh(&[
             "api",
-            &format!("repos/{TEST_REPO}/git/refs/heads/{branch_clone}"),
+            &format!("repos/{repo_clone}/git/refs/heads/{branch_clone}"),
             "-X",
             "DELETE",
         ]);
@@ -182,7 +180,7 @@ fn e2e_post_pr_review() {
         "pr",
         "create",
         "-R",
-        TEST_REPO,
+        &repo,
         "--title",
         &format!("[E2E] {branch}"),
         "--body",
@@ -203,7 +201,7 @@ fn e2e_post_pr_review() {
         .expect("post_pr_review failed — the RIG-317 bug");
 
     // Verify review is visible on GitHub
-    let reviews_json = run_gh(&["pr", "view", &pr_num, "-R", TEST_REPO, "--json", "reviews"])
+    let reviews_json = run_gh(&["pr", "view", &pr_num, "-R", &repo, "--json", "reviews"])
         .expect("could not fetch PR reviews");
 
     assert!(

@@ -180,6 +180,7 @@ Copy `.env.example` to `~/.werma/.env` and fill in your keys:
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `LINEAR_API_KEY` | For pipeline | Linear API key for issue tracking |
+| `WERMA_LINEAR_WORKSPACE` | No | Linear workspace slug — enables Linear links in auto-created PRs |
 | `SLACK_BOT_TOKEN` | No | Slack bot token for notifications |
 | `GITHUB_TOKEN` | No | GitHub token for self-update / private repos |
 

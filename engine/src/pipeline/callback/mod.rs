@@ -199,7 +199,7 @@ mod tests {
             "engineer",
             result,
             "RIG-232b",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -256,7 +256,7 @@ mod tests {
             "analyst",
             result,
             "RIG-253",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -310,7 +310,7 @@ mod tests {
             "analyst",
             result,
             "RIG-274",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -349,7 +349,7 @@ mod tests {
             "analyst",
             result,
             "RIG-274c",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -386,7 +386,7 @@ mod tests {
             "analyst",
             result,
             "RIG-274b",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -443,7 +443,7 @@ mod tests {
             task_type: "pipeline-reviewer".to_string(),
             prompt: "review issue".to_string(),
             output_path: String::new(),
-            working_dir: "~/projects/rigpa/werma".to_string(),
+            working_dir: "~/projects/werma".to_string(),
             model: "opus".to_string(),
             max_turns: 50,
             allowed_tools: String::new(),
@@ -480,7 +480,7 @@ mod tests {
             "reviewer",
             result,
             "RIG-ESC",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -522,7 +522,7 @@ mod tests {
             task_type: "pipeline-reviewer".to_string(),
             prompt: "review issue".to_string(),
             output_path: String::new(),
-            working_dir: "~/projects/rigpa/werma".to_string(),
+            working_dir: "~/projects/werma".to_string(),
             model: "opus".to_string(),
             max_turns: 50,
             allowed_tools: String::new(),
@@ -551,7 +551,7 @@ mod tests {
             "reviewer",
             result,
             "RIG-UNK",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -583,7 +583,7 @@ mod tests {
             "engineer",
             result,
             "RIG-252a",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -630,7 +630,7 @@ mod tests {
             "engineer",
             result,
             "RIG-252b",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -665,7 +665,7 @@ mod tests {
             "engineer",
             result,
             "RIG-252c",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -713,7 +713,7 @@ mod tests {
             "reviewer",
             result,
             "RIG-202a",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -774,7 +774,7 @@ mod tests {
             "reviewer",
             result,
             "RIG-202b",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -826,7 +826,7 @@ mod tests {
                 "reviewer",
                 result,
                 "RIG-zeroA",
-                "~/projects/rigpa/werma",
+                "~/projects/werma",
                 &cmd,
             )
             .unwrap();

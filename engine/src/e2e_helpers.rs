@@ -14,8 +14,16 @@ use uuid::Uuid;
 
 // ── Constants ────────────────────────────────────────────────────────────
 
-pub const TEST_REPO: &str = "RigpaLabs/werma-test";
-pub const TEST_TEAM_ID: &str = "f81facea-4e3c-4088-962a-711c99db0d6f";
+/// Test GitHub repo — override via `WERMA_TEST_REPO` env var.
+pub fn test_repo() -> String {
+    std::env::var("WERMA_TEST_REPO").unwrap_or_else(|_| "RigpaLabs/werma-test".to_string())
+}
+
+/// Test Linear team ID — override via `WERMA_TEST_TEAM_ID` env var.
+pub fn test_team_id() -> String {
+    std::env::var("WERMA_TEST_TEAM_ID")
+        .unwrap_or_else(|_| "f81facea-4e3c-4088-962a-711c99db0d6f".to_string())
+}
 const LINEAR_API: &str = "https://api.linear.app/graphql";
 
 // ── Preflight ────────────────────────────────────────────────────────────
@@ -90,7 +98,8 @@ pub fn clone_test_repo() -> Result<(tempfile::TempDir, PathBuf)> {
     let tmp = tempfile::tempdir().context("creating tempdir")?;
     let checkout = tmp.path().join("werma-test");
 
-    let url = format!("https://github.com/{TEST_REPO}.git");
+    let repo = test_repo();
+    let url = format!("https://github.com/{repo}.git");
     run_git(
         &["clone", "--depth=1", &url, &checkout.to_string_lossy()],
         tmp.path(),
@@ -185,7 +194,7 @@ pub fn create_test_issue(title: &str) -> Result<(String, String)> {
         }"#,
         &serde_json::json!({
             "title": title,
-            "teamId": TEST_TEAM_ID,
+            "teamId": test_team_id(),
         }),
     )?;
 
@@ -261,7 +270,7 @@ pub fn get_team_states() -> Result<Vec<(String, String)>> {
                 states { nodes { id name } }
             }
         }"#,
-        &serde_json::json!({"teamId": TEST_TEAM_ID}),
+        &serde_json::json!({"teamId": test_team_id()}),
     )?;
 
     let nodes = result["data"]["team"]["states"]["nodes"]
