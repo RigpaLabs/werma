@@ -49,11 +49,11 @@ pub fn model_flag(model: &str) -> &str {
 }
 
 /// Resolve model for Codex runtime.
-/// Claude shorthands (opus/sonnet/haiku) are not valid Codex models — map them to the
-/// default Codex model (`o4-mini`). Explicit Codex model IDs are passed through as-is.
+/// Claude shorthands (opus/sonnet/haiku) are not valid Codex models — return empty
+/// to let Codex CLI use its own default. Explicit Codex model IDs are passed through.
 pub fn codex_model(model: &str) -> &str {
     match model {
-        "opus" | "sonnet" | "haiku" => "o4-mini",
+        "opus" | "sonnet" | "haiku" => "",
         other => other,
     }
 }
@@ -650,10 +650,15 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     SKIP_GIT="--skip-git-repo-check"
 fi
 
+MODEL_FLAG=""
+if [ -n "{model}" ]; then
+    MODEL_FLAG="--model {model}"
+fi
+
 codex exec \
     --sandbox {sandbox} \
     --full-auto \
-    --model {model} \
+    $MODEL_FLAG \
     -o "$RESULT_FILE" \
     $SKIP_GIT{skip_git_check} \
     "$PROMPT" || {{
