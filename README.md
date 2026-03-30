@@ -6,11 +6,38 @@ AI can write code. Werma makes sure it ships.
 
 ![werma st](docs/images/werma-st.svg)
 
-## What It Does
+## What Werma Is Today
+
+Werma is an **early-alpha CLI** built in Rust. It works — we use it daily to ship real code across multiple repositories — but the edges are rough and the API will change.
+
+What it can do right now:
 
 - **Full delivery pipeline** — Linear issue &rarr; analyst &rarr; engineer &rarr; reviewer &rarr; deployer &rarr; done. Each stage is an AI agent running in tmux with appropriate permissions (read-only for review, edit for code, full shell for deploy).
 - **Transactional outbox** — External API calls (Linear, GitHub, Slack) go through a durable outbox with exponential retry and dead-letter queue. No more lost state transitions.
 - **Single binary + SQLite** — No external services, no Docker, no Kubernetes. One Rust binary, one database file. Install and run in 30 seconds.
+
+What you should expect at this stage: breaking changes between versions, incomplete documentation, and workflows tuned to our team's setup. We're not pretending otherwise.
+
+## Why Open Source Now
+
+We open-sourced Werma early because the best way to build developer tools is to build them with developers.
+
+- **Develop in public** — AI agent orchestration is a new problem space. We'd rather iterate in the open, get feedback on real usage, and course-correct early than polish in private and ship something nobody asked for.
+- **Feedback over features** — We have strong opinions about how AI agents should deliver code (pipelines, verdicts, outbox reliability), but we want to stress-test those opinions against teams that aren't us.
+- **Honest engineering** — If something is broken, you can see it. If something is missing, you can ask for it. No marketing layer between the code and the people using it.
+
+## Where Werma Is Going
+
+Werma's north star: **make a single developer as effective as a small team** by handling the delivery pipeline end-to-end.
+
+What that looks like over time:
+
+- **Tracker-agnostic** — Linear today, but the pipeline engine doesn't need to be coupled to any single tracker. GitHub Issues, Jira, and others are on the roadmap.
+- **Wave execution** — Launch a batch of issues as a wave, track them as a unit, and get notified when the wave completes. Parallel delivery across an entire sprint.
+- **Agent evaluation** — Built-in rubrics and golden datasets to measure agent quality, not just whether the task completed.
+- **Self-improving prompts** — Memory and feedback loops so pipeline agents get better at your codebase over time.
+
+None of this is in the codebase yet. It's the direction, not a promise. If any of it excites you, [open an issue](https://github.com/RigpaLabs/werma/issues) or [start a discussion](https://github.com/RigpaLabs/werma/discussions).
 
 ## Install
 
