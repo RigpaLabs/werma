@@ -48,6 +48,24 @@ pub fn model_flag(model: &str) -> &str {
     }
 }
 
+/// Resolve model for Codex runtime.
+/// Claude shorthands (opus/sonnet/haiku) are not valid Codex models — map them to the
+/// default Codex model (`o4-mini`). Explicit Codex model IDs are passed through as-is.
+pub fn codex_model(model: &str) -> &str {
+    match model {
+        "opus" | "sonnet" | "haiku" => "o4-mini",
+        other => other,
+    }
+}
+
+/// Resolve the model string for a task, taking runtime into account.
+fn resolve_model<'a>(model: &'a str, runtime: AgentRuntime) -> &'a str {
+    match runtime {
+        AgentRuntime::Codex => codex_model(model),
+        AgentRuntime::ClaudeCode => model_flag(model),
+    }
+}
+
 /// Build the full prompt with context files and dependency outputs prepended.
 pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result<String> {
     let mut prompt = String::new();
@@ -390,7 +408,7 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
         task.allowed_tools.clone()
     };
 
-    let model = model_flag(&task.model);
+    let model = resolve_model(&task.model, task.runtime);
     let fallback_model = resolve_fallback_model(task);
     let log_file = logs_dir.join(format!("{task_id}.log"));
     let prompt_file = logs_dir.join(format!("{task_id}-prompt.txt"));
@@ -635,7 +653,7 @@ fi
 
 codex exec \
     --sandbox {sandbox} \
-    -a {approval} \
+    --approval-mode {approval} \
     --model {model} \
     -o "$RESULT_FILE" \
     $SKIP_GIT{skip_git_check} \
@@ -2004,7 +2022,7 @@ mod tests {
             "research should use workspace-write sandbox"
         );
         assert!(
-            script.contains("-a full-auto"),
+            script.contains("--approval-mode full-auto"),
             "research should use full-auto approval"
         );
         assert!(
@@ -2072,7 +2090,7 @@ mod tests {
             "reviewer should use read-only sandbox"
         );
         assert!(
-            script.contains("-a on-request"),
+            script.contains("--approval-mode on-request"),
             "reviewer should use on-request approval"
         );
     }
