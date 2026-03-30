@@ -205,14 +205,10 @@ werma sched off daily-review
 
 ## Contributing
 
-See [CLAUDE.md](CLAUDE.md) for agent conventions, pipeline configuration format, and development workflow.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, conventions, and workflow.
 
 ```bash
-cd engine
-cargo build
-cargo test
-cargo clippy -- -D warnings
-cargo fmt -- --check
+make check   # fmt, clippy, test — all in one
 ```
 
 ## Philosophy
