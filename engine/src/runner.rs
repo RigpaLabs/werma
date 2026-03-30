@@ -59,7 +59,7 @@ pub fn codex_model(model: &str) -> &str {
 }
 
 /// Resolve the model string for a task, taking runtime into account.
-fn resolve_model<'a>(model: &'a str, runtime: AgentRuntime) -> &'a str {
+fn resolve_model(model: &str, runtime: AgentRuntime) -> &str {
     match runtime {
         AgentRuntime::Codex => codex_model(model),
         AgentRuntime::ClaudeCode => model_flag(model),
