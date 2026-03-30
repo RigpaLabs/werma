@@ -25,7 +25,7 @@ jobs:
 
   clippy-test:
     name: Clippy · Test
-    runs-on: [self-hosted, linux, arm64]
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: engine
