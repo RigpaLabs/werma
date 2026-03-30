@@ -1,0 +1,55 @@
+name: New Tracker Adapter
+description: Propose support for a new issue tracker (Jira, GitLab, etc.)
+title: "[Tracker]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Werma currently supports Linear as its issue tracker.
+        Want to use a different tracker? Propose an adapter here.
+
+  - type: input
+    id: tracker
+    attributes:
+      label: Issue tracker name
+      description: Which tracker do you want Werma to support?
+      placeholder: "Jira, GitLab Issues, GitHub Issues, Shortcut, Plane, ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: How would you use Werma with this tracker? What's your workflow?
+      placeholder: "My team uses Jira for sprint planning. I want Werma to poll Jira issues and create agent tasks automatically..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: api_info
+    attributes:
+      label: API information
+      description: Links to the tracker's API docs, authentication method, and any relevant details.
+      placeholder: |
+        - REST API: https://developer.atlassian.com/cloud/jira/platform/rest/v3/
+        - Auth: OAuth 2.0 or API token
+        - Key endpoints: search issues, transition issue, add comment
+
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Would you contribute to the implementation?
+      options:
+        - "Yes - I'd like to implement this"
+        - "Yes - I can help test"
+        - "No - just suggesting"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that would help with the adapter design.
