@@ -726,8 +726,11 @@ stages:
     }
 
     #[test]
-    fn callback_engineer_done_without_pr_still_spawns_reviewer() {
-        // RIG-232: engineer DONE without PR_URL should still spawn reviewer.
+    fn callback_engineer_done_without_pr_still_creates_reviewer_task_directly() {
+        // NOTE: This tests create_next_stage_task() directly (the low-level builder),
+        // NOT the decide_callback flow. The builder itself always creates the task
+        // when called. The RIG-334 gate that skips reviewer spawn when no PR_URL
+        // lives in decide_callback, not in the builder.
         let db = crate::db::Db::open_in_memory().unwrap();
         let config = test_config();
 
@@ -753,7 +756,7 @@ stages:
             .unwrap();
         assert!(
             !reviewer_tasks.is_empty(),
-            "reviewer should be spawned even without PR_URL (RIG-232 fix)"
+            "create_next_stage_task should create reviewer when called directly"
         );
 
         let reviewer = &reviewer_tasks[0];
