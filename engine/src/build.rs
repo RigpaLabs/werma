@@ -200,11 +200,7 @@ fn find_engine_dir() -> Result<std::path::PathBuf> {
     // Try WERMA_REPO env, then default location
     let repo = std::env::var("WERMA_REPO").unwrap_or_else(|_| {
         dirs::home_dir()
-            .map(|h| {
-                h.join("projects/werma")
-                    .to_string_lossy()
-                    .into_owned()
-            })
+            .map(|h| h.join("projects/werma").to_string_lossy().into_owned())
             .unwrap_or_default()
     });
     let engine = std::path::PathBuf::from(&repo).join("engine");

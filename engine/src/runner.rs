@@ -49,11 +49,11 @@ pub fn model_flag(model: &str) -> &str {
 }
 
 /// Resolve model for Codex runtime.
-/// Claude shorthands (opus/sonnet/haiku) are not valid Codex models — map them to the
-/// default Codex model (`o4-mini`). Explicit Codex model IDs are passed through as-is.
+/// Claude shorthands (opus/sonnet/haiku) are not valid Codex models — return empty
+/// to let Codex CLI use its own default. Explicit Codex model IDs are passed through.
 pub fn codex_model(model: &str) -> &str {
     match model {
-        "opus" | "sonnet" | "haiku" => "o4-mini",
+        "opus" | "sonnet" | "haiku" => "",
         other => other,
     }
 }
@@ -573,17 +573,6 @@ fn codex_sandbox_mode(task_type: &str) -> &'static str {
     }
 }
 
-/// Determine codex approval mode based on task type.
-/// Read-only types need explicit approval, others run full-auto.
-fn codex_approval_mode(task_type: &str) -> &'static str {
-    match task_type {
-        "pipeline-reviewer" | "pipeline-analyst" | "pipeline-qa" | "review" | "analyze" => {
-            "on-request"
-        }
-        _ => "full-auto",
-    }
-}
-
 /// Generate a Codex CLI exec script for tmux.
 fn generate_codex_exec_script(params: &ExecScriptParams<'_>) -> String {
     let prompt_file_str = params.prompt_file.display();
@@ -593,7 +582,6 @@ fn generate_codex_exec_script(params: &ExecScriptParams<'_>) -> String {
     let task_id = params.task_id;
     let output = params.output;
     let sandbox = codex_sandbox_mode(params.task_type);
-    let approval = codex_approval_mode(params.task_type);
 
     let worktree_guard = if params.is_write_task {
         r#"
@@ -651,10 +639,15 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     SKIP_GIT="--skip-git-repo-check"
 fi
 
+MODEL_FLAG=""
+if [ -n "{model}" ]; then
+    MODEL_FLAG="--model {model}"
+fi
+
 codex exec \
     --sandbox {sandbox} \
-    --approval-mode {approval} \
-    --model {model} \
+    --full-auto \
+    $MODEL_FLAG \
     -o "$RESULT_FILE" \
     $SKIP_GIT{skip_git_check} \
     "$PROMPT" || {{
@@ -1982,14 +1975,7 @@ mod tests {
         assert_eq!(codex_sandbox_mode("custom"), "workspace-write");
     }
 
-    #[test]
-    fn codex_approval_mode_mapping() {
-        assert_eq!(codex_approval_mode("pipeline-reviewer"), "on-request");
-        assert_eq!(codex_approval_mode("review"), "on-request");
-        assert_eq!(codex_approval_mode("research"), "full-auto");
-        assert_eq!(codex_approval_mode("code"), "full-auto");
-        assert_eq!(codex_approval_mode("pipeline-engineer"), "full-auto");
-    }
+
 
     #[test]
     fn generate_codex_exec_script_contains_codex_exec() {
@@ -2022,8 +2008,8 @@ mod tests {
             "research should use workspace-write sandbox"
         );
         assert!(
-            script.contains("--approval-mode full-auto"),
-            "research should use full-auto approval"
+            script.contains("--full-auto"),
+            "research should use --full-auto"
         );
         assert!(
             !script.contains("claude -p"),
@@ -2090,8 +2076,8 @@ mod tests {
             "reviewer should use read-only sandbox"
         );
         assert!(
-            script.contains("--approval-mode on-request"),
-            "reviewer should use on-request approval"
+            script.contains("--full-auto"),
+            "reviewer should use --full-auto"
         );
     }
 }
