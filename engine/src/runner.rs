@@ -593,7 +593,6 @@ fn generate_codex_exec_script(params: &ExecScriptParams<'_>) -> String {
     let task_id = params.task_id;
     let output = params.output;
     let sandbox = codex_sandbox_mode(params.task_type);
-    let approval = codex_approval_mode(params.task_type);
 
     let worktree_guard = if params.is_write_task {
         r#"
@@ -653,7 +652,7 @@ fi
 
 codex exec \
     --sandbox {sandbox} \
-    --approval-mode {approval} \
+    --full-auto \
     --model {model} \
     -o "$RESULT_FILE" \
     $SKIP_GIT{skip_git_check} \
@@ -2022,8 +2021,8 @@ mod tests {
             "research should use workspace-write sandbox"
         );
         assert!(
-            script.contains("--approval-mode full-auto"),
-            "research should use full-auto approval"
+            script.contains("--full-auto"),
+            "research should use --full-auto"
         );
         assert!(
             !script.contains("claude -p"),
@@ -2090,8 +2089,8 @@ mod tests {
             "reviewer should use read-only sandbox"
         );
         assert!(
-            script.contains("--approval-mode on-request"),
-            "reviewer should use on-request approval"
+            script.contains("--full-auto"),
+            "reviewer should use --full-auto"
         );
     }
 }
