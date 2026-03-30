@@ -6,8 +6,35 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  ci:
-    uses: RigpaLabs/.github/.github/workflows/rust-ci.yml@944423fb53ad636173626ea9775c1be5200e9306 # main
-    with:
-      working-directory: engine
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Rust
+        run: rustup show
+      - name: Format
+        run: cargo fmt --check
+
+  clippy-test:
+    name: Clippy · Test
+    runs-on: [self-hosted, linux, arm64]
+    defaults:
+      run:
+        working-directory: engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+      - name: Test
+        run: cargo test
