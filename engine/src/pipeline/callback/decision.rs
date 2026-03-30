@@ -26,6 +26,8 @@ pub struct InternalChanges {
     pub spawn_task: Option<crate::models::Task>,
     /// Update the task's estimate field: `(task_id, estimate)`.
     pub update_estimate: Option<(String, i32)>,
+    /// Update a task's handoff_content field: `(task_id, content)`.
+    pub handoff_update: Option<(String, String)>,
 }
 
 /// Default maximum review cycles when not configured in YAML.
@@ -51,6 +53,7 @@ pub fn decide_callback(
     let mut internal = InternalChanges {
         spawn_task: None,
         update_estimate: None,
+        handoff_update: None,
     };
 
     // Guard: if output is empty, attempt fallback for reviewer stage (RIG-309),
@@ -419,6 +422,21 @@ pub fn decide_callback(
                         "review_event": review_event,
                     }),
                 ));
+            }
+        }
+
+        // RIG-333: Store reviewer's feedback in the reviewer task's handoff_content
+        // so the next reviewer (after engineer fixes) can see what was flagged.
+        // Deferred to InternalChanges — applied atomically in callback() transaction.
+        if stage == "reviewer" {
+            let reviewer_feedback = super::super::verdict::extract_rejection_feedback(result);
+            if !reviewer_feedback.is_empty() {
+                let handoff = format!(
+                    "## Previous Review (REVIEW_VERDICT={verdict})\n\n{feedback}",
+                    verdict = verdict_str.to_uppercase(),
+                    feedback = truncate_lines(&reviewer_feedback, 150),
+                );
+                internal.handoff_update = Some((task_id.to_string(), handoff));
             }
         }
 
@@ -1045,6 +1063,37 @@ mod tests {
                 .iter()
                 .any(|e| e.effect_type == EffectType::CreatePr),
             "must not queue CreatePr when PR_URL is present"
+        );
+    }
+
+    /// RIG-333: Reviewer callback returns handoff_update in InternalChanges (not direct DB write).
+    #[test]
+    fn decide_reviewer_stores_handoff_content() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "DECIDE-333";
+        let task_id = "decide-333-r";
+        insert_reviewer_task(&db, task_id, issue_id);
+
+        let result =
+            "## Review\n- blocker: missing tests\n- nit: typo in docs\n\nREVIEW_VERDICT=REJECTED";
+
+        let decision =
+            decide_callback(&db, task_id, "reviewer", result, issue_id, "/tmp", &cmd).unwrap();
+
+        // Verify handoff_update is set in InternalChanges (applied atomically by callback())
+        let (ref tid, ref content) = decision
+            .internal
+            .handoff_update
+            .expect("handoff_update should be set for rejected reviewer");
+        assert_eq!(tid, task_id);
+        assert!(
+            content.contains("Previous Review"),
+            "handoff should contain review summary, got: {content}",
+        );
+        assert!(
+            content.contains("REJECTED"),
+            "handoff should contain verdict, got: {content}",
         );
     }
 }

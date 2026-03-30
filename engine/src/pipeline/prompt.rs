@@ -44,7 +44,12 @@ fn sanitize_text_vars(vars: &mut HashMap<String, String>) {
     // NOTE: linear_comments is NOT listed here — it's late-injected in run_task()
     // after build_vars() returns, so sanitization here would never fire.
     // Escaped sequences in comments are handled directly in fetch_linear_comments().
-    const TEXT_KEYS: &[&str] = &["issue_description", "previous_output", "rejection_feedback"];
+    const TEXT_KEYS: &[&str] = &[
+        "issue_description",
+        "previous_output",
+        "rejection_feedback",
+        "previous_review",
+    ];
     for key in TEXT_KEYS {
         if let Some(val) = vars.get_mut(*key) {
             let sanitized = val.replace("\\n", "\n").replace("\\t", "\t");

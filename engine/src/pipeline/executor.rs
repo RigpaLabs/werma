@@ -51,7 +51,7 @@ pub fn create_initial_stage_task(
     let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
     let effective_model = stage_cfg.effective_model(estimate, 0).to_string();
 
-    let prompt = build_poll_prompt(config, stage_cfg, identifier, title, description);
+    let prompt = build_poll_prompt(config, stage_cfg, identifier, title, description, db);
 
     let effective_working_dir = if working_dir.is_empty() || working_dir == "~/projects/rigpa/werma"
     {

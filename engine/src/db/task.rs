@@ -317,6 +317,7 @@ impl super::Db {
             "retry_after",
             "cost_usd",
             "turns_used",
+            "handoff_content",
         ];
         anyhow::ensure!(
             allowed.contains(&field),
