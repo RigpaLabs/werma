@@ -195,4 +195,79 @@ mod tests {
         assert!(comment.contains("reviewer"));
         assert!(comment.contains("pull/5"));
     }
+
+    // ─── RIG-335: Blocking classification correctness ───────────────────
+
+    #[test]
+    fn blocking_classification_for_all_effect_types() {
+        use crate::models::EffectType;
+
+        // These must be blocking — state-mutating, pipeline depends on them
+        assert!(
+            is_blocking_effect(EffectType::MoveIssue),
+            "MoveIssue must be blocking"
+        );
+        assert!(
+            is_blocking_effect(EffectType::CreatePr),
+            "CreatePr must be blocking — reviewer depends on PR existence"
+        );
+        assert!(
+            is_blocking_effect(EffectType::UpdateEstimate),
+            "UpdateEstimate must be blocking"
+        );
+
+        // These must be non-blocking — best-effort, failure shouldn't halt pipeline
+        assert!(
+            !is_blocking_effect(EffectType::PostComment),
+            "PostComment must NOT be blocking"
+        );
+        assert!(
+            !is_blocking_effect(EffectType::AddLabel),
+            "AddLabel must NOT be blocking"
+        );
+        assert!(
+            !is_blocking_effect(EffectType::RemoveLabel),
+            "RemoveLabel must NOT be blocking"
+        );
+        assert!(
+            !is_blocking_effect(EffectType::AttachUrl),
+            "AttachUrl must NOT be blocking"
+        );
+        assert!(
+            !is_blocking_effect(EffectType::PostPrComment),
+            "PostPrComment must NOT be blocking"
+        );
+        assert!(
+            !is_blocking_effect(EffectType::Notify),
+            "Notify must NOT be blocking"
+        );
+    }
+
+    /// make_effect correctly sets blocking flag based on effect type.
+    #[test]
+    fn make_effect_sets_blocking_correctly() {
+        let blocking_effect = make_effect(
+            "t1",
+            "ISS-1",
+            EffectType::CreatePr,
+            "create_pr",
+            serde_json::json!({}),
+        );
+        assert!(
+            blocking_effect.blocking,
+            "make_effect must set blocking=true for CreatePr"
+        );
+
+        let nonblocking_effect = make_effect(
+            "t1",
+            "ISS-1",
+            EffectType::PostComment,
+            "comment",
+            serde_json::json!({}),
+        );
+        assert!(
+            !nonblocking_effect.blocking,
+            "make_effect must set blocking=false for PostComment"
+        );
+    }
 }

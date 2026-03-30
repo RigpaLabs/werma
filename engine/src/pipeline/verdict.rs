@@ -544,4 +544,125 @@ mod tests {
         assert!(body.contains("First finding."));
         assert!(body.contains("Second finding."));
     }
+
+    // ─── RIG-335: PR_URL parsing edge cases ─────────────────────────────
+
+    #[test]
+    fn parse_pr_url_strips_markdown_link_syntax() {
+        // Agent might wrap URL in markdown: [PR](https://github.com/...)
+        let output = "Created [PR](https://github.com/org/repo/pull/42)\nVERDICT=DONE";
+        let url = parse_pr_url(output);
+        assert_eq!(
+            url,
+            Some("https://github.com/org/repo/pull/42".to_string()),
+            "should extract URL from markdown link, stripping trailing )"
+        );
+    }
+
+    #[test]
+    fn parse_pr_url_strips_angle_brackets() {
+        // Agent might use angle brackets: <https://github.com/...>
+        let output = "PR: <https://github.com/org/repo/pull/42>\nVERDICT=DONE";
+        let url = parse_pr_url(output);
+        assert_eq!(
+            url,
+            Some("https://github.com/org/repo/pull/42".to_string()),
+            "should extract URL from angle brackets, stripping trailing >"
+        );
+    }
+
+    #[test]
+    fn parse_pr_url_with_trailing_whitespace() {
+        let output = "PR_URL=https://github.com/org/repo/pull/42  \nVERDICT=DONE";
+        let url = parse_pr_url(output);
+        assert_eq!(
+            url,
+            Some("https://github.com/org/repo/pull/42".to_string()),
+            "should trim trailing whitespace from PR URL"
+        );
+    }
+
+    #[test]
+    fn parse_pr_url_prefers_explicit_marker_over_raw_url() {
+        // When both PR_URL= marker and raw URL exist, PR_URL= should win
+        let output = "See https://github.com/org/repo/pull/1 for context\n\
+                       PR_URL=https://github.com/org/repo/pull/99\nVERDICT=DONE";
+        let url = parse_pr_url(output);
+        assert_eq!(
+            url,
+            Some("https://github.com/org/repo/pull/99".to_string()),
+            "explicit PR_URL= marker should take precedence over raw URL"
+        );
+    }
+
+    #[test]
+    fn parse_pr_url_issue_url_not_matched() {
+        // GitHub issue URLs should NOT match (must contain /pull/)
+        let output = "PR_URL=https://github.com/org/repo/issues/42\nVERDICT=DONE";
+        assert_eq!(
+            parse_pr_url(output),
+            None,
+            "issue URLs must not be treated as PR URLs"
+        );
+    }
+
+    #[test]
+    fn parse_pr_url_no_url_at_all() {
+        // Engineer output without any URL — must return None
+        let output = "Implementation complete.\nAll tests pass.\ncargo clippy clean.\nVERDICT=DONE";
+        assert_eq!(
+            parse_pr_url(output),
+            None,
+            "output with no URL must return None"
+        );
+    }
+
+    #[test]
+    fn parse_pr_url_multiple_raw_urls_takes_first() {
+        // When no PR_URL= marker, fallback scans forward (first match wins)
+        let output = "Created https://github.com/org/repo/pull/10\n\
+                       Also see https://github.com/org/repo/pull/20";
+        let url = parse_pr_url(output);
+        assert_eq!(
+            url,
+            Some("https://github.com/org/repo/pull/10".to_string()),
+            "raw URL fallback should take first match (forward scan)"
+        );
+    }
+
+    // ─── RIG-335: REVIEW_VERDICT edge cases ─────────────────────────────
+
+    #[test]
+    fn verdict_parsing_case_insensitive_input() {
+        assert_eq!(
+            parse_verdict("REVIEW_VERDICT=approved"),
+            Some("APPROVED".to_string()),
+            "verdict should be uppercased regardless of input case"
+        );
+        assert_eq!(parse_verdict("VERDICT=Done"), Some("DONE".to_string()),);
+    }
+
+    #[test]
+    fn verdict_parsing_inline_with_prefix_text() {
+        // Agent might write "Final REVIEW_VERDICT=APPROVED" on one line
+        let text = "After thorough review, REVIEW_VERDICT=APPROVED";
+        assert_eq!(parse_verdict(text), Some("APPROVED".to_string()));
+    }
+
+    #[test]
+    fn verdict_parsing_with_trailing_punctuation() {
+        // Agent might add punctuation after verdict
+        assert_eq!(
+            parse_verdict("VERDICT=DONE."),
+            Some("DONE".to_string()),
+            "trailing punctuation should be stripped"
+        );
+    }
+
+    #[test]
+    fn verdict_failed_keyword_fallback() {
+        // "FAILED" as standalone keyword in last 10 lines
+        let text = "Tests did not pass.\nFAILED";
+        assert_eq!(parse_verdict(text), Some("FAILED".to_string()));
+    }
 }
