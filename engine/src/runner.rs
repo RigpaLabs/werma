@@ -1975,8 +1975,6 @@ mod tests {
         assert_eq!(codex_sandbox_mode("custom"), "workspace-write");
     }
 
-
-
     #[test]
     fn generate_codex_exec_script_contains_codex_exec() {
         let dir = tempfile::tempdir().unwrap();
