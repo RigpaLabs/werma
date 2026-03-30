@@ -53,8 +53,7 @@ pub fn create_initial_stage_task(
 
     let prompt = build_poll_prompt(config, stage_cfg, identifier, title, description, db);
 
-    let effective_working_dir = if working_dir.is_empty() || working_dir == "~/projects/werma"
-    {
+    let effective_working_dir = if working_dir.is_empty() || working_dir == "~/projects/werma" {
         infer_working_dir_from_issue(db, identifier)
     } else {
         working_dir.to_string()
