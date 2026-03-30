@@ -1,6 +1,17 @@
 use anyhow::{Context, Result, bail};
 
-pub(crate) const GITHUB_REPO: &str = "RigpaLabs/werma";
+/// Derive the default GitHub owner/repo from the Cargo.toml `repository` field.
+/// Users can override at runtime via `WERMA_GITHUB_REPO` env var (e.g. for forks).
+pub(crate) fn github_repo() -> String {
+    if let Ok(val) = std::env::var("WERMA_GITHUB_REPO") {
+        return val;
+    }
+    // CARGO_PKG_REPOSITORY = "https://github.com/Owner/Repo"
+    let url = env!("CARGO_PKG_REPOSITORY");
+    url.strip_prefix("https://github.com/")
+        .unwrap_or("werma-cli/werma")
+        .to_string()
+}
 
 /// Read GitHub token from GITHUB_TOKEN, GH_TOKEN, or `gh auth token` fallback.
 pub(crate) fn github_token() -> Result<String> {
@@ -48,7 +59,8 @@ struct ReleaseInfo {
 
 /// Fetch the latest release info from GitHub API.
 fn latest_release(token: &str) -> Result<ReleaseInfo> {
-    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
+    let repo = github_repo();
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("werma-updater")
@@ -65,7 +77,7 @@ fn latest_release(token: &str) -> Result<ReleaseInfo> {
         bail!(
             "GitHub API returned {}: check that {} has releases",
             resp.status(),
-            GITHUB_REPO
+            repo
         );
     }
 
@@ -107,12 +119,14 @@ fn download_and_extract(
 
     let artifact_name = format!("werma-{target}");
 
-    let download_url = match &release.asset_api_url {
-        Some(url) => url.clone(),
-        None => format!(
-            "https://github.com/{GITHUB_REPO}/releases/download/{}/{artifact_name}.tar.gz",
+    let download_url = if let Some(url) = &release.asset_api_url {
+        url.clone()
+    } else {
+        let repo = github_repo();
+        format!(
+            "https://github.com/{repo}/releases/download/{}/{artifact_name}.tar.gz",
             release.tag,
-        ),
+        )
     };
 
     let client = reqwest::blocking::Client::builder()

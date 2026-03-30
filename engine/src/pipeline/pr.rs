@@ -153,10 +153,16 @@ pub(crate) fn auto_create_pr(
 
     // 6. Create PR
     let pr_title = format!("{linear_issue_id} feat: implementation");
-    let pr_body = format!(
-        "## Summary\nPipeline engineer task `{task_id}`.\n\n\
-         Linear: https://linear.app/rigpa/issue/{linear_issue_id}",
-    );
+    let pr_body = match std::env::var("WERMA_LINEAR_WORKSPACE") {
+        Ok(ws) => format!(
+            "## Summary\nPipeline engineer task `{task_id}`.\n\n\
+             Linear: https://linear.app/{ws}/issue/{linear_issue_id}",
+        ),
+        Err(_) => format!(
+            "## Summary\nPipeline engineer task `{task_id}`.\n\n\
+             Issue: {linear_issue_id}",
+        ),
+    };
 
     let output = cmd
         .run(
