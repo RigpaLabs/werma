@@ -147,7 +147,8 @@ impl super::Db {
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                    retry_count, retry_after, cost_usd, turns_used, handoff_content
+                    retry_count, retry_after, cost_usd, turns_used, handoff_content,
+                    runtime
              FROM tasks WHERE id = ?1",
             params![id],
             |row| Ok(task_from_row(row)),
@@ -170,7 +171,8 @@ impl super::Db {
                         type, prompt, output_path, working_dir, model, max_turns,
                         allowed_tools, session_id, linear_issue_id, linear_pushed,
                         pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                    retry_count, retry_after, cost_usd, turns_used, handoff_content
+                    retry_count, retry_after, cost_usd, turns_used, handoff_content,
+                    runtime
                  FROM tasks WHERE status = ?1
                  ORDER BY priority ASC, created_at ASC",
             )?;
@@ -184,7 +186,8 @@ impl super::Db {
                         type, prompt, output_path, working_dir, model, max_turns,
                         allowed_tools, session_id, linear_issue_id, linear_pushed,
                         pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                    retry_count, retry_after, cost_usd, turns_used, handoff_content
+                    retry_count, retry_after, cost_usd, turns_used, handoff_content,
+                    runtime
                  FROM tasks ORDER BY priority ASC, created_at ASC",
             )?;
             let rows = stmt.query_map([], |row| Ok(task_from_row(row)))?;
@@ -204,7 +207,8 @@ impl super::Db {
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                    retry_count, retry_after, cost_usd, turns_used, handoff_content
+                    retry_count, retry_after, cost_usd, turns_used, handoff_content,
+                    runtime
              FROM tasks WHERE status = ?1
              ORDER BY finished_at DESC, created_at DESC
              LIMIT ?2",
@@ -228,7 +232,8 @@ impl super::Db {
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                    retry_count, retry_after, cost_usd, turns_used, handoff_content
+                    retry_count, retry_after, cost_usd, turns_used, handoff_content,
+                    runtime
              FROM tasks WHERE status = ?1
              ORDER BY finished_at DESC, created_at DESC",
         )?;
@@ -250,7 +255,8 @@ impl super::Db {
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                    retry_count, retry_after, cost_usd, turns_used, handoff_content
+                    retry_count, retry_after, cost_usd, turns_used, handoff_content,
+                    runtime
              FROM tasks WHERE status IN ('completed', 'failed', 'canceled')
              ORDER BY finished_at DESC, created_at DESC
              LIMIT ?1",
@@ -340,7 +346,8 @@ impl super::Db {
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                    retry_count, retry_after, cost_usd, turns_used, handoff_content
+                    retry_count, retry_after, cost_usd, turns_used, handoff_content,
+                    runtime
              FROM tasks
              WHERE status = 'pending'
                AND (retry_after IS NULL OR retry_after <= ?1)
@@ -432,7 +439,8 @@ impl super::Db {
                     type, prompt, output_path, working_dir, model, max_turns,
                     allowed_tools, session_id, linear_issue_id, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                    retry_count, retry_after, cost_usd, turns_used, handoff_content
+                    retry_count, retry_after, cost_usd, turns_used, handoff_content,
+                    runtime
              FROM tasks
              WHERE status = 'pending'
                AND (retry_after IS NULL OR retry_after <= ?1)
