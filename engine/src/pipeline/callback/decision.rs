@@ -358,11 +358,14 @@ pub fn decide_callback(
                     serde_json::json!({ "url": pr, "title": pr_title }),
                 ));
             } else {
-                // RIG-232: No PR_URL in output — queue CreatePr effect.
+                // RIG-334: No PR_URL in output — queue CreatePr effect (blocking).
                 // Effect processor calls auto_create_pr() atomically after the transaction.
+                // Reviewer spawn is DEFERRED: we do NOT spawn reviewer here because
+                // there is no PR artifact yet. The poller will create the reviewer task
+                // after CreatePr succeeds and the issue moves to Review status.
                 eprintln!(
                     "callback: engineer DONE but no PR_URL in output for {linear_issue_id} \
-                     (task {task_id}) — queuing CreatePr effect."
+                     (task {task_id}) — queuing CreatePr effect, deferring reviewer spawn."
                 );
                 effects.push(make_effect(
                     task_id,
@@ -384,7 +387,8 @@ pub fn decide_callback(
                         "body": format!(
                             "**Engineer task `{task_id}` DONE but no PR created.** \
                              The agent did not include `PR_URL=` in output. \
-                             Proceeding to reviewer — reviewer will verify or request a PR."
+                             CreatePr effect queued — reviewer will be spawned by poller \
+                             after PR creation."
                         )
                     }),
                 ));
@@ -476,20 +480,30 @@ pub fn decide_callback(
                 }
             }
 
-            // Build the next-stage task with handoff in DB column (no file write).
-            let spawn = build_next_stage_task(
-                db,
-                &config,
-                linear_issue_id,
-                next_stage,
-                result,
-                task_id,
-                stage,
-                working_dir,
-                estimate,
-                pr_url.as_deref(),
-            )?;
-            internal.spawn_task = spawn;
+            // RIG-334: Do NOT spawn reviewer when engineer had no PR_URL.
+            // The CreatePr effect must complete first, then the poller will
+            // create the reviewer task when it sees the issue in Review.
+            if stage == "engineer" && next_stage == "reviewer" && pr_url.is_none() {
+                eprintln!(
+                    "callback: skipping reviewer spawn for {linear_issue_id} — \
+                     no PR_URL from engineer output, deferring to poller after CreatePr"
+                );
+            } else {
+                // Build the next-stage task with handoff in DB column (no file write).
+                let spawn = build_next_stage_task(
+                    db,
+                    &config,
+                    linear_issue_id,
+                    next_stage,
+                    result,
+                    task_id,
+                    stage,
+                    working_dir,
+                    estimate,
+                    pr_url.as_deref(),
+                )?;
+                internal.spawn_task = spawn;
+            }
         }
     } else {
         eprintln!("stage '{stage}': no transition for verdict '{verdict_str}' — no action taken");
@@ -884,6 +898,14 @@ mod tests {
             calls.is_empty(),
             "decide_callback must not call any commands for engineer DONE (no auto_create_pr), got: {calls:?}"
         );
+
+        // RIG-334: No PR_URL → reviewer must NOT be spawned immediately.
+        // The poller will create the reviewer after CreatePr effect completes.
+        assert!(
+            decision.internal.spawn_task.is_none(),
+            "engineer DONE without PR_URL must NOT spawn reviewer (RIG-334), got: {:?}",
+            decision.internal.spawn_task
+        );
     }
 
     /// Fix 1 variant: engineer DONE with PR_URL already in output → emit AttachUrl, no CreatePr.
@@ -925,6 +947,104 @@ mod tests {
                 .any(|e| e.effect_type == EffectType::CreatePr),
             "engineer DONE with PR_URL must not emit CreatePr, got: {:?}",
             decision.effects
+        );
+
+        // RIG-334: With PR_URL present, reviewer SHOULD be spawned immediately.
+        let spawned = decision.internal.spawn_task.as_ref();
+        assert!(
+            spawned.is_some(),
+            "engineer DONE with PR_URL must spawn reviewer task"
+        );
+        assert_eq!(spawned.unwrap().pipeline_stage, "reviewer");
+    }
+
+    /// RIG-334 regression: engineer DONE without PR_URL must NOT spawn reviewer.
+    /// The reviewer should only be created by the poller after the CreatePr effect
+    /// succeeds and the issue moves to Review status.
+    #[test]
+    fn test_engineer_done_no_pr_url_defers_reviewer_spawn() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-334-TEST";
+        let task_id = "rig334-eng-t1";
+
+        let mut t = crate::db::make_test_task(task_id);
+        t.status = crate::models::Status::Completed;
+        t.linear_issue_id = issue_id.to_string();
+        t.pipeline_stage = "engineer".to_string();
+        t.task_type = "pipeline-engineer".to_string();
+        t.working_dir = "~/projects/rigpa/werma".to_string();
+        db.insert_task(&t).unwrap();
+
+        // Engineer output: DONE but no PR_URL
+        let result = "Code changes committed to branch.\ncargo test passes.\nVERDICT=DONE";
+
+        let decision =
+            decide_callback(&db, task_id, "engineer", result, issue_id, "/tmp", &cmd).unwrap();
+
+        // MoveIssue to review should still be queued
+        assert!(
+            decision
+                .effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "engineer DONE must queue MoveIssue to review"
+        );
+
+        // CreatePr must be queued (blocking)
+        let create_pr = decision
+            .effects
+            .iter()
+            .find(|e| e.effect_type == EffectType::CreatePr);
+        assert!(create_pr.is_some(), "must queue CreatePr effect");
+        assert!(create_pr.unwrap().blocking, "CreatePr must be blocking");
+
+        // Reviewer must NOT be spawned — this is the RIG-334 fix
+        assert!(
+            decision.internal.spawn_task.is_none(),
+            "reviewer must NOT be spawned when no PR_URL (RIG-334)"
+        );
+    }
+
+    /// RIG-334 complement: engineer DONE WITH PR_URL spawns reviewer immediately.
+    #[test]
+    fn test_engineer_done_with_pr_url_spawns_reviewer() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-334-PR";
+        let task_id = "rig334-eng-pr-t1";
+
+        let mut t = crate::db::make_test_task(task_id);
+        t.status = crate::models::Status::Completed;
+        t.linear_issue_id = issue_id.to_string();
+        t.pipeline_stage = "engineer".to_string();
+        t.task_type = "pipeline-engineer".to_string();
+        t.working_dir = "~/projects/rigpa/werma".to_string();
+        db.insert_task(&t).unwrap();
+
+        // Engineer output: DONE with PR_URL
+        let result =
+            "Code changes committed.\nPR_URL=https://github.com/org/repo/pull/55\nVERDICT=DONE";
+
+        let decision =
+            decide_callback(&db, task_id, "engineer", result, issue_id, "/tmp", &cmd).unwrap();
+
+        // Reviewer SHOULD be spawned — PR artifact exists
+        let spawned = decision.internal.spawn_task.as_ref();
+        assert!(
+            spawned.is_some(),
+            "engineer DONE with PR_URL must spawn reviewer (RIG-334)"
+        );
+        assert_eq!(spawned.unwrap().pipeline_stage, "reviewer");
+        assert_eq!(spawned.unwrap().linear_issue_id, issue_id);
+
+        // No CreatePr effect (PR already exists)
+        assert!(
+            !decision
+                .effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::CreatePr),
+            "must not queue CreatePr when PR_URL is present"
         );
     }
 }
