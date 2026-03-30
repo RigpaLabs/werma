@@ -6,6 +6,7 @@ mod task_builder;
 // Re-exports used by other modules in this crate
 pub(crate) use decision::{DEFAULT_MAX_REVIEW_ROUNDS, decide_callback};
 pub(crate) use retry::move_with_retry;
+pub(crate) use task_builder::lookup_previous_reviewer_handoff;
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -115,6 +116,14 @@ pub fn callback(
             conn.execute(
                 "UPDATE tasks SET estimate = ?1 WHERE id = ?2",
                 params![est, tid],
+            )?;
+        }
+
+        // Apply handoff_content update (RIG-333: reviewer feedback for re-review context).
+        if let Some((ref tid, ref content)) = decision.internal.handoff_update {
+            conn.execute(
+                "UPDATE tasks SET handoff_content = ?1 WHERE id = ?2",
+                params![content, tid],
             )?;
         }
 

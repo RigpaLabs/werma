@@ -279,7 +279,8 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 }
 
                 // Build prompt from config
-                let prompt = build_poll_prompt(&config, stage_cfg, identifier, title, description);
+                let prompt =
+                    build_poll_prompt(&config, stage_cfg, identifier, title, description, db);
 
                 let task_id = db.next_task_id()?;
                 let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
@@ -503,7 +504,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
-            let prompt = build_poll_prompt(&config, stage_cfg, identifier, title, description);
+            let prompt = build_poll_prompt(&config, stage_cfg, identifier, title, description, db);
 
             let task_id = db.next_task_id()?;
             let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
@@ -584,12 +585,16 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
 }
 
 /// Build the initial prompt for a polled stage (from config, with issue vars).
+///
+/// For reviewer stages, looks up previous reviewer handoff to inject re-review context
+/// (RIG-333). Pass `db` + `identifier` so the lookup can find prior review feedback.
 pub(crate) fn build_poll_prompt(
     config: &PipelineConfig,
     stage_cfg: &super::config::StageConfig,
     identifier: &str,
     title: &str,
     description: &str,
+    db: &crate::db::Db,
 ) -> String {
     let prompt_source = match &stage_cfg.prompt {
         Some(p) => resolve_prompt(p),
@@ -602,10 +607,15 @@ pub(crate) fn build_poll_prompt(
         }
     };
 
+    // RIG-333: For reviewer stages, look up previous review context from DB.
+    let previous_review =
+        super::callback::lookup_previous_reviewer_handoff(db, identifier).unwrap_or_default();
+
     let mut runtime: HashMap<String, String> = HashMap::new();
     runtime.insert("issue_id".to_string(), identifier.to_string());
     runtime.insert("issue_title".to_string(), title.to_string());
     runtime.insert("issue_description".to_string(), description.to_string());
+    runtime.insert("previous_review".to_string(), previous_review);
 
     let vars = build_vars(&config.templates, &runtime);
     render_prompt(&prompt_source, &vars)
@@ -639,15 +649,24 @@ mod tests {
 
     #[test]
     fn build_poll_prompt_uses_issue_vars() {
+        let db = crate::db::Db::open_in_memory().unwrap();
         let config = test_config();
         let stage_cfg = config.stage("analyst").unwrap();
-        let prompt = build_poll_prompt(&config, stage_cfg, "RIG-65", "My title", "My description");
+        let prompt = build_poll_prompt(
+            &config,
+            stage_cfg,
+            "RIG-65",
+            "My title",
+            "My description",
+            &db,
+        );
         assert!(prompt.contains("RIG-65"));
         assert!(prompt.contains("My title"));
     }
 
     #[test]
     fn build_poll_prompt_fallback_when_no_prompt() {
+        let db = crate::db::Db::open_in_memory().unwrap();
         let yaml = r#"
 pipeline: minimal
 stages:
@@ -657,7 +676,8 @@ stages:
 "#;
         let config = load_from_str(yaml, "<test>").unwrap();
         let stage_cfg = config.stage("bare").unwrap();
-        let prompt = build_poll_prompt(&config, stage_cfg, "RIG-99", "Bare title", "Bare desc");
+        let prompt =
+            build_poll_prompt(&config, stage_cfg, "RIG-99", "Bare title", "Bare desc", &db);
         assert!(prompt.contains("RIG-99"));
         assert!(prompt.contains("Bare title"));
         assert!(prompt.contains("pipeline-test")); // agent name in fallback
@@ -821,7 +841,15 @@ stages:
         // so that runner can late-inject sub-issue data for epics
         let config = test_config();
         let stage_cfg = config.stage("analyst").unwrap();
-        let prompt = build_poll_prompt(&config, stage_cfg, "RIG-236", "Epic issue", "Description");
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let prompt = build_poll_prompt(
+            &config,
+            stage_cfg,
+            "RIG-236",
+            "Epic issue",
+            "Description",
+            &db,
+        );
         assert!(
             prompt.contains("{sub_issues}"),
             "analyst prompt must contain {{sub_issues}} placeholder for epic support, got: {prompt}"

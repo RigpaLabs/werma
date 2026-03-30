@@ -385,7 +385,7 @@ pub(super) fn build_handoff_prompt(
 /// RIG-333: Look up the most recent completed reviewer task for an issue
 /// and return its handoff_content (which contains the review summary)
 /// wrapped with re-review instructions.
-fn lookup_previous_reviewer_handoff(db: &Db, linear_issue_id: &str) -> Option<String> {
+pub(crate) fn lookup_previous_reviewer_handoff(db: &Db, linear_issue_id: &str) -> Option<String> {
     let reviewer_tasks = db
         .tasks_by_linear_issue(linear_issue_id, Some("reviewer"), false)
         .ok()?;
