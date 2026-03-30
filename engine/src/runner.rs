@@ -573,17 +573,6 @@ fn codex_sandbox_mode(task_type: &str) -> &'static str {
     }
 }
 
-/// Determine codex approval mode based on task type.
-/// Read-only types need explicit approval, others run full-auto.
-fn codex_approval_mode(task_type: &str) -> &'static str {
-    match task_type {
-        "pipeline-reviewer" | "pipeline-analyst" | "pipeline-qa" | "review" | "analyze" => {
-            "on-request"
-        }
-        _ => "full-auto",
-    }
-}
-
 /// Generate a Codex CLI exec script for tmux.
 fn generate_codex_exec_script(params: &ExecScriptParams<'_>) -> String {
     let prompt_file_str = params.prompt_file.display();
@@ -1986,14 +1975,7 @@ mod tests {
         assert_eq!(codex_sandbox_mode("custom"), "workspace-write");
     }
 
-    #[test]
-    fn codex_approval_mode_mapping() {
-        assert_eq!(codex_approval_mode("pipeline-reviewer"), "on-request");
-        assert_eq!(codex_approval_mode("review"), "on-request");
-        assert_eq!(codex_approval_mode("research"), "full-auto");
-        assert_eq!(codex_approval_mode("code"), "full-auto");
-        assert_eq!(codex_approval_mode("pipeline-engineer"), "full-auto");
-    }
+
 
     #[test]
     fn generate_codex_exec_script_contains_codex_exec() {
