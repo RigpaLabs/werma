@@ -18,7 +18,7 @@ pub struct UserConfig {
     pub completed_limit: Option<usize>,
 
     /// Repo label → local directory mapping.
-    /// Example: `werma = "~/projects/rigpa/werma"`
+    /// Example: `werma = "~/projects/werma"`
     pub repos: HashMap<String, String>,
 }
 

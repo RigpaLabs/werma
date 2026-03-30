@@ -201,7 +201,7 @@ fn find_engine_dir() -> Result<std::path::PathBuf> {
     let repo = std::env::var("WERMA_REPO").unwrap_or_else(|_| {
         dirs::home_dir()
             .map(|h| {
-                h.join("projects/rigpa/werma")
+                h.join("projects/werma")
                     .to_string_lossy()
                     .into_owned()
             })

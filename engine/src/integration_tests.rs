@@ -117,11 +117,11 @@ fn assert_update_estimate_effect(db: &Db, estimate: i64) {
     );
 }
 
-/// Ensure `~/projects/rigpa/werma` exists so `validate_working_dir` passes on CI.
+/// Ensure `~/projects/werma` exists so `validate_working_dir` passes on CI.
 /// Locally this is a no-op (dir already exists). On CI it creates empty dirs.
 fn ensure_working_dir() {
     if let Some(home) = dirs::home_dir() {
-        let dir = home.join("projects/rigpa/werma");
+        let dir = home.join("projects/werma");
         let _ = std::fs::create_dir_all(dir);
     }
 }
@@ -179,7 +179,7 @@ fn callback_done_moves_issue() {
         "engineer",
         result,
         "RIG-200",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();
@@ -223,7 +223,7 @@ fn callback_move_failure_returns_error() {
         "engineer",
         result,
         "RIG-201",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     );
     assert!(
@@ -468,7 +468,7 @@ fn callback_retry_after_move_failure() {
         "engineer",
         result,
         "RIG-300",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     );
     assert!(ok.is_ok(), "callback should always succeed: {ok:?}");
@@ -506,7 +506,7 @@ fn callback_all_retries_exhausted() {
         "engineer",
         result,
         "RIG-301",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     );
     assert!(ok.is_ok(), "callback always succeeds: effects are durable");
@@ -548,7 +548,7 @@ fn callback_daemon_retry_after_failure() {
         "reviewer",
         result,
         "RIG-302",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     );
     assert!(ok.is_ok(), "callback should succeed: {ok:?}");
@@ -571,7 +571,7 @@ fn callback_daemon_retry_after_failure() {
         "reviewer",
         result,
         "RIG-302",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     );
     assert!(
@@ -613,7 +613,7 @@ fn callback_failure_sends_notifications() {
         "engineer",
         result,
         "RIG-303",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     );
     assert!(ok.is_ok(), "callback always succeeds: {ok:?}");
@@ -936,7 +936,7 @@ fn callback_dedup_guard_blocks_duplicate() {
         "reviewer",
         result,
         "RIG-217",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();
@@ -950,7 +950,7 @@ fn callback_dedup_guard_blocks_duplicate() {
         "reviewer",
         result,
         "RIG-217",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();
@@ -983,7 +983,7 @@ fn callback_empty_output_posts_comment() {
         "engineer",
         "   ",
         "RIG-218",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();
@@ -1016,7 +1016,7 @@ fn callback_unknown_stage_noop() {
         "nonexistent_stage",
         "Some output\nVERDICT=DONE",
         "RIG-219",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     );
 
@@ -1046,7 +1046,7 @@ fn callback_analyst_estimate_updates_linear() {
         "analyst",
         result,
         "RIG-220",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();
@@ -1080,7 +1080,7 @@ fn callback_analyst_adds_done_label() {
         "analyst",
         result,
         "RIG-219b-done",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();
@@ -1115,7 +1115,7 @@ fn callback_analyst_blocked_adds_blocked_label() {
         "analyst",
         result,
         "RIG-219B-blk",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();
@@ -1153,7 +1153,7 @@ fn callback_missing_verdict_warns() {
         "reviewer",
         result,
         "RIG-221",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();
@@ -1190,7 +1190,7 @@ fn callback_already_done_blocked_by_open_pr() {
         "analyst",
         result,
         "RIG-222",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();
@@ -1224,7 +1224,7 @@ fn callback_engineer_done_with_pr_url() {
         "engineer",
         result,
         "RIG-223",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();
@@ -1261,7 +1261,7 @@ fn callback_engineer_done_auto_pr() {
         "engineer",
         result,
         "RIG-224",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();
@@ -1317,7 +1317,7 @@ fn callback_engineer_done_no_pr_warns() {
         "engineer",
         result,
         "RIG-225",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();
@@ -1358,7 +1358,7 @@ fn callback_reviewer_rejected_spawns_engineer() {
         "reviewer",
         result,
         "RIG-226",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();
@@ -1419,7 +1419,7 @@ fn callback_review_cycle_limit_escalates() {
         "reviewer",
         result,
         "RIG-227",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();
@@ -1477,7 +1477,7 @@ fn callback_review_escalation_retries_on_failure() {
         "reviewer",
         result,
         "RIG-228",
-        "~/projects/rigpa/werma",
+        "~/projects/werma",
         &cmd,
     )
     .unwrap();

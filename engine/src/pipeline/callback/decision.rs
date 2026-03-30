@@ -510,7 +510,7 @@ mod tests {
         t.linear_issue_id = issue_id.to_string();
         t.pipeline_stage = "analyst".to_string();
         t.task_type = "pipeline-analyst".to_string();
-        t.working_dir = "~/projects/rigpa/werma".to_string();
+        t.working_dir = "~/projects/werma".to_string();
         db.insert_task(&t).unwrap();
         task_id.to_string()
     }
@@ -522,7 +522,7 @@ mod tests {
         t.linear_issue_id = issue_id.to_string();
         t.pipeline_stage = "reviewer".to_string();
         t.task_type = "pipeline-reviewer".to_string();
-        t.working_dir = "~/projects/rigpa/werma".to_string();
+        t.working_dir = "~/projects/werma".to_string();
         db.insert_task(&t).unwrap();
     }
 
@@ -541,7 +541,7 @@ mod tests {
             "analyst",
             result,
             issue_id,
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -604,7 +604,7 @@ mod tests {
             "reviewer",
             result,
             issue_id,
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             &cmd,
         )
         .unwrap();
@@ -848,7 +848,7 @@ mod tests {
         t.linear_issue_id = issue_id.to_string();
         t.pipeline_stage = "engineer".to_string();
         t.task_type = "pipeline-engineer".to_string();
-        t.working_dir = "~/projects/rigpa/werma".to_string();
+        t.working_dir = "~/projects/werma".to_string();
         db.insert_task(&t).unwrap();
 
         // No PR_URL in output → should queue CreatePr effect, not call git/gh commands.
@@ -899,7 +899,7 @@ mod tests {
         t.linear_issue_id = issue_id.to_string();
         t.pipeline_stage = "engineer".to_string();
         t.task_type = "pipeline-engineer".to_string();
-        t.working_dir = "~/projects/rigpa/werma".to_string();
+        t.working_dir = "~/projects/werma".to_string();
         db.insert_task(&t).unwrap();
 
         // Agent included PR_URL in output → should queue AttachUrl, not CreatePr.

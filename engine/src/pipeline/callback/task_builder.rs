@@ -391,7 +391,7 @@ mod tests {
             task_type: "pipeline-analyst".to_string(),
             prompt: "analyze issue".to_string(),
             output_path: String::new(),
-            working_dir: "~/projects/rigpa/werma".to_string(),
+            working_dir: "~/projects/werma".to_string(),
             model: "opus".to_string(),
             max_turns: 20,
             allowed_tools: String::new(),
@@ -424,7 +424,7 @@ mod tests {
             previous_output: analyst_output,
             prev_task_id: "20260310-001",
             prev_stage: "analyst",
-            working_dir: "~/projects/rigpa/werma",
+            working_dir: "~/projects/werma",
             estimate: 0,
             pr_url: None,
             logs_dir: Some(tmpdir.path()),
@@ -440,7 +440,7 @@ mod tests {
         assert_eq!(eng_task.pipeline_stage, "engineer");
         assert_eq!(eng_task.task_type, "pipeline-engineer");
         assert!(!eng_task.context_files.is_empty());
-        assert_eq!(eng_task.working_dir, "~/projects/rigpa/werma");
+        assert_eq!(eng_task.working_dir, "~/projects/werma");
     }
 
     #[test]
@@ -506,7 +506,7 @@ mod tests {
             previous_output: "spec output",
             prev_task_id: "20260313-001",
             prev_stage: "analyst",
-            working_dir: "~/projects/rigpa/werma",
+            working_dir: "~/projects/werma",
             estimate: 0,
             pr_url: None,
             logs_dir: Some(tmpdir.path()),
@@ -627,7 +627,7 @@ stages:
             previous_output: engineer_output,
             prev_task_id: "20260312-001",
             prev_stage: "engineer",
-            working_dir: "~/projects/rigpa/werma",
+            working_dir: "~/projects/werma",
             estimate: 0,
             pr_url: Some(pr_url),
             logs_dir: Some(&logs_dir),
@@ -674,7 +674,7 @@ stages:
             previous_output: analyst_output,
             prev_task_id: "20260310-001",
             prev_stage: "analyst",
-            working_dir: "~/projects/rigpa/werma",
+            working_dir: "~/projects/werma",
             estimate: 0,
             pr_url: None,
             logs_dir: Some(&logs_dir),
@@ -700,7 +700,7 @@ stages:
             previous_output: reviewer_output,
             prev_task_id: "20260310-002",
             prev_stage: "reviewer",
-            working_dir: "~/projects/rigpa/werma",
+            working_dir: "~/projects/werma",
             estimate: 0,
             pr_url: None,
             logs_dir: Some(&logs_dir),
@@ -741,7 +741,7 @@ stages:
             previous_output: "Implementation complete.\nVERDICT=DONE",
             prev_task_id: "20260314-232",
             prev_stage: "engineer",
-            working_dir: "~/projects/rigpa/werma",
+            working_dir: "~/projects/werma",
             estimate: 0,
             pr_url: None,
             logs_dir: Some(tmpdir.path()),

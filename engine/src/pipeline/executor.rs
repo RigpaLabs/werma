@@ -53,7 +53,7 @@ pub fn create_initial_stage_task(
 
     let prompt = build_poll_prompt(config, stage_cfg, identifier, title, description);
 
-    let effective_working_dir = if working_dir.is_empty() || working_dir == "~/projects/rigpa/werma"
+    let effective_working_dir = if working_dir.is_empty() || working_dir == "~/projects/werma"
     {
         infer_working_dir_from_issue(db, identifier)
     } else {
@@ -114,7 +114,7 @@ mod tests {
             "RIG-200",
             "Test issue title",
             "Test description",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             3,
         )
         .unwrap();
@@ -124,7 +124,7 @@ mod tests {
         assert_eq!(task.linear_issue_id, "RIG-200");
         assert_eq!(task.status, Status::Pending);
         assert_eq!(task.estimate, 3);
-        assert_eq!(task.working_dir, "~/projects/rigpa/werma");
+        assert_eq!(task.working_dir, "~/projects/werma");
         assert!(task.prompt.contains("RIG-200"));
     }
 
@@ -160,7 +160,7 @@ mod tests {
         let prior = Task {
             id: "20260313-001".to_string(),
             linear_issue_id: "RIG-202".to_string(),
-            working_dir: "~/projects/rigpa/fathom".to_string(),
+            working_dir: "~/projects/fathom".to_string(),
             pipeline_stage: "analyst".to_string(),
             task_type: "pipeline-analyst".to_string(),
             ..Default::default()
@@ -174,12 +174,12 @@ mod tests {
             "RIG-202",
             "Fathom task",
             "Description",
-            "~/projects/rigpa/werma",
+            "~/projects/werma",
             0,
         )
         .unwrap();
 
         let task = db.task(&task_id).unwrap().unwrap();
-        assert_eq!(task.working_dir, "~/projects/rigpa/fathom");
+        assert_eq!(task.working_dir, "~/projects/fathom");
     }
 }
