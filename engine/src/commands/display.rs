@@ -109,11 +109,13 @@ pub fn format_task_line(task: &Task, time_str: &str) -> String {
         format!("  [{}]", task.linear_issue_id.cyan())
     };
     let cost_turns = format_cost_turns(task);
+    let rt = runtime_suffix(task);
     let preview = truncate(&task.prompt, 45);
     format!(
-        "   {}  {}{}  {}{}  {}",
+        "   {}  {}{}{}  {}{}  {}",
         task.id,
         task.task_type.blue(),
+        rt.dimmed(),
         linear,
         time_str.dimmed(),
         cost_turns.dimmed(),
@@ -133,6 +135,15 @@ pub fn compact_task_type(task_type: &str) -> &str {
 
 pub fn compact_task_id(id: &str) -> &str {
     id.rsplit('-').next().unwrap_or(id)
+}
+
+/// Format runtime suffix for display — only shows when non-default (codex).
+pub fn runtime_suffix(task: &Task) -> String {
+    if task.runtime != crate::models::AgentRuntime::ClaudeCode {
+        format!(" [{}]", task.runtime)
+    } else {
+        String::new()
+    }
 }
 
 pub fn compact_linear_label(linear_issue_id: &str) -> String {

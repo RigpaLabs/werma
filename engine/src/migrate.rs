@@ -174,6 +174,7 @@ fn parse_task(v: &serde_json::Value) -> Task {
         cost_usd: None,
         turns_used: 0,
         handoff_content: String::new(),
+        runtime: crate::models::AgentRuntime::default(),
     }
 }
 

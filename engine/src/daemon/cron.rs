@@ -117,6 +117,7 @@ pub fn check_schedules(
             cost_usd: None,
             turns_used: 0,
             handoff_content: String::new(),
+            runtime: crate::models::AgentRuntime::default(),
         };
 
         task_repo.insert_task(&task)?;

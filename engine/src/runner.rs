@@ -5,7 +5,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use crate::db::Db;
-use crate::models::{Status, Task};
+use crate::models::{AgentRuntime, Status, Task};
 
 /// Limits for context injection.
 const MAX_CONTEXT_LINES: usize = 200;
@@ -447,6 +447,8 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
         fallback_model: fallback_model.as_deref(),
         log_file: &log_file,
         is_write_task: crate::worktree::needs_worktree(&task.task_type),
+        runtime: task.runtime,
+        task_type: &task.task_type,
     });
 
     std::fs::write(&exec_script, &script)?;
@@ -528,11 +530,146 @@ struct ExecScriptParams<'a> {
     fallback_model: Option<&'a str>,
     log_file: &'a Path,
     is_write_task: bool,
+    runtime: AgentRuntime,
+    task_type: &'a str,
 }
 
 /// Generate a self-contained bash exec script for tmux.
-/// Uses `werma complete`/`werma fail` for DB updates and pipeline callbacks.
+/// Dispatches to Claude Code or Codex script generator based on runtime.
 fn generate_exec_script(params: &ExecScriptParams<'_>) -> String {
+    match params.runtime {
+        AgentRuntime::ClaudeCode => generate_claude_exec_script(params),
+        AgentRuntime::Codex => generate_codex_exec_script(params),
+    }
+}
+
+/// Determine codex sandbox mode based on task type.
+/// Read-only types get `read-only`, everything else gets `workspace-write`.
+fn codex_sandbox_mode(task_type: &str) -> &'static str {
+    match task_type {
+        "pipeline-reviewer" | "pipeline-analyst" | "pipeline-qa" | "review" | "analyze" => {
+            "read-only"
+        }
+        // research uses Write, so it's NOT read-only
+        _ => "workspace-write",
+    }
+}
+
+/// Determine codex approval mode based on task type.
+/// Read-only types need explicit approval, others run full-auto.
+fn codex_approval_mode(task_type: &str) -> &'static str {
+    match task_type {
+        "pipeline-reviewer" | "pipeline-analyst" | "pipeline-qa" | "review" | "analyze" => {
+            "on-request"
+        }
+        _ => "full-auto",
+    }
+}
+
+/// Generate a Codex CLI exec script for tmux.
+fn generate_codex_exec_script(params: &ExecScriptParams<'_>) -> String {
+    let prompt_file_str = params.prompt_file.display();
+    let working_dir_str = params.working_dir.display();
+    let log_file_str = params.log_file.display();
+
+    let task_id = params.task_id;
+    let output = params.output;
+    let sandbox = codex_sandbox_mode(params.task_type);
+    let approval = codex_approval_mode(params.task_type);
+
+    let worktree_guard = if params.is_write_task {
+        r#"
+# SAFETY GUARD: write tasks must run inside a .trees/ worktree, never on main checkout
+if [[ "$WORKING_DIR" != */.trees/* ]]; then
+    echo "$(date): SAFETY ABORT — write task $TASK_ID would run outside .trees/ (dir: $WORKING_DIR)" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+fi
+"#
+    } else {
+        ""
+    };
+
+    // Codex model flag: pass through the resolved model ID directly
+    let model = params.model;
+
+    // Codex needs --skip-git-repo-check when running from worktrees
+    let skip_git_check = if params.is_write_task {
+        " --skip-git-repo-check"
+    } else {
+        // Always check if we're in a git repo, skip if not
+        ""
+    };
+
+    format!(
+        r##"#!/bin/bash
+set -euo pipefail
+
+TASK_ID='{task_id}'
+PROMPT_FILE='{prompt_file_str}'
+OUTPUT='{output}'
+WORKING_DIR='{working_dir_str}'
+LOG_FILE='{log_file_str}'
+RESULT_FILE="${{LOG_FILE%.log}}-output.md"
+
+# Redirect all stderr to log from the start
+exec 2>> "$LOG_FILE"
+
+echo "$(date): EXEC_START task=$TASK_ID runtime=codex model={model} sandbox={sandbox}" >> "$LOG_FILE"
+
+cd "$WORKING_DIR" || {{
+    echo "$(date): FAILED — cd to $WORKING_DIR failed" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+}}
+{worktree_guard}
+PROMPT=$(cat "$PROMPT_FILE")
+
+echo "$(date): CODEX_START pid=$$" >> "$LOG_FILE"
+
+# Detect if we're in a git repo for --skip-git-repo-check
+SKIP_GIT=""
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    SKIP_GIT="--skip-git-repo-check"
+fi
+
+codex exec \
+    --sandbox {sandbox} \
+    -a {approval} \
+    --model {model} \
+    -o "$RESULT_FILE" \
+    $SKIP_GIT{skip_git_check} \
+    "$PROMPT" || {{
+    EXIT_CODE=$?
+    echo "$(date): CODEX_EXIT code=$EXIT_CODE" >> "$LOG_FILE"
+    echo "$(date): FAILED (exit $EXIT_CODE)" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+}}
+
+# Codex writes output directly to -o file
+if [ ! -f "$RESULT_FILE" ] || [ -z "$(tr -d '[:space:]' < "$RESULT_FILE")" ]; then
+    echo "$(date): EMPTY OUTPUT — codex returned no output" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+fi
+
+# Also write to custom output path if specified
+if [ -n "$OUTPUT" ]; then
+    mkdir -p "$(dirname "$OUTPUT")"
+    cp "$RESULT_FILE" "$OUTPUT"
+fi
+
+# Codex does not provide session_id, cost, or turns — complete without them
+werma complete "$TASK_ID" --result-file "$RESULT_FILE"
+
+echo "$(date): DONE (runtime=codex)" >> "$LOG_FILE"
+"##
+    )
+}
+
+/// Generate a Claude Code exec script for tmux.
+fn generate_claude_exec_script(params: &ExecScriptParams<'_>) -> String {
     let prompt_file_str = params.prompt_file.display();
     let working_dir_str = params.working_dir.display();
     let log_file_str = params.log_file.display();
@@ -856,6 +993,7 @@ mod tests {
             cost_usd: None,
             turns_used: 0,
             handoff_content: String::new(),
+            runtime: crate::models::AgentRuntime::default(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -895,6 +1033,7 @@ mod tests {
             cost_usd: None,
             turns_used: 0,
             handoff_content: String::new(),
+            runtime: crate::models::AgentRuntime::default(),
         };
 
         let result = build_prompt(&task, dir.path(), dir.path()).unwrap();
@@ -932,6 +1071,7 @@ mod tests {
             cost_usd: None,
             turns_used: 0,
             handoff_content: String::new(),
+            runtime: crate::models::AgentRuntime::default(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), Path::new("/tmp/.werma")).unwrap();
@@ -977,6 +1117,7 @@ mod tests {
             cost_usd: None,
             turns_used: 0,
             handoff_content: String::new(),
+            runtime: crate::models::AgentRuntime::default(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -1026,6 +1167,7 @@ mod tests {
             cost_usd: None,
             turns_used: 0,
             handoff_content: String::new(),
+            runtime: crate::models::AgentRuntime::default(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -1066,6 +1208,7 @@ mod tests {
             cost_usd: None,
             turns_used: 0,
             handoff_content: String::new(),
+            runtime: crate::models::AgentRuntime::default(),
         };
 
         let result = build_prompt(&task, Path::new("/tmp"), werma_dir.path()).unwrap();
@@ -1087,6 +1230,8 @@ mod tests {
             fallback_model: None,
             log_file: Path::new("/home/user/.werma/logs/20260309-001.log"),
             is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
         });
 
         assert!(script.contains(r#"> "$RESULT_FILE""#));
@@ -1106,6 +1251,8 @@ mod tests {
             fallback_model: None,
             log_file: Path::new("/tmp/log.log"),
             is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
         });
 
         assert!(script.contains("TASK_ID='20260308-001'"));
@@ -1137,6 +1284,8 @@ mod tests {
             fallback_model: None,
             log_file: Path::new("/tmp/test.log"),
             is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
         });
 
         // Strategy 1: .result extraction
@@ -1166,6 +1315,8 @@ mod tests {
             fallback_model: None,
             log_file: Path::new("/tmp/test.log"),
             is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
         });
 
         assert!(
@@ -1195,6 +1346,8 @@ mod tests {
             fallback_model: None,
             log_file: Path::new("/tmp/test.log"),
             is_write_task: true,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "code",
         });
 
         assert!(script.contains("SAFETY ABORT"));
@@ -1214,6 +1367,8 @@ mod tests {
             fallback_model: Some("claude-sonnet-4-6"),
             log_file: Path::new("/tmp/test.log"),
             is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
         });
 
         assert!(script.contains("FALLBACK_MODEL='claude-sonnet-4-6'"));
@@ -1237,6 +1392,8 @@ mod tests {
             fallback_model: None,
             log_file: Path::new("/tmp/test.log"),
             is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
         });
 
         assert!(script.contains("FALLBACK_MODEL=''"));
@@ -1255,6 +1412,8 @@ mod tests {
             fallback_model: None,
             log_file: Path::new("/tmp/test.log"),
             is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
         });
 
         assert!(!script.contains("SAFETY ABORT"));
@@ -1624,6 +1783,8 @@ mod tests {
             fallback_model: Some("claude-sonnet-4-6"),
             log_file: Path::new("/tmp/test.log"),
             is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
         });
 
         assert!(
@@ -1653,6 +1814,8 @@ mod tests {
             fallback_model: None,
             log_file: Path::new("/tmp/test.log"),
             is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
         });
 
         assert!(
@@ -1674,6 +1837,8 @@ mod tests {
             fallback_model: Some("claude-sonnet-4-6"),
             log_file: Path::new("/tmp/test.log"),
             is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
         });
 
         // Verify the is_rate_limit function checks multiple patterns
@@ -1704,6 +1869,8 @@ mod tests {
             fallback_model: Some("claude-sonnet-4-6"),
             log_file: Path::new("/tmp/test.log"),
             is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
         });
 
         // Verify the script handles is_error=true JSON responses with rate-limit
@@ -1730,6 +1897,8 @@ mod tests {
             fallback_model: Some("claude-sonnet-4-6"),
             log_file: Path::new("/tmp/test.log"),
             is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
         });
 
         // After fallback failure, should call werma fail
@@ -1773,6 +1942,138 @@ mod tests {
         assert!(
             result.contains("--- End Handoff ---"),
             "prompt should contain handoff footer, got: {result}"
+        );
+    }
+
+    #[test]
+    fn codex_sandbox_mode_read_only_types() {
+        assert_eq!(codex_sandbox_mode("pipeline-reviewer"), "read-only");
+        assert_eq!(codex_sandbox_mode("pipeline-analyst"), "read-only");
+        assert_eq!(codex_sandbox_mode("pipeline-qa"), "read-only");
+        assert_eq!(codex_sandbox_mode("review"), "read-only");
+        assert_eq!(codex_sandbox_mode("analyze"), "read-only");
+    }
+
+    #[test]
+    fn codex_sandbox_mode_write_types() {
+        // research uses Write, so it must NOT be read-only
+        assert_eq!(codex_sandbox_mode("research"), "workspace-write");
+        assert_eq!(codex_sandbox_mode("code"), "workspace-write");
+        assert_eq!(codex_sandbox_mode("full"), "workspace-write");
+        assert_eq!(codex_sandbox_mode("pipeline-engineer"), "workspace-write");
+        assert_eq!(codex_sandbox_mode("custom"), "workspace-write");
+    }
+
+    #[test]
+    fn codex_approval_mode_mapping() {
+        assert_eq!(codex_approval_mode("pipeline-reviewer"), "on-request");
+        assert_eq!(codex_approval_mode("review"), "on-request");
+        assert_eq!(codex_approval_mode("research"), "full-auto");
+        assert_eq!(codex_approval_mode("code"), "full-auto");
+        assert_eq!(codex_approval_mode("pipeline-engineer"), "full-auto");
+    }
+
+    #[test]
+    fn generate_codex_exec_script_contains_codex_exec() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-001",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "o3",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: false,
+            runtime: AgentRuntime::Codex,
+            task_type: "research",
+        });
+
+        assert!(
+            script.contains("codex exec"),
+            "codex script should use codex exec"
+        );
+        assert!(
+            script.contains("--sandbox workspace-write"),
+            "research should use workspace-write sandbox"
+        );
+        assert!(
+            script.contains("-a full-auto"),
+            "research should use full-auto approval"
+        );
+        assert!(
+            !script.contains("claude -p"),
+            "codex script should NOT contain claude -p"
+        );
+    }
+
+    #[test]
+    fn generate_claude_exec_script_unchanged_for_default_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-002",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "claude-sonnet-4-6",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
+        });
+
+        assert!(
+            script.contains("claude -p"),
+            "claude runtime should use claude -p"
+        );
+        assert!(
+            !script.contains("codex exec"),
+            "claude runtime should NOT contain codex exec"
+        );
+    }
+
+    #[test]
+    fn codex_read_only_sandbox_for_reviewer() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-003",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "o3",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: false,
+            runtime: AgentRuntime::Codex,
+            task_type: "pipeline-reviewer",
+        });
+
+        assert!(
+            script.contains("--sandbox read-only"),
+            "reviewer should use read-only sandbox"
+        );
+        assert!(
+            script.contains("-a on-request"),
+            "reviewer should use on-request approval"
         );
     }
 }

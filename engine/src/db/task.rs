@@ -97,13 +97,15 @@ impl super::Db {
                 type, prompt, output_path, working_dir, model, max_turns,
                 allowed_tools, session_id, linear_issue_id, linear_pushed,
                 pipeline_stage, depends_on, context_files, repo_hash, estimate,
-                retry_count, retry_after, cost_usd, turns_used, handoff_content
+                retry_count, retry_after, cost_usd, turns_used, handoff_content,
+                runtime
             ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6,
                 ?7, ?8, ?9, ?10, ?11, ?12,
                 ?13, ?14, ?15, ?16,
                 ?17, ?18, ?19, ?20, ?21,
-                ?22, ?23, ?24, ?25, ?26
+                ?22, ?23, ?24, ?25, ?26,
+                ?27
             )",
             params![
                 task.id,
@@ -132,6 +134,7 @@ impl super::Db {
                 task.cost_usd,
                 task.turns_used,
                 task.handoff_content,
+                task.runtime.to_string(),
             ],
         )?;
         Ok(())

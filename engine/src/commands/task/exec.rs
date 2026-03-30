@@ -23,6 +23,13 @@ pub fn cmd_run_all(db: &Db) -> Result<()> {
 pub fn cmd_continue(db: &Db, id: &str, prompt: Option<String>) -> Result<()> {
     let task = db.task(id)?.context(format!("task not found: {id}"))?;
 
+    if task.runtime == crate::models::AgentRuntime::Codex {
+        bail!(
+            "cannot continue Codex task {id} — Codex does not support session resume yet. \
+             Re-run with `werma retry {id}` instead."
+        );
+    }
+
     if task.session_id.is_empty() {
         bail!("no session_id for task {id}");
     }

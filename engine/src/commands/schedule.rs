@@ -137,6 +137,7 @@ pub fn cmd_sched_trigger(db: &Db, id: &str) -> Result<()> {
             context,
             linear: None,
             stage: None,
+            runtime: "claude-code".into(),
         },
     )?;
 
