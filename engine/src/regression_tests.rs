@@ -1198,6 +1198,7 @@ mod regression {
         );
 
         // Must post a comment explaining the escalation.
+        // RIG-338: generic retry cap may fire instead of reviewer-specific cycle limit.
         assert!(
             decision.effects.iter().any(|e| {
                 e.effect_type == EffectType::PostComment
@@ -1205,7 +1206,9 @@ mod regression {
                         .get("body")
                         .and_then(|v| v.as_str())
                         .map_or(false, |s| {
-                            s.contains("cycle limit") || s.contains("Review cycle limit")
+                            s.contains("cycle limit")
+                                || s.contains("Review cycle limit")
+                                || s.contains("retry cap reached")
                         })
             }),
             "RIG-335 regression: escalation must include explanatory comment"
