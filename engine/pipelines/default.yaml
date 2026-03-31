@@ -29,8 +29,8 @@ stages:
     agent: pipeline-engineer
     model: opus
     fallback: sonnet
-    light_model: opus
-    light_threshold: 2
+    light_model: sonnet
+    light_threshold: 3
     max_turns: 100
     max_stage_attempts: 3
     on_max_rounds: blocked
