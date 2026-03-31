@@ -265,6 +265,16 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     }
                 }
 
+                // RIG-357: Failure cooldown + failure cap — prevents rapid-fire retries
+                // when tasks crash or time out. Covers the failed-task path that
+                // decide_callback() never sees (it only runs for completed tasks).
+                if should_skip_due_to_failures(
+                    db, identifier, stage_name, stage_cfg, linear, issue_id,
+                )? {
+                    total_skipped += 1;
+                    continue;
+                }
+
                 // For reviewer stage: skip if PR is already merged (manual merge while in Review)
                 // RIG-306: Only skip if merged AND no open PR exists (re-worked issues have both)
                 if stage_name == "reviewer"
@@ -494,6 +504,13 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 }
             }
 
+            // RIG-357: Failure cooldown + failure cap (label path)
+            if should_skip_due_to_failures(db, identifier, stage_name, stage_cfg, linear, issue_id)?
+            {
+                total_skipped += 1;
+                continue;
+            }
+
             // For reviewer stage: skip if PR is already merged
             // RIG-306: Only skip if merged AND no open PR exists (re-worked issues have both)
             if *stage_name == "reviewer"
@@ -589,6 +606,87 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
 
     println!("\nPipeline poll: {total_created} created, {total_skipped} skipped");
     Ok(())
+}
+
+/// Cooldown in seconds after a failed task before the poller can spawn a new one (RIG-357).
+/// Prevents rapid-fire retries when tasks fail instantly (e.g. large diffs, context limits).
+const FAILURE_COOLDOWN_SECS: i64 = 300; // 5 minutes
+
+/// Check if a recent failure should block spawning a new task for this issue+stage (RIG-357).
+///
+/// Returns `true` (should skip) if:
+/// 1. The most recent failed task finished within `FAILURE_COOLDOWN_SECS`, OR
+/// 2. The number of failed tasks >= `max_stage_attempts` (if configured).
+///
+/// When the failure cap is hit, posts a comment and moves the issue to the escalation status.
+fn should_skip_due_to_failures(
+    db: &Db,
+    identifier: &str,
+    stage_name: &str,
+    stage_cfg: &super::config::StageConfig,
+    linear: &dyn LinearApi,
+    issue_id: &str,
+) -> Result<bool> {
+    // 1. Failure cap: check if failed task count >= max_stage_attempts.
+    // This mirrors decide_callback()'s retry cap (RIG-338) but covers the failed-task path
+    // that callbacks never see (callbacks only run for completed tasks).
+    if let (Some(max_attempts), Some(on_max_verdict)) =
+        (stage_cfg.attempt_limit(), &stage_cfg.on_max_rounds)
+    {
+        let failed_count = db.count_failed_tasks_for_issue_stage(identifier, stage_name)?;
+        if failed_count >= max_attempts as i64 {
+            let escalation_status = stage_cfg
+                .transition_for(on_max_verdict)
+                .map(|t| t.status.as_str())
+                .unwrap_or("backlog")
+                .to_string();
+            eprintln!(
+                "  ! {identifier} stage={stage_name}: failure cap reached — \
+                 {failed_count} failed tasks >= limit {max_attempts}, \
+                 escalating to {escalation_status}"
+            );
+            if let Err(e) = linear.move_issue_by_name(issue_id, &escalation_status) {
+                eprintln!(
+                    "  ! failure cap: failed to move {identifier} to {escalation_status}: {e}"
+                );
+            }
+            if let Err(e) = linear.comment(
+                identifier,
+                &format!(
+                    "**Stage failure cap reached** (stage: {stage_name}, {failed_count} failed tasks, \
+                     limit: {max_attempts}). Tasks are crashing/timing out repeatedly. \
+                     Moving to {escalation_status} — manual intervention required."
+                ),
+            ) {
+                eprintln!(
+                    "  ! failure cap: failed to post comment on {identifier}: {e}"
+                );
+            }
+            return Ok(true);
+        }
+    }
+
+    // 2. Cooldown: if the most recent failed task finished within FAILURE_COOLDOWN_SECS,
+    // skip this poll cycle to avoid rapid-fire retries.
+    if let Some(last_failed_time) =
+        db.last_failed_task_time_for_issue_stage(identifier, stage_name)?
+    {
+        if let Ok(ts) =
+            chrono::NaiveDateTime::parse_from_str(&last_failed_time, "%Y-%m-%dT%H:%M:%S")
+        {
+            let now = chrono::Local::now().naive_local();
+            let elapsed = now.signed_duration_since(ts).num_seconds();
+            if elapsed < FAILURE_COOLDOWN_SECS {
+                eprintln!(
+                    "  ~ {identifier} stage={stage_name}: cooldown active — \
+                     last failure {elapsed}s ago (limit: {FAILURE_COOLDOWN_SECS}s)"
+                );
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
 }
 
 /// Build the initial prompt for a polled stage (from config, with issue vars).
@@ -1167,6 +1265,195 @@ stages:
         assert!(
             tasks_71.is_empty(),
             "canceled issues should not spawn tasks"
+        );
+    }
+
+    // ─── RIG-357: failure cooldown and failure cap ───────────────────────
+
+    #[test]
+    fn poll_failure_cap_blocks_after_max_stage_attempts() {
+        // RIG-357: after max_stage_attempts (3) failed tasks, poller should stop spawning
+        // and escalate to backlog
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Insert 3 failed reviewer tasks (max_stage_attempts=3 in default.yaml)
+        for i in 0..3 {
+            let mut task = crate::db::make_test_task(&format!("20260401-fail{i}"));
+            task.status = crate::models::Status::Failed;
+            task.linear_issue_id = "RIG-357".to_string();
+            task.pipeline_stage = "reviewer".to_string();
+            task.linear_pushed = true;
+            db.insert_task(&task).unwrap();
+        }
+
+        // Issue in Review status
+        let issue = fake_issue_with_state(
+            "uuid-357",
+            "RIG-357",
+            "Reviewer stuck on large diff",
+            &["Feature", "repo:werma"],
+            "started",
+        );
+        linear.set_issues_for_status("review", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // No new reviewer task should be created
+        let active_tasks = db
+            .tasks_by_linear_issue("RIG-357", Some("reviewer"), true)
+            .unwrap();
+        assert!(
+            active_tasks.is_empty(),
+            "failure cap should prevent spawning new reviewer task"
+        );
+
+        // Issue should be moved to backlog
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves.iter().any(|(_, status)| status == "backlog"),
+            "failure cap should move issue to backlog, got: {moves:?}"
+        );
+
+        // Comment should be posted
+        let comments = linear.comment_calls.borrow();
+        assert!(
+            comments
+                .iter()
+                .any(|(id, body)| id == "RIG-357" && body.contains("failure cap reached")),
+            "failure cap should post a comment"
+        );
+    }
+
+    #[test]
+    fn poll_failure_cooldown_blocks_recent_failure() {
+        // RIG-357: within cooldown window after a failure, poller should not spawn
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Insert 1 recently failed reviewer task (within cooldown window)
+        let mut task = crate::db::make_test_task("20260401-recent-fail");
+        task.status = crate::models::Status::Failed;
+        task.linear_issue_id = "FAT-49".to_string();
+        task.pipeline_stage = "reviewer".to_string();
+        task.linear_pushed = true;
+        db.insert_task(&task).unwrap();
+        // Set finished_at to now (within cooldown)
+        let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        db.update_task_field("20260401-recent-fail", "finished_at", &now)
+            .unwrap();
+
+        // Issue in Review status
+        let issue = fake_issue_with_state(
+            "uuid-fat-49",
+            "FAT-49",
+            "Large diff review",
+            &["Feature", "repo:werma"],
+            "started",
+        );
+        linear.set_issues_for_status("review", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // No new reviewer task should be created (cooldown active)
+        let active_tasks = db
+            .tasks_by_linear_issue("FAT-49", Some("reviewer"), true)
+            .unwrap();
+        assert!(
+            active_tasks.is_empty(),
+            "cooldown should prevent spawning new reviewer task after recent failure"
+        );
+    }
+
+    #[test]
+    fn poll_failure_cooldown_allows_after_window_expires() {
+        // RIG-357: after cooldown expires, poller should allow new spawn
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Insert 1 failed reviewer task with old finished_at (well past cooldown)
+        let mut task = crate::db::make_test_task("20260401-old-fail");
+        task.status = crate::models::Status::Failed;
+        task.linear_issue_id = "FAT-50".to_string();
+        task.pipeline_stage = "reviewer".to_string();
+        task.linear_pushed = true;
+        db.insert_task(&task).unwrap();
+        // Set finished_at to 10 minutes ago (past 5-minute cooldown)
+        let old_time = (chrono::Local::now() - chrono::Duration::minutes(10))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        db.update_task_field("20260401-old-fail", "finished_at", &old_time)
+            .unwrap();
+
+        // Issue in Review status
+        let issue = fake_issue_with_state(
+            "uuid-fat-50-retry",
+            "FAT-50",
+            "Retry after cooldown",
+            &["Feature", "repo:werma"],
+            "started",
+        );
+        linear.set_issues_for_status("review", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // New reviewer task should be created (cooldown expired)
+        let all_tasks = db
+            .tasks_by_linear_issue("FAT-50", Some("reviewer"), false)
+            .unwrap();
+        assert_eq!(
+            all_tasks.len(),
+            2,
+            "after cooldown expires, poller should create a new reviewer task"
+        );
+    }
+
+    #[test]
+    fn poll_failure_cap_does_not_block_engineer_under_limit() {
+        // Verify that < max_stage_attempts failures do NOT block spawning
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Insert 2 failed engineer tasks (max_stage_attempts=3 in default.yaml)
+        for i in 0..2 {
+            let mut task = crate::db::make_test_task(&format!("20260401-eng-fail{i}"));
+            task.status = crate::models::Status::Failed;
+            task.linear_issue_id = "RIG-358".to_string();
+            task.pipeline_stage = "engineer".to_string();
+            task.linear_pushed = true;
+            db.insert_task(&task).unwrap();
+            // Set finished_at to 10 minutes ago (past cooldown)
+            let old_time = (chrono::Local::now() - chrono::Duration::minutes(10))
+                .format("%Y-%m-%dT%H:%M:%S")
+                .to_string();
+            db.update_task_field(&format!("20260401-eng-fail{i}"), "finished_at", &old_time)
+                .unwrap();
+        }
+
+        // Issue in In Progress status
+        let issue = fake_issue_with_state(
+            "uuid-358",
+            "RIG-358",
+            "Engineer with some failures",
+            &["Feature", "repo:werma"],
+            "started",
+        );
+        linear.set_issues_for_status("in_progress", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // New engineer task SHOULD be created (under limit, cooldown expired)
+        let all_tasks = db
+            .tasks_by_linear_issue("RIG-358", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(
+            all_tasks.len(),
+            3,
+            "under failure cap + past cooldown should allow new task spawn"
         );
     }
 }
