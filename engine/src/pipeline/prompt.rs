@@ -65,6 +65,10 @@ fn sanitize_text_vars(vars: &mut HashMap<String, String>) {
 /// Currently handles:
 /// - `nit_policy`: generated from `nit_threshold`. When threshold=0, nits are informational
 ///   only. When threshold>=1, produces reject/approve rules with the threshold value.
+/// - `reviewer_skill_section`: conditional skill invocation block for reviewer prompts.
+///   On first review (no `previous_review`), instructs the agent to invoke `/code-review`.
+///   On re-review rounds (`previous_review` is set), skips skill invocation — the agent
+///   already loaded the skill in the prior round and should focus on verifying fixes.
 fn compute_derived_vars(vars: &mut HashMap<String, String>) {
     let threshold: u32 = vars
         .get("nit_threshold")
@@ -80,6 +84,32 @@ fn compute_derived_vars(vars: &mut HashMap<String, String>) {
         )
     };
     vars.entry("nit_policy".to_string()).or_insert(policy);
+
+    // RIG-357: Skip /code-review skill on re-review rounds to avoid hangs on large diffs.
+    // Re-review is detected by a non-empty `previous_review` variable.
+    let is_re_review = vars
+        .get("previous_review")
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let skill_section = if is_re_review {
+        "## Re-Review: Skip /code-review skill\n\
+         **Do NOT invoke the `/code-review` skill** on re-review rounds — skip that step entirely. \
+         The previous review context is already provided above. \
+         Focus exclusively on verifying that the previously flagged issues are resolved.\n\n\
+         ## Review Protocol\n\
+         1. ~~Invoke `/code-review` skill~~ — **SKIP on re-review**"
+            .to_string()
+    } else {
+        "## FIRST: Invoke the Code Review skill\n\
+         Before starting the review, invoke the `/code-review` skill using the Skill tool \
+         (skill: \"code-review:code-review\"). This loads the full review checklist and \
+         standards you MUST follow.\n\n\
+         ## Review Protocol\n\
+         1. Invoke `/code-review` skill (Skill tool, skill: \"code-review:code-review\")"
+            .to_string()
+    };
+    vars.entry("reviewer_skill_section".to_string())
+        .or_insert(skill_section);
 }
 
 #[cfg(test)]
@@ -321,5 +351,97 @@ mod tests {
         let v = vars(&[("issue_id", "RIG-1")]);
         let result = render_prompt(template, &v);
         assert_eq!(result, "{issue} RIG-1");
+    }
+
+    // ─── RIG-357: reviewer_skill_section ─────────────────────────────────────
+
+    #[test]
+    fn reviewer_skill_section_first_review_invokes_skill() {
+        // No previous_review → first review → skill invocation instruction.
+        let templates = IndexMap::new();
+        let runtime = vars(&[("issue_id", "RIG-357")]); // no previous_review
+        let result = build_vars(&templates, &runtime);
+        let section = &result["reviewer_skill_section"];
+        assert!(
+            section.contains("Invoke the Code Review skill"),
+            "first review should instruct to invoke skill, got:\n{section}"
+        );
+        assert!(
+            section.contains("code-review:code-review"),
+            "first review should reference skill ID, got:\n{section}"
+        );
+        assert!(
+            !section.contains("SKIP"),
+            "first review should not say SKIP, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn reviewer_skill_section_re_review_skips_skill() {
+        // Non-empty previous_review → re-review → skip instruction.
+        let templates = IndexMap::new();
+        let runtime = vars(&[
+            ("issue_id", "RIG-357"),
+            (
+                "previous_review",
+                "## Re-Review Context\nPrior feedback here.",
+            ),
+        ]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["reviewer_skill_section"];
+        assert!(
+            section.contains("SKIP"),
+            "re-review should instruct to skip skill, got:\n{section}"
+        );
+        assert!(
+            section.contains("Do NOT invoke"),
+            "re-review should say Do NOT invoke, got:\n{section}"
+        );
+        assert!(
+            !section.contains("code-review:code-review"),
+            "re-review should not reference skill ID, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn reviewer_skill_section_empty_previous_review_is_first_review() {
+        // Empty string previous_review → treated as first review (no prior context).
+        let templates = IndexMap::new();
+        let runtime = vars(&[("issue_id", "RIG-357"), ("previous_review", "")]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["reviewer_skill_section"];
+        assert!(
+            section.contains("Invoke the Code Review skill"),
+            "empty previous_review should be treated as first review, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn reviewer_skill_section_whitespace_only_previous_review_is_first_review() {
+        // Whitespace-only previous_review → treated as first review.
+        let templates = IndexMap::new();
+        let runtime = vars(&[("issue_id", "RIG-357"), ("previous_review", "   \n  ")]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["reviewer_skill_section"];
+        assert!(
+            section.contains("Invoke the Code Review skill"),
+            "whitespace-only previous_review should be first review, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn reviewer_skill_section_not_overridden_by_explicit_value() {
+        // If reviewer_skill_section is explicitly set (e.g. via pipeline template), keep it.
+        let mut templates = IndexMap::new();
+        templates.insert(
+            "reviewer_skill_section".to_string(),
+            "custom skill section".to_string(),
+        );
+        let runtime = vars(&[("issue_id", "RIG-357")]);
+        let result = build_vars(&templates, &runtime);
+        assert_eq!(
+            result["reviewer_skill_section"], "custom skill section",
+            "explicit reviewer_skill_section should not be overridden"
+        );
     }
 }
