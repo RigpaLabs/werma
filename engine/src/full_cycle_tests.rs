@@ -66,7 +66,7 @@ mod tests {
         db.set_task_status(&analyst_tasks[0].id, Status::Completed)
             .unwrap();
 
-        let analyst_output = "## Analysis\nThis feature needs X and Y.\n\nESTIMATE=3\nVERDICT=DONE";
+        let analyst_output = "## Scope\nThis feature needs X and Y.\n\n## Acceptance Criteria\n- Feature works\n\n## Out of Scope\n- None\n\nESTIMATE=3\nVERDICT=DONE";
 
         callback(
             &db,

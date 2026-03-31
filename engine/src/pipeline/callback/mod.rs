@@ -248,7 +248,7 @@ mod tests {
         task.pipeline_stage = "analyst".to_string();
         db.insert_task(&task).unwrap();
 
-        let result = "## Spec\nDo the thing.\nESTIMATE=3\nVERDICT=DONE";
+        let result = "## Scope\nDo the thing.\n\n## Acceptance Criteria\n- AC1\n\n## Out of Scope\n- None\n\nESTIMATE=3\nVERDICT=DONE";
 
         callback(
             &db,

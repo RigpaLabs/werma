@@ -1038,7 +1038,7 @@ fn callback_analyst_estimate_updates_linear() {
     task.pipeline_stage = "analyst".to_string();
     db.insert_task(&task).unwrap();
 
-    let result = "## Analysis\nSpec here.\n\nESTIMATE=5\nVERDICT=DONE";
+    let result = "## Scope\nSpec here.\n\n## Acceptance Criteria\n- AC1\n\n## Out of Scope\n- None\n\nESTIMATE=5\nVERDICT=DONE";
 
     callback(
         &db,
@@ -1072,7 +1072,7 @@ fn callback_analyst_adds_done_label() {
     task.pipeline_stage = "analyst".to_string();
     db.insert_task(&task).unwrap();
 
-    let result = "## Analysis\nSpec here.\n\nESTIMATE=3\nVERDICT=DONE";
+    let result = "## Scope\nSpec here.\n\n## Acceptance Criteria\n- AC1\n\n## Out of Scope\n- None\n\nESTIMATE=3\nVERDICT=DONE";
 
     callback(
         &db,
@@ -1508,7 +1508,7 @@ fn outbox_full_cycle_callback_to_processor() {
     db.insert_task(&task).unwrap();
 
     // Phase 1: callback writes effects to outbox.
-    let analyst_output = "## Spec\nDo the thing.\n\nESTIMATE=3";
+    let analyst_output = "## Scope\nDo the thing.\n\n## Acceptance Criteria\n- AC1\n\n## Out of Scope\n- None\n\nESTIMATE=3";
     callback(
         &db,
         "20260326-cycle",

@@ -6,7 +6,7 @@ use super::super::loader::load_default;
 use super::super::pr::{get_pr_review_verdict, has_open_pr_for_issue, pr_title_from_url};
 use super::super::verdict::{
     extract_review_body, is_max_turns_exit, parse_comments, parse_estimate, parse_pr_url,
-    parse_verdict,
+    parse_verdict, validate_analyst_spec,
 };
 use super::effects_helper::{extract_spec_from_output, format_callback_comment, make_effect};
 use super::task_builder::build_next_stage_task;
@@ -248,6 +248,37 @@ pub fn decide_callback(
                 "analyst_spec_comment",
                 serde_json::json!({ "body": truncated }),
             ));
+        }
+    }
+
+    // RIG-340: Validate analyst spec contains required sections before allowing transition.
+    // Check the full output (including comment blocks) — the spec may be in either place.
+    if stage == "analyst" && verdict_str == "done" {
+        if let Err(missing) = validate_analyst_spec(result) {
+            let missing_list = missing
+                .iter()
+                .map(|s| format!("- `{s}`"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            eprintln!(
+                "[CALLBACK] {linear_issue_id}: analyst spec missing required sections: {}",
+                missing.join(", ")
+            );
+            effects.push(make_effect(
+                task_id,
+                linear_issue_id,
+                EffectType::PostComment,
+                "spec_validation_failed",
+                serde_json::json!({
+                    "body": format!(
+                        "**Analyst spec validation failed** (task: `{task_id}`). \
+                         The following required sections are missing:\n\n{missing_list}\n\n\
+                         Please re-run the analyst stage with a complete spec."
+                    )
+                }),
+            ));
+            // No transition — issue stays in current state, task is treated as failed
+            return Ok(CallbackDecision { internal, effects });
         }
     }
 
@@ -604,6 +635,16 @@ mod tests {
         task_id.to_string()
     }
 
+    /// Helper: returns analyst output that passes spec validation (RIG-340).
+    fn valid_analyst_output(estimate: i32) -> String {
+        format!(
+            "## Scope\nImplement feature X\n\n\
+             ## Acceptance Criteria\n- req 1\n- req 2\n\n\
+             ## Out of Scope\n- Not Y\n\n\
+             ESTIMATE={estimate}"
+        )
+    }
+
     /// Helper: create a minimal reviewer task in `db`.
     fn insert_reviewer_task(db: &crate::db::Db, task_id: &str, issue_id: &str) {
         let mut t = crate::db::make_test_task(task_id);
@@ -622,7 +663,7 @@ mod tests {
         let issue_id = "DECIDE-100";
         insert_analyst_task(&db, "decide-100-a", issue_id);
 
-        let result = "## Spec\nImplement feature X\n- req 1\n- req 2\n\nESTIMATE=5";
+        let result = &valid_analyst_output(5);
 
         let decision = decide_callback(
             &db,
@@ -847,7 +888,7 @@ mod tests {
         let task_id = "decide-dedup-t1";
         insert_analyst_task(&db, task_id, issue_id);
 
-        let result = "## Spec\nSome content\n\nESTIMATE=3";
+        let result = &valid_analyst_output(3);
 
         let d1 = decide_callback(&db, task_id, "analyst", result, issue_id, "/tmp", &cmd).unwrap();
         let d2 = decide_callback(&db, task_id, "analyst", result, issue_id, "/tmp", &cmd).unwrap();
@@ -881,8 +922,7 @@ mod tests {
         let task_id = "block-test-t1";
         insert_analyst_task(&db, task_id, issue_id);
 
-        let result =
-            "## Spec\nImplement the feature.\n\nEstimate: 3 SP\n\nESTIMATE=3\n\nVERDICT=done";
+        let result = &format!("{}\n\nVERDICT=done", valid_analyst_output(3));
 
         let decision =
             decide_callback(&db, task_id, "analyst", result, issue_id, "/tmp", &cmd).unwrap();
@@ -1602,7 +1642,7 @@ mod tests {
             insert_analyst_task(&db, &format!("338-nc-a{i}"), issue_id);
         }
 
-        let result = "## Spec\nAnalysis complete\n\nVERDICT=DONE";
+        let result = &format!("{}\n\nVERDICT=DONE", valid_analyst_output(3));
 
         let decision =
             decide_callback(&db, "338-nc-a4", "analyst", result, issue_id, "/tmp", &cmd).unwrap();
@@ -1621,6 +1661,187 @@ mod tests {
             payload.get("target_status").and_then(|v| v.as_str()),
             Some("todo"),
             "uncapped stage: should follow normal transition to todo"
+        );
+    }
+
+    // ─── RIG-340: Analyst spec validation gate ──────────────────────────
+
+    #[test]
+    fn decide_analyst_done_missing_sections_blocks_transition() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-340-MISS";
+        insert_analyst_task(&db, "340-miss-a1", issue_id);
+
+        // Missing all required sections
+        let result = "## Spec\nImplement feature X\n\nESTIMATE=5\nVERDICT=DONE";
+
+        let decision = decide_callback(
+            &db,
+            "340-miss-a1",
+            "analyst",
+            result,
+            issue_id,
+            "/tmp",
+            &cmd,
+        )
+        .unwrap();
+
+        // Must NOT have MoveIssue — validation blocks the transition
+        assert!(
+            !decision
+                .effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "missing spec sections must block MoveIssue, got: {:?}",
+            decision.effects
+        );
+
+        // Must have a comment explaining what's missing
+        let validation_comment = decision
+            .effects
+            .iter()
+            .find(|e| e.dedup_key.contains("spec_validation_failed"));
+        assert!(
+            validation_comment.is_some(),
+            "must post comment about missing sections"
+        );
+        let body = validation_comment
+            .unwrap()
+            .payload
+            .get("body")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            body.contains("## Scope")
+                && body.contains("## Acceptance Criteria")
+                && body.contains("## Out of Scope"),
+            "comment must list all missing sections, got: {body}"
+        );
+
+        // Must NOT spawn next task
+        assert!(
+            decision.internal.spawn_task.is_none(),
+            "validation failure must not spawn next task"
+        );
+    }
+
+    #[test]
+    fn decide_analyst_done_partial_sections_blocks_transition() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-340-PART";
+        insert_analyst_task(&db, "340-part-a1", issue_id);
+
+        // Has Scope and AC but missing Out of Scope
+        let result = "## Scope\nDo X\n## Acceptance Criteria\n- AC1\n\nESTIMATE=3\nVERDICT=DONE";
+
+        let decision = decide_callback(
+            &db,
+            "340-part-a1",
+            "analyst",
+            result,
+            issue_id,
+            "/tmp",
+            &cmd,
+        )
+        .unwrap();
+
+        assert!(
+            !decision
+                .effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "partially valid spec must still block transition"
+        );
+
+        let validation_comment = decision
+            .effects
+            .iter()
+            .find(|e| e.dedup_key.contains("spec_validation_failed"));
+        let body = validation_comment
+            .unwrap()
+            .payload
+            .get("body")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            body.contains("## Out of Scope"),
+            "comment must list only the missing section, got: {body}"
+        );
+        assert!(
+            !body.contains("## Scope\n"),
+            "comment must not list sections that are present"
+        );
+    }
+
+    #[test]
+    fn decide_analyst_done_valid_spec_allows_transition() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-340-VALID";
+        insert_analyst_task(&db, "340-valid-a1", issue_id);
+
+        let result = &valid_analyst_output(5);
+
+        let decision = decide_callback(
+            &db,
+            "340-valid-a1",
+            "analyst",
+            result,
+            issue_id,
+            "/tmp",
+            &cmd,
+        )
+        .unwrap();
+
+        assert!(
+            decision
+                .effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "valid spec must allow transition, got: {:?}",
+            decision.effects
+        );
+
+        assert!(
+            !decision
+                .effects
+                .iter()
+                .any(|e| e.dedup_key.contains("spec_validation_failed")),
+            "valid spec must not emit validation failure comment"
+        );
+    }
+
+    #[test]
+    fn decide_analyst_blocked_skips_validation() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-340-BLOCK";
+        insert_analyst_task(&db, "340-block-a1", issue_id);
+
+        // BLOCKED verdict — no spec sections needed
+        let result = "Need clarification on requirements.\nVERDICT=BLOCKED";
+
+        let decision = decide_callback(
+            &db,
+            "340-block-a1",
+            "analyst",
+            result,
+            issue_id,
+            "/tmp",
+            &cmd,
+        )
+        .unwrap();
+
+        // Blocked should still produce a transition (to backlog or similar)
+        // but must NOT fail validation — validation only runs on "done"
+        assert!(
+            !decision
+                .effects
+                .iter()
+                .any(|e| e.dedup_key.contains("spec_validation_failed")),
+            "BLOCKED verdict must skip spec validation"
         );
     }
 }

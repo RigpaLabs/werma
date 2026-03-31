@@ -377,7 +377,7 @@ mod regression {
 
         let cmd = FakeCommandRunner::new();
 
-        let result = "## Spec\nDetailed analysis here.\nESTIMATE=3\nVERDICT=DONE";
+        let result = "## Scope\nDetailed analysis here.\n\n## Acceptance Criteria\n- AC1\n\n## Out of Scope\n- None\n\nESTIMATE=3\nVERDICT=DONE";
 
         let decision = decide_callback(
             &db,

@@ -258,6 +258,48 @@ pub fn parse_estimate(result: &str) -> i32 {
     0
 }
 
+/// Required sections that must appear in analyst spec output.
+/// Each entry is (heading text for regex match, human-readable name for error messages).
+const REQUIRED_SPEC_SECTIONS: &[(&str, &str)] = &[
+    ("scope", "## Scope"),
+    ("acceptance criteria", "## Acceptance Criteria"),
+    ("out of scope", "## Out of Scope"),
+];
+
+/// Validate that analyst output contains all required spec sections.
+///
+/// Returns `Ok(())` if all sections are present, or `Err(Vec<String>)` with
+/// the human-readable names of missing sections.
+///
+/// Uses case-insensitive heading detection: matches `## Scope`, `## SCOPE`,
+/// `##Scope` (no space), and variations with extra `#` like `### Scope`.
+pub fn validate_analyst_spec(output: &str) -> Result<(), Vec<String>> {
+    let mut missing = Vec::new();
+
+    for &(pattern, display_name) in REQUIRED_SPEC_SECTIONS {
+        let found = output.lines().any(|line| {
+            let trimmed = line.trim();
+            // Match markdown headings: ##+ followed by optional space and the section name
+            if let Some(rest) = trimmed.strip_prefix("##") {
+                let after_hashes = rest.trim_start_matches('#');
+                let heading_text = after_hashes.trim();
+                heading_text.to_lowercase().starts_with(pattern)
+            } else {
+                false
+            }
+        });
+        if !found {
+            missing.push(display_name.to_string());
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(missing)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,5 +706,62 @@ mod tests {
         // "FAILED" as standalone keyword in last 10 lines
         let text = "Tests did not pass.\nFAILED";
         assert_eq!(parse_verdict(text), Some("FAILED".to_string()));
+    }
+
+    // ─── validate_analyst_spec ──────────────────────────────────────────
+
+    #[test]
+    fn validate_spec_all_sections_present() {
+        let output = "## Scope\nDo X\n## Acceptance Criteria\n- AC1\n## Out of Scope\n- Not Y\n";
+        assert!(validate_analyst_spec(output).is_ok());
+    }
+
+    #[test]
+    fn validate_spec_missing_scope() {
+        let output = "## Acceptance Criteria\n- AC1\n## Out of Scope\n- Not Y\n";
+        let err = validate_analyst_spec(output).unwrap_err();
+        assert_eq!(err, vec!["## Scope"]);
+    }
+
+    #[test]
+    fn validate_spec_missing_multiple() {
+        let output = "## Introduction\nSome text\n";
+        let err = validate_analyst_spec(output).unwrap_err();
+        assert_eq!(err.len(), 3);
+        assert!(err.contains(&"## Scope".to_string()));
+        assert!(err.contains(&"## Acceptance Criteria".to_string()));
+        assert!(err.contains(&"## Out of Scope".to_string()));
+    }
+
+    #[test]
+    fn validate_spec_case_insensitive() {
+        let output = "## SCOPE\nDo X\n## acceptance criteria\n- AC1\n## OUT OF SCOPE\n- Not Y\n";
+        assert!(validate_analyst_spec(output).is_ok());
+    }
+
+    #[test]
+    fn validate_spec_deeper_heading_level() {
+        // ### Scope (h3) should also match
+        let output = "### Scope\nDo X\n### Acceptance Criteria\n- AC1\n### Out of Scope\n- Not Y\n";
+        assert!(validate_analyst_spec(output).is_ok());
+    }
+
+    #[test]
+    fn validate_spec_no_space_after_hashes() {
+        let output = "##Scope\nDo X\n##Acceptance Criteria\n- AC1\n##Out of Scope\n- Not Y\n";
+        assert!(validate_analyst_spec(output).is_ok());
+    }
+
+    #[test]
+    fn validate_spec_heading_with_extra_text() {
+        // "## Scope & Boundaries" should match since it starts with "scope"
+        let output = "## Scope & Boundaries\nDo X\n## Acceptance Criteria (MVP)\n- AC1\n## Out of Scope for v1\n- Not Y\n";
+        assert!(validate_analyst_spec(output).is_ok());
+    }
+
+    #[test]
+    fn validate_spec_empty_output() {
+        let err = validate_analyst_spec("").unwrap_err();
+        assert_eq!(err.len(), 3);
     }
 }
