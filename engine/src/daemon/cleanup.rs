@@ -44,6 +44,7 @@ pub fn rotate_logs(werma_dir: &Path) -> Result<()> {
 
 /// Check that main branch checkouts are clean (no staged/unstaged changes).
 /// Collects unique repo root dirs from running write tasks and checks `git status`.
+/// Ignores untracked (`??`) and ignored (`!!`) files — only modified/staged files count.
 /// Uses per-repo cooldown to avoid spamming notifications every tick.
 pub fn check_main_branch_cleanliness(
     db: &Db,
@@ -87,8 +88,14 @@ pub fn check_main_branch_cleanliness(
             && out.status.success()
         {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            if !stdout.trim().is_empty() {
-                let dirty_files: Vec<&str> = stdout.lines().take(5).collect();
+            // Filter out untracked (??) and ignored (!!) files — only
+            // modified/staged/deleted files indicate real contamination.
+            let tracked_dirty: Vec<&str> = stdout
+                .lines()
+                .filter(|line| !line.starts_with("??") && !line.starts_with("!!"))
+                .collect();
+            if !tracked_dirty.is_empty() {
+                let dirty_files: Vec<&str> = tracked_dirty.iter().take(5).copied().collect();
                 log_daemon(
                     log_path,
                     &format!(
@@ -248,5 +255,190 @@ mod tests {
         let fake_notifier = crate::traits::fakes::FakeNotifier::new();
 
         check_main_branch_cleanliness(&db, &log_path, &mut notified, 300, &fake_notifier).unwrap();
+    }
+
+    /// Create a temp git repo and return its path.
+    fn init_temp_git_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        dir
+    }
+
+    /// Insert a running task with the given working_dir and task_type.
+    fn insert_running_task(db: &crate::db::Db, working_dir: &str) {
+        let task = crate::models::Task {
+            id: "20260331-001".to_string(),
+            status: crate::models::Status::Running,
+            priority: 1,
+            created_at: "2026-03-31T10:00:00".to_string(),
+            started_at: None,
+            finished_at: None,
+            task_type: "code".to_string(),
+            prompt: "test".to_string(),
+            output_path: String::new(),
+            working_dir: working_dir.to_string(),
+            model: "sonnet".to_string(),
+            max_turns: 15,
+            allowed_tools: String::new(),
+            session_id: String::new(),
+            linear_issue_id: String::new(),
+            linear_pushed: false,
+            pipeline_stage: String::new(),
+            depends_on: vec![],
+            context_files: vec![],
+            repo_hash: String::new(),
+            estimate: 0,
+            retry_count: 0,
+            retry_after: None,
+            cost_usd: None,
+            turns_used: 0,
+            handoff_content: String::new(),
+            runtime: crate::models::AgentRuntime::default(),
+        };
+        db.insert_task(&task).unwrap();
+    }
+
+    #[test]
+    fn untracked_files_do_not_trigger_warning() {
+        let repo = init_temp_git_repo();
+        // Create an untracked file — should NOT trigger contamination.
+        std::fs::write(repo.path().join("untracked.txt"), "hello").unwrap();
+
+        let log_dir = tempfile::tempdir().unwrap();
+        let log_path = log_dir.path().join("daemon.log");
+        let db = crate::db::Db::open_in_memory().unwrap();
+        insert_running_task(&db, &repo.path().to_string_lossy());
+
+        let mut notified = HashMap::new();
+        let fake_notifier = crate::traits::fakes::FakeNotifier::new();
+
+        check_main_branch_cleanliness(&db, &log_path, &mut notified, 300, &fake_notifier).unwrap();
+
+        // No macOS notification should have been sent.
+        assert!(
+            fake_notifier.macos_calls.borrow().is_empty(),
+            "untracked files should not trigger contamination warning"
+        );
+    }
+
+    #[test]
+    fn modified_tracked_file_triggers_warning() {
+        let repo = init_temp_git_repo();
+        // Create and commit a file, then modify it — should trigger contamination.
+        let file_path = repo.path().join("tracked.txt");
+        std::fs::write(&file_path, "original").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "add tracked file"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        // Modify the tracked file.
+        std::fs::write(&file_path, "modified").unwrap();
+
+        let log_dir = tempfile::tempdir().unwrap();
+        let log_path = log_dir.path().join("daemon.log");
+        let db = crate::db::Db::open_in_memory().unwrap();
+        insert_running_task(&db, &repo.path().to_string_lossy());
+
+        let mut notified = HashMap::new();
+        let fake_notifier = crate::traits::fakes::FakeNotifier::new();
+
+        check_main_branch_cleanliness(&db, &log_path, &mut notified, 300, &fake_notifier).unwrap();
+
+        // Should have triggered a notification.
+        assert_eq!(
+            fake_notifier.macos_calls.borrow().len(),
+            1,
+            "modified tracked file should trigger contamination warning"
+        );
+    }
+
+    #[test]
+    fn staged_file_triggers_warning() {
+        let repo = init_temp_git_repo();
+        // Stage a new file (not committed) — should trigger contamination.
+        let file_path = repo.path().join("staged.txt");
+        std::fs::write(&file_path, "staged content").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "staged.txt"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+
+        let log_dir = tempfile::tempdir().unwrap();
+        let log_path = log_dir.path().join("daemon.log");
+        let db = crate::db::Db::open_in_memory().unwrap();
+        insert_running_task(&db, &repo.path().to_string_lossy());
+
+        let mut notified = HashMap::new();
+        let fake_notifier = crate::traits::fakes::FakeNotifier::new();
+
+        check_main_branch_cleanliness(&db, &log_path, &mut notified, 300, &fake_notifier).unwrap();
+
+        assert_eq!(
+            fake_notifier.macos_calls.borrow().len(),
+            1,
+            "staged file should trigger contamination warning"
+        );
+    }
+
+    #[test]
+    fn mixed_untracked_and_modified_only_warns_for_modified() {
+        let repo = init_temp_git_repo();
+        // Commit a file, then modify it.
+        let tracked = repo.path().join("tracked.txt");
+        std::fs::write(&tracked, "original").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "add file"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        std::fs::write(&tracked, "modified").unwrap();
+
+        // Also create an untracked file.
+        std::fs::write(repo.path().join("untracked.txt"), "ignore me").unwrap();
+
+        let log_dir = tempfile::tempdir().unwrap();
+        let log_path = log_dir.path().join("daemon.log");
+        let db = crate::db::Db::open_in_memory().unwrap();
+        insert_running_task(&db, &repo.path().to_string_lossy());
+
+        let mut notified = HashMap::new();
+        let fake_notifier = crate::traits::fakes::FakeNotifier::new();
+
+        check_main_branch_cleanliness(&db, &log_path, &mut notified, 300, &fake_notifier).unwrap();
+
+        // Should warn (because of modified tracked file), but the warning
+        // should not include the untracked file.
+        let calls = fake_notifier.macos_calls.borrow();
+        assert_eq!(calls.len(), 1, "should warn about modified file");
+        let (_, body, _) = &calls[0];
+        assert!(
+            body.contains("tracked.txt"),
+            "warning should mention tracked.txt"
+        );
+        assert!(
+            !body.contains("untracked.txt"),
+            "warning should not mention untracked.txt"
+        );
     }
 }
