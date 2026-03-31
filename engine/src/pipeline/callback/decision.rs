@@ -1066,6 +1066,178 @@ mod tests {
         );
     }
 
+    // ─── RIG-335: Engineer stage delivery guarantee tests ──────────────
+
+    /// Engineer DONE defaults to "done" verdict even without explicit VERDICT= marker.
+    /// This is by design — engineer/analyst stages auto-default to done.
+    #[test]
+    fn decide_engineer_defaults_to_done_without_explicit_verdict() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-335-DEF";
+        let task_id = "rig335-def-t1";
+
+        let mut t = crate::db::make_test_task(task_id);
+        t.status = Status::Completed;
+        t.linear_issue_id = issue_id.to_string();
+        t.pipeline_stage = "engineer".to_string();
+        t.task_type = "pipeline-engineer".to_string();
+        t.working_dir = "~/projects/werma".to_string();
+        db.insert_task(&t).unwrap();
+
+        // No VERDICT= in output — engineer should default to "done"
+        let result = "All changes committed and pushed.\nTests pass.";
+
+        let decision =
+            decide_callback(&db, task_id, "engineer", result, issue_id, "/tmp", &cmd).unwrap();
+
+        // Should still produce MoveIssue (defaults to done → review transition)
+        assert!(
+            decision
+                .effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "engineer without explicit verdict should default to done and queue MoveIssue"
+        );
+
+        // No PR_URL → CreatePr should be queued, reviewer NOT spawned
+        assert!(
+            decision
+                .effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::CreatePr),
+            "engineer defaulting to done without PR_URL must queue CreatePr"
+        );
+        assert!(
+            decision.internal.spawn_task.is_none(),
+            "engineer without PR_URL must not spawn reviewer even when defaulting to done"
+        );
+    }
+
+    /// Engineer BLOCKED verdict should NOT queue CreatePr or spawn reviewer.
+    #[test]
+    fn decide_engineer_blocked_does_not_create_pr() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-335-BLK";
+        let task_id = "rig335-blk-t1";
+
+        let mut t = crate::db::make_test_task(task_id);
+        t.status = Status::Completed;
+        t.linear_issue_id = issue_id.to_string();
+        t.pipeline_stage = "engineer".to_string();
+        t.task_type = "pipeline-engineer".to_string();
+        t.working_dir = "~/projects/werma".to_string();
+        db.insert_task(&t).unwrap();
+
+        let result = "Cannot implement — dependency not available.\nVERDICT=BLOCKED";
+
+        let decision =
+            decide_callback(&db, task_id, "engineer", result, issue_id, "/tmp", &cmd).unwrap();
+
+        // BLOCKED should NOT queue CreatePr
+        assert!(
+            !decision
+                .effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::CreatePr),
+            "engineer BLOCKED must NOT queue CreatePr"
+        );
+
+        // Should NOT spawn reviewer
+        assert!(
+            decision.internal.spawn_task.is_none(),
+            "engineer BLOCKED must NOT spawn reviewer"
+        );
+    }
+
+    /// Reviewer APPROVED with PR_URL should queue proper effects.
+    #[test]
+    fn decide_reviewer_approved_posts_pr_review() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-335-RAPPR";
+        let task_id = "rig335-rappr-t1";
+
+        let mut t = crate::db::make_test_task(task_id);
+        t.status = Status::Completed;
+        t.linear_issue_id = issue_id.to_string();
+        t.pipeline_stage = "reviewer".to_string();
+        t.task_type = "pipeline-reviewer".to_string();
+        t.working_dir = "~/projects/werma".to_string();
+        db.insert_task(&t).unwrap();
+
+        let result = "---COMMENT---\nLGTM! Clean implementation.\n---END COMMENT---\nREVIEW_VERDICT=APPROVED";
+
+        let decision =
+            decide_callback(&db, task_id, "reviewer", result, issue_id, "/tmp", &cmd).unwrap();
+
+        // Should queue PostPrComment with approve event
+        let pr_comment = decision
+            .effects
+            .iter()
+            .find(|e| e.effect_type == EffectType::PostPrComment);
+        assert!(
+            pr_comment.is_some(),
+            "reviewer APPROVED with review body must queue PostPrComment"
+        );
+        let payload = &pr_comment.unwrap().payload;
+        assert_eq!(
+            payload.get("review_event").and_then(|v| v.as_str()),
+            Some("approve"),
+            "APPROVED verdict must map to 'approve' review event"
+        );
+
+        // Should move issue (APPROVED → next status)
+        assert!(
+            decision
+                .effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "reviewer APPROVED must queue MoveIssue"
+        );
+    }
+
+    /// Reviewer REJECTED must map to 'request-changes' review event.
+    #[test]
+    fn decide_reviewer_rejected_uses_request_changes_event() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-335-RREJ";
+        let task_id = "rig335-rrej-t1";
+
+        let mut t = crate::db::make_test_task(task_id);
+        t.status = Status::Completed;
+        t.linear_issue_id = issue_id.to_string();
+        t.pipeline_stage = "reviewer".to_string();
+        t.task_type = "pipeline-reviewer".to_string();
+        t.working_dir = "~/projects/werma".to_string();
+        db.insert_task(&t).unwrap();
+
+        let result = "---COMMENT---\n- blocker: missing error handling\n---END COMMENT---\nREVIEW_VERDICT=REJECTED";
+
+        let decision =
+            decide_callback(&db, task_id, "reviewer", result, issue_id, "/tmp", &cmd).unwrap();
+
+        let pr_comment = decision
+            .effects
+            .iter()
+            .find(|e| e.effect_type == EffectType::PostPrComment);
+        assert!(
+            pr_comment.is_some(),
+            "reviewer REJECTED with review body must queue PostPrComment"
+        );
+        assert_eq!(
+            pr_comment
+                .unwrap()
+                .payload
+                .get("review_event")
+                .and_then(|v| v.as_str()),
+            Some("request-changes"),
+            "REJECTED verdict must map to 'request-changes' review event (RIG-318)"
+        );
+    }
+
     /// RIG-333: Reviewer callback returns handoff_update in InternalChanges (not direct DB write).
     #[test]
     fn decide_reviewer_stores_handoff_content() {
