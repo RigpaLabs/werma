@@ -603,4 +603,275 @@ mod tests {
             "MoveIssue('review') must still be queued even without PR_URL"
         );
     }
+
+    // ─── RIG-356: Reviewer reject → engineer fix → re-review with context ─────
+
+    /// Full-cycle test: reviewer REJECTS → engineer fixes → second reviewer gets
+    /// previous rejection context injected into prompt.
+    ///
+    /// Verifies the RIG-333 reviewer context carryover chain end-to-end:
+    /// 1. Reviewer callback stores handoff_content on the reviewer task
+    /// 2. Engineer callback calls lookup_previous_reviewer_handoff()
+    /// 3. Spawned reviewer task 2 prompt contains "Re-Review Context" header
+    /// 4. Spawned reviewer task 2 prompt contains rejection feedback verbatim
+    #[test]
+    fn rig356_reviewer_reject_engineer_fix_re_review_carries_context() {
+        ensure_working_dir();
+        let db = Db::open_in_memory().unwrap();
+        let linear = StatefulFakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        linear.add_issue(
+            "uuid-rig356",
+            "RIG-356",
+            "Re-review context test",
+            "Test reviewer context carryover",
+            "in_progress",
+            vec![
+                "repo:werma".to_string(),
+                "analyze:done".to_string(),
+                "spec:done".to_string(),
+            ],
+        );
+
+        // Step 1: Poll — creates engineer task for in_progress issue.
+        poll(&db, &linear, &cmd).unwrap();
+
+        let engineer_tasks = db
+            .tasks_by_linear_issue("RIG-356", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(engineer_tasks.len(), 1, "engineer task should be created");
+
+        // Step 2: Engineer completes with PR → spawns reviewer task 1.
+        db.set_task_status(&engineer_tasks[0].id, Status::Completed)
+            .unwrap();
+
+        let engineer_output_1 = "## Implementation\n\
+                                  Added feature X.\n\n\
+                                  PR_URL=https://github.com/RigpaLabs/werma/pull/356\n\
+                                  VERDICT=DONE";
+
+        callback(
+            &db,
+            &engineer_tasks[0].id,
+            "engineer",
+            engineer_output_1,
+            "RIG-356",
+            "~/projects/werma",
+            &cmd,
+        )
+        .unwrap();
+
+        let reviewer_tasks_1 = db
+            .tasks_by_linear_issue("RIG-356", Some("reviewer"), false)
+            .unwrap();
+        assert_eq!(
+            reviewer_tasks_1.len(),
+            1,
+            "reviewer task 1 should be spawned by engineer callback"
+        );
+
+        // Step 3: Reviewer 1 REJECTS — callback stores handoff_content on reviewer task.
+        db.set_task_status(&reviewer_tasks_1[0].id, Status::Completed)
+            .unwrap();
+
+        let reviewer_output_rejected = "## Code Review\n\
+                                         - blocker: missing error handling in parse_config()\n\
+                                         - blocker: SQL injection vulnerability in query builder\n\
+                                         - warning: inefficient loop in process_batch()\n\n\
+                                         REVIEW_VERDICT=REJECTED";
+
+        callback(
+            &db,
+            &reviewer_tasks_1[0].id,
+            "reviewer",
+            reviewer_output_rejected,
+            "RIG-356",
+            "~/projects/werma",
+            &cmd,
+        )
+        .unwrap();
+
+        // Verify: reviewer task 1 handoff_content is populated with rejection feedback.
+        let reviewer_1_after = db.task(&reviewer_tasks_1[0].id).unwrap().unwrap();
+        assert!(
+            !reviewer_1_after.handoff_content.is_empty(),
+            "reviewer task 1 should have handoff_content after rejection callback"
+        );
+        assert!(
+            reviewer_1_after.handoff_content.contains("Previous Review"),
+            "handoff_content should contain 'Previous Review' header, got: {}",
+            reviewer_1_after.handoff_content
+        );
+        assert!(
+            reviewer_1_after
+                .handoff_content
+                .contains("REVIEW_VERDICT=REJECTED"),
+            "handoff_content should contain verdict, got: {}",
+            reviewer_1_after.handoff_content
+        );
+
+        // Verify: MoveIssue("in_progress") effect queued (reviewer REJECTED → back to engineer).
+        let effects_after_rev1 = db.pending_effects(100).unwrap();
+        assert!(
+            effects_after_rev1.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::MoveIssue
+                    && e.payload.get("target_status").and_then(|v| v.as_str())
+                        == Some("in_progress")
+            }),
+            "reviewer REJECTED should queue MoveIssue('in_progress'), got: {effects_after_rev1:?}"
+        );
+
+        // Verify: engineer task 2 spawned (reviewer rejection → spawn engineer).
+        let engineer_tasks_2 = db
+            .tasks_by_linear_issue("RIG-356", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(
+            engineer_tasks_2.len(),
+            2,
+            "engineer task 2 should be spawned by rejected reviewer callback"
+        );
+        let eng2 = engineer_tasks_2
+            .iter()
+            .find(|t| t.status == Status::Pending)
+            .expect("second engineer task should be Pending");
+
+        // Step 4: Engineer 2 completes fix → callback spawns reviewer task 2.
+        db.set_task_status(&eng2.id, Status::Completed).unwrap();
+
+        let engineer_output_2 = "## Fix\n\
+                                  Fixed error handling and SQL injection.\n\n\
+                                  PR_URL=https://github.com/RigpaLabs/werma/pull/356\n\
+                                  VERDICT=DONE";
+
+        callback(
+            &db,
+            &eng2.id,
+            "engineer",
+            engineer_output_2,
+            "RIG-356",
+            "~/projects/werma",
+            &cmd,
+        )
+        .unwrap();
+
+        // Verify: reviewer task 2 spawned.
+        let reviewer_tasks_2 = db
+            .tasks_by_linear_issue("RIG-356", Some("reviewer"), false)
+            .unwrap();
+        assert_eq!(
+            reviewer_tasks_2.len(),
+            2,
+            "reviewer task 2 should be spawned by engineer 2 callback"
+        );
+        let rev2 = reviewer_tasks_2
+            .iter()
+            .find(|t| t.status == Status::Pending)
+            .expect("second reviewer task should be Pending");
+
+        // CRITICAL: Verify reviewer task 2 prompt contains Re-Review Context.
+        assert!(
+            rev2.prompt.contains("Re-Review Context"),
+            "reviewer 2 prompt must contain 'Re-Review Context' header.\nPrompt:\n{}",
+            rev2.prompt
+        );
+
+        // CRITICAL: Verify reviewer task 2 prompt contains the original rejection feedback.
+        assert!(
+            rev2.prompt.contains("missing error handling"),
+            "reviewer 2 prompt must contain rejection feedback about missing error handling.\n\
+             Prompt:\n{}",
+            rev2.prompt
+        );
+        assert!(
+            rev2.prompt.contains("SQL injection"),
+            "reviewer 2 prompt must contain rejection feedback about SQL injection.\nPrompt:\n{}",
+            rev2.prompt
+        );
+
+        // Verify: reviewer 2 prompt contains the previous review verdict.
+        assert!(
+            rev2.prompt.contains("REVIEW_VERDICT=REJECTED"),
+            "reviewer 2 prompt must contain previous verdict.\nPrompt:\n{}",
+            rev2.prompt
+        );
+    }
+
+    /// Edge case: reviewer with empty handoff_content is skipped during re-review lookup.
+    ///
+    /// If a previous reviewer task completed but had empty handoff_content (e.g. approved
+    /// without feedback), the re-review context should not be injected.
+    #[test]
+    fn rig356_empty_reviewer_handoff_skipped_in_re_review() {
+        ensure_working_dir();
+        let db = Db::open_in_memory().unwrap();
+        let linear = StatefulFakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        linear.add_issue(
+            "uuid-rig356b",
+            "RIG-356b",
+            "Empty handoff edge case",
+            "Test empty handoff skipped",
+            "in_progress",
+            vec![
+                "repo:werma".to_string(),
+                "analyze:done".to_string(),
+                "spec:done".to_string(),
+            ],
+        );
+
+        // Seed a completed reviewer task with EMPTY handoff_content.
+        let mut old_reviewer = make_test_task("20260401-356b-001");
+        old_reviewer.status = Status::Completed;
+        old_reviewer.linear_issue_id = "RIG-356b".to_string();
+        old_reviewer.pipeline_stage = "reviewer".to_string();
+        old_reviewer.handoff_content = String::new(); // Empty — should be skipped
+        db.insert_task(&old_reviewer).unwrap();
+
+        // Poll creates engineer task.
+        poll(&db, &linear, &cmd).unwrap();
+
+        let engineer_tasks = db
+            .tasks_by_linear_issue("RIG-356b", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(engineer_tasks.len(), 1);
+
+        // Engineer completes → spawns reviewer task.
+        db.set_task_status(&engineer_tasks[0].id, Status::Completed)
+            .unwrap();
+
+        let engineer_output = "## Implementation\nDone.\n\n\
+                               PR_URL=https://github.com/RigpaLabs/werma/pull/356b\n\
+                               VERDICT=DONE";
+
+        callback(
+            &db,
+            &engineer_tasks[0].id,
+            "engineer",
+            engineer_output,
+            "RIG-356b",
+            "~/projects/werma",
+            &cmd,
+        )
+        .unwrap();
+
+        // Find the newly spawned reviewer task (not the seeded one).
+        let reviewer_tasks = db
+            .tasks_by_linear_issue("RIG-356b", Some("reviewer"), false)
+            .unwrap();
+        let new_reviewer = reviewer_tasks
+            .iter()
+            .find(|t| t.id != "20260401-356b-001")
+            .expect("new reviewer task should be spawned");
+
+        // The new reviewer prompt should NOT contain Re-Review Context
+        // because the old reviewer had empty handoff_content.
+        assert!(
+            !new_reviewer.prompt.contains("Re-Review Context"),
+            "reviewer prompt should NOT contain 'Re-Review Context' when previous \
+             reviewer had empty handoff_content.\nPrompt:\n{}",
+            new_reviewer.prompt
+        );
+    }
 }

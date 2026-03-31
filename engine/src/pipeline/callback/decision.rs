@@ -1905,11 +1905,8 @@ mod tests {
             r#"[{{"number":42,"headRefName":"feat/rig-353-ghappr-fix","reviewDecision":"APPROVED"}}]"#
         ));
 
-        let decision = decide_callback(
-            &db, task_id, "reviewer", "",
-            issue_id, "/tmp", &cmd,
-        )
-        .unwrap();
+        let decision =
+            decide_callback(&db, task_id, "reviewer", "", issue_id, "/tmp", &cmd).unwrap();
 
         let effects = &decision.effects;
 
@@ -1933,11 +1930,8 @@ mod tests {
             r#"[{{"number":42,"headRefName":"feat/rig-353-ghrej-fix","reviewDecision":"CHANGES_REQUESTED"}}]"#
         ));
 
-        let decision = decide_callback(
-            &db, task_id, "reviewer", "",
-            issue_id, "/tmp", &cmd,
-        )
-        .unwrap();
+        let decision =
+            decide_callback(&db, task_id, "reviewer", "", issue_id, "/tmp", &cmd).unwrap();
 
         let effects = &decision.effects;
 

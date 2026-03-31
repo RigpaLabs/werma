@@ -658,7 +658,10 @@ mod tests {
         cmd.push_success("");
 
         let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1");
-        assert!(result.is_err(), "should return Err when branch name is empty");
+        assert!(
+            result.is_err(),
+            "should return Err when branch name is empty"
+        );
     }
 
     #[test]
