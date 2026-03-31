@@ -263,6 +263,47 @@ pub fn decide_callback(
     let transition = stage_cfg.transition_for(&verdict_str);
 
     if let Some(t) = transition {
+        // RIG-338: Stage retry cap — check total attempts before processing transition.
+        // If exceeded, override with `on_max_rounds` verdict to prevent infinite retries.
+        if let (Some(max_attempts), Some(on_max_verdict)) =
+            (stage_cfg.attempt_limit(), &stage_cfg.on_max_rounds)
+        {
+            let attempt_count = db.count_all_attempts_for_issue_stage(linear_issue_id, stage)?;
+            if attempt_count >= max_attempts as i64 {
+                let escalation_status = stage_cfg
+                    .transition_for(on_max_verdict)
+                    .map(|t| t.status.as_str())
+                    .unwrap_or("backlog")
+                    .to_string();
+                eprintln!(
+                    "[CALLBACK] {linear_issue_id}: stage {stage} retry cap reached — \
+                     {attempt_count} attempts >= limit {max_attempts}, \
+                     escalating via on_max_rounds={on_max_verdict} to {escalation_status}"
+                );
+                effects.push(make_effect(
+                    task_id,
+                    linear_issue_id,
+                    EffectType::MoveIssue,
+                    &format!("retry_cap_escalate:{escalation_status}"),
+                    serde_json::json!({ "target_status": escalation_status }),
+                ));
+                effects.push(make_effect(
+                    task_id,
+                    linear_issue_id,
+                    EffectType::PostComment,
+                    "retry_cap_comment",
+                    serde_json::json!({
+                        "body": format!(
+                            "**Stage retry cap reached** (stage: {stage}, {attempt_count} attempts, \
+                             limit: {max_attempts}). Escalating via `{on_max_verdict}` → \
+                             {escalation_status}.\n\nTask `{task_id}` was the latest attempt."
+                        )
+                    }),
+                ));
+                return Ok(CallbackDecision { internal, effects });
+            }
+        }
+
         // Guard: never move to "done" via ALREADY_DONE if there's an open PR.
         if verdict_str == "already_done"
             && t.status == "done"
@@ -1266,6 +1307,199 @@ mod tests {
         assert!(
             content.contains("REJECTED"),
             "handoff should contain verdict, got: {content}",
+        );
+    }
+
+    // ─── RIG-338: Stage retry cap tests ──────────────────────────────────
+
+    /// Helper: insert a completed deployer task.
+    fn insert_deployer_task(db: &crate::db::Db, task_id: &str, issue_id: &str) {
+        let mut t = crate::db::make_test_task(task_id);
+        t.status = Status::Completed;
+        t.linear_issue_id = issue_id.to_string();
+        t.pipeline_stage = "deployer".to_string();
+        t.task_type = "pipeline-deployer".to_string();
+        t.working_dir = "~/projects/werma".to_string();
+        db.insert_task(&t).unwrap();
+    }
+
+    /// RIG-338: When attempt count is below max_stage_attempts, normal transition proceeds.
+    #[test]
+    fn decide_retry_cap_below_limit_proceeds_normally() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-338-BELOW";
+
+        // Only 1 prior deployer task (below the cap of 2)
+        insert_deployer_task(&db, "338-below-d1", issue_id);
+
+        let result = "Deploy complete.\nDEPLOY_VERDICT=DONE";
+
+        let decision = decide_callback(
+            &db,
+            "338-below-d1",
+            "deployer",
+            result,
+            issue_id,
+            "/tmp",
+            &cmd,
+        )
+        .unwrap();
+
+        // Normal transition should proceed — MoveIssue to "done"
+        let move_effect = decision
+            .effects
+            .iter()
+            .find(|e| e.effect_type == EffectType::MoveIssue);
+        assert!(
+            move_effect.is_some(),
+            "below cap: should queue MoveIssue, got: {:?}",
+            decision.effects
+        );
+        let payload = &move_effect.unwrap().payload;
+        assert_eq!(
+            payload.get("target_status").and_then(|v| v.as_str()),
+            Some("done"),
+            "below cap: should move to 'done', not escalate"
+        );
+    }
+
+    /// RIG-338: When attempt count reaches max_stage_attempts, escalation fires.
+    #[test]
+    fn decide_retry_cap_at_limit_escalates() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-338-CAP";
+
+        // 2 prior deployer tasks (at the cap of 2)
+        insert_deployer_task(&db, "338-cap-d1", issue_id);
+        insert_deployer_task(&db, "338-cap-d2", issue_id);
+
+        // 3rd attempt — should be capped
+        let result = "Deploy failed.\nDEPLOY_VERDICT=FAILED";
+
+        let decision = decide_callback(
+            &db,
+            "338-cap-d2",
+            "deployer",
+            result,
+            issue_id,
+            "/tmp",
+            &cmd,
+        )
+        .unwrap();
+
+        // Should escalate via on_max_rounds=blocked → backlog
+        let move_effect = decision
+            .effects
+            .iter()
+            .find(|e| e.effect_type == EffectType::MoveIssue);
+        assert!(
+            move_effect.is_some(),
+            "at cap: should queue MoveIssue for escalation"
+        );
+        let payload = &move_effect.unwrap().payload;
+        assert_eq!(
+            payload.get("target_status").and_then(|v| v.as_str()),
+            Some("backlog"),
+            "at cap: should escalate to backlog via on_max_rounds"
+        );
+
+        // Should have escalation comment
+        assert!(
+            decision.effects.iter().any(|e| {
+                e.effect_type == EffectType::PostComment
+                    && e.payload
+                        .get("body")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|b| b.contains("retry cap reached"))
+            }),
+            "at cap: should post retry cap comment"
+        );
+
+        // Should NOT spawn any next task
+        assert!(
+            decision.internal.spawn_task.is_none(),
+            "at cap: must not spawn next task"
+        );
+    }
+
+    /// RIG-338: Retry cap works for reviewer stage (cap of 3).
+    #[test]
+    fn decide_retry_cap_reviewer_at_limit() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-338-REV";
+
+        // 3 prior reviewer tasks (at the cap of 3)
+        insert_reviewer_task(&db, "338-rev-r1", issue_id);
+        insert_reviewer_task(&db, "338-rev-r2", issue_id);
+        insert_reviewer_task(&db, "338-rev-r3", issue_id);
+
+        let result = "## Review\n- issues found\n\nREVIEW_VERDICT=REJECTED";
+
+        let decision = decide_callback(
+            &db,
+            "338-rev-r3",
+            "reviewer",
+            result,
+            issue_id,
+            "/tmp",
+            &cmd,
+        )
+        .unwrap();
+
+        // Should escalate via on_max_rounds=blocked → backlog
+        let move_effect = decision
+            .effects
+            .iter()
+            .find(|e| e.effect_type == EffectType::MoveIssue);
+        assert!(move_effect.is_some(), "reviewer at cap: should escalate");
+        let payload = &move_effect.unwrap().payload;
+        assert_eq!(
+            payload.get("target_status").and_then(|v| v.as_str()),
+            Some("backlog"),
+            "reviewer at cap: should escalate to backlog"
+        );
+
+        // Must NOT spawn engineer (retry prevented)
+        assert!(
+            decision.internal.spawn_task.is_none(),
+            "reviewer at cap: must not spawn engineer"
+        );
+    }
+
+    /// RIG-338: Stages without max_stage_attempts configured are unaffected.
+    #[test]
+    fn decide_retry_cap_not_configured_proceeds_normally() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-338-NOCONF";
+
+        // Many prior analyst tasks — but analyst has no max_stage_attempts
+        for i in 0..5 {
+            insert_analyst_task(&db, &format!("338-nc-a{i}"), issue_id);
+        }
+
+        let result = "## Spec\nAnalysis complete\n\nVERDICT=DONE";
+
+        let decision =
+            decide_callback(&db, "338-nc-a4", "analyst", result, issue_id, "/tmp", &cmd).unwrap();
+
+        // Normal transition should proceed (no cap configured)
+        let move_effect = decision
+            .effects
+            .iter()
+            .find(|e| e.effect_type == EffectType::MoveIssue);
+        assert!(
+            move_effect.is_some(),
+            "uncapped stage: should proceed normally"
+        );
+        let payload = &move_effect.unwrap().payload;
+        assert_eq!(
+            payload.get("target_status").and_then(|v| v.as_str()),
+            Some("todo"),
+            "uncapped stage: should follow normal transition to todo"
         );
     }
 }

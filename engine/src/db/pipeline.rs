@@ -109,6 +109,19 @@ impl super::Db {
         )?)
     }
 
+    /// Count all attempts (completed + failed) for a given Linear issue and pipeline stage.
+    /// Used by RIG-338 retry cap to determine if stage has exceeded max_stage_attempts.
+    pub fn count_all_attempts_for_issue_stage(&self, issue_id: &str, stage: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE linear_issue_id = ?1
+               AND pipeline_stage = ?2
+               AND status IN ('completed', 'failed')",
+            params![issue_id, stage],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Get the most recent `finished_at` timestamp for any completed task
     /// on the given Linear issue, excluding the current stage.
     /// Used to filter Linear comments to only those posted after the previous stage completed.
@@ -896,6 +909,53 @@ mod tests {
         );
         assert_eq!(
             db.count_failed_tasks_for_issue_stage("issue-999", "reviewer")
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn count_all_attempts_for_issue_stage() {
+        let db = Db::open_in_memory().unwrap();
+
+        // 2 failed + 1 completed = 3 total attempts
+        let mut t1 = make_test_task("20260331-010");
+        t1.linear_issue_id = "issue-att".to_string();
+        t1.pipeline_stage = "qa".to_string();
+        db.insert_task(&t1).unwrap();
+        db.set_task_status("20260331-010", Status::Failed).unwrap();
+
+        let mut t2 = make_test_task("20260331-011");
+        t2.linear_issue_id = "issue-att".to_string();
+        t2.pipeline_stage = "qa".to_string();
+        db.insert_task(&t2).unwrap();
+        db.set_task_status("20260331-011", Status::Completed)
+            .unwrap();
+
+        let mut t3 = make_test_task("20260331-012");
+        t3.linear_issue_id = "issue-att".to_string();
+        t3.pipeline_stage = "qa".to_string();
+        db.insert_task(&t3).unwrap();
+        db.set_task_status("20260331-012", Status::Failed).unwrap();
+
+        // Pending task should NOT be counted
+        let mut t4 = make_test_task("20260331-013");
+        t4.linear_issue_id = "issue-att".to_string();
+        t4.pipeline_stage = "qa".to_string();
+        db.insert_task(&t4).unwrap();
+
+        assert_eq!(
+            db.count_all_attempts_for_issue_stage("issue-att", "qa")
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            db.count_all_attempts_for_issue_stage("issue-att", "engineer")
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.count_all_attempts_for_issue_stage("issue-999", "qa")
                 .unwrap(),
             0
         );

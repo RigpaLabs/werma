@@ -32,12 +32,16 @@ stages:
     light_model: opus
     light_threshold: 2
     max_turns: 100
+    max_stage_attempts: 3
+    on_max_rounds: blocked
     manual: skip
     prompt: prompts/engineer.md
     transitions:
       done:
         status: review
         spawn: reviewer
+      blocked:
+        status: backlog
 
   reviewer:
     linear_status: review
@@ -47,6 +51,8 @@ stages:
     recheck_model: sonnet
     max_review_rounds: 3
     max_turns: 50
+    max_stage_attempts: 3
+    on_max_rounds: blocked
     manual: process
     prompt: prompts/reviewer.md
     transitions:
@@ -65,6 +71,8 @@ stages:
     agent: pipeline-deployer
     model: sonnet
     max_turns: 50
+    max_stage_attempts: 2
+    on_max_rounds: blocked
     manual: skip
     prompt: prompts/deployer.md
     transitions:
@@ -75,3 +83,5 @@ stages:
         spawn: engineer
       failed:
         status: ready
+      blocked:
+        status: backlog

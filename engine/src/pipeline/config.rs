@@ -89,6 +89,16 @@ pub struct StageConfig {
     /// Agent runtime for this stage (claude-code or codex). Absent = use default (claude-code).
     #[serde(default)]
     pub runtime: Option<AgentRuntime>,
+
+    // ─── Retry cap fields (RIG-338) ────────────────────────────────────
+    /// Max total attempts (completed + failed) for this stage per issue.
+    /// When exceeded, `on_max_rounds` verdict is emitted instead of normal transition.
+    #[serde(default)]
+    pub max_stage_attempts: Option<u32>,
+    /// Verdict to emit when `max_stage_attempts` is exceeded.
+    /// Must match a key in `transitions` (e.g. "blocked").
+    #[serde(default)]
+    pub on_max_rounds: Option<String>,
 }
 
 /// Action to take when a pipeline stage picks up an issue.
@@ -226,6 +236,11 @@ impl StageConfig {
     /// Returns the configured max_review_rounds, or None if unlimited.
     pub fn review_round_limit(&self) -> Option<u32> {
         self.max_review_rounds
+    }
+
+    /// Returns the configured max_stage_attempts, or None if uncapped.
+    pub fn attempt_limit(&self) -> Option<u32> {
+        self.max_stage_attempts
     }
 }
 
@@ -573,6 +588,8 @@ stages:
         assert!(stage.light_model.is_none());
         assert!(stage.light_threshold.is_none());
         assert!(stage.runtime.is_none());
+        assert!(stage.max_stage_attempts.is_none());
+        assert!(stage.on_max_rounds.is_none());
     }
 
     #[test]
@@ -652,6 +669,47 @@ stages:
             config.stage(spawn_name).is_none(),
             "spawn target should not exist in this config"
         );
+    }
+
+    #[test]
+    fn max_stage_attempts_and_on_max_rounds_deserialized() {
+        let yaml = r#"
+pipeline: test
+stages:
+  qa:
+    agent: pipeline-qa
+    model: sonnet
+    max_stage_attempts: 2
+    on_max_rounds: blocked
+    transitions:
+      passed:
+        status: ready
+      failed:
+        status: in_progress
+        spawn: engineer
+      blocked:
+        status: backlog
+  engineer:
+    agent: pipeline-engineer
+    model: opus
+    max_stage_attempts: 3
+    on_max_rounds: blocked
+    transitions:
+      done:
+        status: review
+      blocked:
+        status: backlog
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        let qa = config.stage("qa").unwrap();
+        assert_eq!(qa.max_stage_attempts, Some(2));
+        assert_eq!(qa.on_max_rounds.as_deref(), Some("blocked"));
+        assert_eq!(qa.attempt_limit(), Some(2));
+
+        let engineer = config.stage("engineer").unwrap();
+        assert_eq!(engineer.max_stage_attempts, Some(3));
+        assert_eq!(engineer.on_max_rounds.as_deref(), Some("blocked"));
+        assert_eq!(engineer.attempt_limit(), Some(3));
     }
 
     #[test]
