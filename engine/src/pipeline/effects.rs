@@ -1036,7 +1036,8 @@ mod tests {
             serde_json::json!({ "working_dir": "/Users/dev/projects/werma/.trees/feat--RIG-351" }),
         );
 
-        execute_effect(&effect, &linear, &cmd, &notifier).unwrap();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        execute_effect(&effect, &db, &linear, &cmd, &notifier).unwrap();
 
         // Verify the working_dir was passed through to git commands
         let calls = cmd.calls.borrow();
@@ -1075,7 +1076,8 @@ mod tests {
             serde_json::json!({ "issue_id": "EFF-EMPTY-WD" }),
         );
 
-        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let result = execute_effect(&effect, &db, &linear, &cmd, &notifier);
         assert!(
             result.is_err(),
             "CreatePr with missing working_dir should return Err"

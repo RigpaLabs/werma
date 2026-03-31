@@ -633,32 +633,32 @@ mod tests {
     // ─── RIG-353: auto_create_pr() comprehensive tests ────────────────────
 
     #[test]
-    fn auto_create_pr_main_branch_returns_none() {
+    fn auto_create_pr_main_branch_returns_err() {
         let cmd = FakeCommandRunner::new();
         // git branch --show-current → "main"
         cmd.push_success("main");
 
-        let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1").unwrap();
-        assert_eq!(result, None, "should return None when on main branch");
+        let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1");
+        assert!(result.is_err(), "should return Err when on main branch");
     }
 
     #[test]
-    fn auto_create_pr_master_branch_returns_none() {
+    fn auto_create_pr_master_branch_returns_err() {
         let cmd = FakeCommandRunner::new();
         cmd.push_success("master");
 
-        let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1").unwrap();
-        assert_eq!(result, None, "should return None when on master branch");
+        let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1");
+        assert!(result.is_err(), "should return Err when on master branch");
     }
 
     #[test]
-    fn auto_create_pr_empty_branch_returns_none() {
+    fn auto_create_pr_empty_branch_returns_err() {
         let cmd = FakeCommandRunner::new();
         // git branch --show-current → empty (detached HEAD or similar)
         cmd.push_success("");
 
-        let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1").unwrap();
-        assert_eq!(result, None, "should return None when branch name is empty");
+        let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1");
+        assert!(result.is_err(), "should return Err when branch name is empty");
     }
 
     #[test]
