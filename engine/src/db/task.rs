@@ -327,6 +327,7 @@ impl super::Db {
             "cost_usd",
             "turns_used",
             "handoff_content",
+            "working_dir",
         ];
         anyhow::ensure!(
             allowed.contains(&field),
@@ -1064,11 +1065,29 @@ mod tests {
             "model",
             "repo_hash",
             "estimate",
+            "working_dir",
         ];
         for field in allowed {
             db.update_task_field("20260308-001", field, "test_value")
                 .unwrap();
         }
+    }
+
+    /// RIG-351: working_dir can be updated to worktree path after worktree creation.
+    #[test]
+    fn update_working_dir_persists_worktree_path() {
+        let db = Db::open_in_memory().unwrap();
+        let mut task = make_test_task("rig351-001");
+        task.working_dir = "/home/user/projects/sigil".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Simulate runner updating working_dir to worktree path
+        let worktree_path = "/home/user/projects/sigil/.trees/feat--FAT-81-pipeline-engineer-stage";
+        db.update_task_field("rig351-001", "working_dir", worktree_path)
+            .unwrap();
+
+        let updated = db.task("rig351-001").unwrap().unwrap();
+        assert_eq!(updated.working_dir, worktree_path);
     }
 
     // ─── list_recent_tasks ────────────────────────────────────────────────
