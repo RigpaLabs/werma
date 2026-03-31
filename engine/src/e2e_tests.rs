@@ -122,10 +122,8 @@ fn e2e_create_pr_wrong_dir() {
     let result = auto_create_pr(&cmd, &wrong_dir, "TEST-E2E", "e2e-test-002");
 
     // In a wrong dir, git commands should fail or return no branch — the function
-    // should NOT silently succeed. It should either:
-    // - Return Err (ideal)
-    // - Return Ok(None) because it's on main/no branch (acceptable for safety check)
-    // What it must NOT do: return Ok(Some(url)) — that would be a false positive
+    // RIG-355: auto_create_pr now returns Err when on main/empty branch (not Ok(None)).
+    // From a wrong dir, it should always error — never silently succeed.
     match result {
         Ok(Some(url)) => {
             panic!(
@@ -133,11 +131,10 @@ fn e2e_create_pr_wrong_dir() {
             );
         }
         Ok(None) => {
-            // Acceptable: function detected it's on main or no commits ahead
-            // (the safety checks in auto_create_pr handle this)
+            // Still acceptable if no commits ahead of main (legitimate skip)
         }
         Err(_) => {
-            // Ideal: function properly propagated the git error
+            // Expected: on main/empty branch returns Err, or git commands failed
         }
     }
 }

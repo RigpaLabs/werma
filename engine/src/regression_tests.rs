@@ -527,7 +527,7 @@ mod regression {
 
     #[test]
     fn regression_rig318_post_pr_review_no_pr_fails_for_retry() {
-        // Effect processor must return Err when no PR exists, so the outbox retries.
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -554,7 +554,7 @@ mod regression {
             error: None,
         };
 
-        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        let result = execute_effect(&effect, &db, &linear, &cmd, &notifier);
         assert!(
             result.is_err(),
             "RIG-318 regression: PostPrComment with no PR must return Err (not silent Ok); \
@@ -576,6 +576,7 @@ mod regression {
     /// which propagates through `execute_effect()` to the outbox retry machinery.
     #[test]
     fn regression_rig321_create_pr_push_failure_returns_error() {
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -605,7 +606,7 @@ mod regression {
             error: None,
         };
 
-        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        let result = execute_effect(&effect, &db, &linear, &cmd, &notifier);
         assert!(
             result.is_err(),
             "RIG-321 regression: CreatePr must return Err when git push fails; \
@@ -619,6 +620,7 @@ mod regression {
 
     #[test]
     fn regression_rig321_create_pr_gh_failure_returns_error() {
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -652,7 +654,7 @@ mod regression {
             error: None,
         };
 
-        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        let result = execute_effect(&effect, &db, &linear, &cmd, &notifier);
         assert!(
             result.is_err(),
             "RIG-321 regression: CreatePr must return Err when gh pr create fails; \
@@ -1055,6 +1057,7 @@ mod regression {
     /// be silently swallowed (they were in the old code before RIG-321).
     #[test]
     fn regression_rig335_create_pr_failure_propagates() {
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -1084,7 +1087,7 @@ mod regression {
             error: None,
         };
 
-        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        let result = execute_effect(&effect, &db, &linear, &cmd, &notifier);
         assert!(
             result.is_err(),
             "RIG-335 regression: CreatePr must propagate git push failure, not silently Ok. \
