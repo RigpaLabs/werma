@@ -804,6 +804,80 @@ mod tests {
         );
     }
 
+    // ─── RIG-353: CreatePr effect with worktree scenarios ─────────────────
+
+    #[test]
+    fn create_pr_effect_with_worktree_working_dir() {
+        // RIG-351 pattern: engineer runs in worktree, working_dir points to .trees/feat--X
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        // Simulate auto_create_pr flow from worktree path
+        cmd.push_success("feat/rig-351-fix"); // git branch --show-current
+        cmd.push_success("abc1234 RIG-351 feat: fix"); // git log
+        cmd.push_success(""); // git push
+        cmd.push_success(""); // gh pr view (no existing PR)
+        cmd.push_success("https://github.com/org/repo/pull/88"); // gh pr create
+
+        let effect = make_effect(
+            "eff-wt-t",
+            "EFF-WT",
+            EffectType::CreatePr,
+            // This is the key: working_dir is a worktree path, not base repo
+            serde_json::json!({ "working_dir": "/Users/dev/projects/werma/.trees/feat--RIG-351" }),
+        );
+
+        execute_effect(&effect, &linear, &cmd, &notifier).unwrap();
+
+        // Verify the working_dir was passed through to git commands
+        let calls = cmd.calls.borrow();
+        assert!(
+            !calls.is_empty(),
+            "commands should have been called for worktree PR creation"
+        );
+        // First call (git branch) should use the worktree dir
+        let first_dir = &calls[0].2;
+        assert!(
+            first_dir
+                .as_ref()
+                .is_some_and(|d| d.contains(".trees/feat--RIG-351")),
+            "git commands must use the worktree working_dir, got: {first_dir:?}"
+        );
+        drop(calls);
+
+        // PR URL should be attached to Linear
+        let attaches = linear.attach_calls.borrow();
+        assert_eq!(attaches.len(), 1, "should attach PR URL after creation");
+        assert!(attaches[0].1.contains("pull/88"));
+    }
+
+    #[test]
+    fn create_pr_effect_empty_working_dir_returns_error() {
+        // Empty working_dir in payload should cause payload_str to fail
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        let effect = make_effect(
+            "eff-empty-wd-t",
+            "EFF-EMPTY-WD",
+            EffectType::CreatePr,
+            // Missing working_dir key entirely
+            serde_json::json!({ "issue_id": "EFF-EMPTY-WD" }),
+        );
+
+        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        assert!(
+            result.is_err(),
+            "CreatePr with missing working_dir should return Err"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("working_dir"),
+            "error should mention missing working_dir"
+        );
+    }
+
     #[test]
     fn process_effects_nonblocking_failure_continues() {
         let db = Db::open_in_memory().unwrap();

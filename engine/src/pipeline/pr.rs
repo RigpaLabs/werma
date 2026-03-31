@@ -612,4 +612,203 @@ mod tests {
         let calls = cmd.calls.borrow();
         assert!(calls[1].1.contains(&"--comment".to_string()));
     }
+
+    // ─── RIG-353: auto_create_pr() comprehensive tests ────────────────────
+
+    #[test]
+    fn auto_create_pr_main_branch_returns_none() {
+        let cmd = FakeCommandRunner::new();
+        // git branch --show-current → "main"
+        cmd.push_success("main");
+
+        let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1").unwrap();
+        assert_eq!(result, None, "should return None when on main branch");
+    }
+
+    #[test]
+    fn auto_create_pr_master_branch_returns_none() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("master");
+
+        let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1").unwrap();
+        assert_eq!(result, None, "should return None when on master branch");
+    }
+
+    #[test]
+    fn auto_create_pr_empty_branch_returns_none() {
+        let cmd = FakeCommandRunner::new();
+        // git branch --show-current → empty (detached HEAD or similar)
+        cmd.push_success("");
+
+        let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1").unwrap();
+        assert_eq!(result, None, "should return None when branch name is empty");
+    }
+
+    #[test]
+    fn auto_create_pr_no_commits_ahead_returns_none() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("feat/rig-100-feature"); // git branch --show-current
+        cmd.push_success(""); // git log origin/main..HEAD → no commits
+
+        let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1").unwrap();
+        assert_eq!(
+            result, None,
+            "should return None when no commits ahead of main"
+        );
+    }
+
+    #[test]
+    fn auto_create_pr_push_failure_returns_err() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("feat/rig-100-feature"); // git branch
+        cmd.push_success("abc123 feat: impl"); // git log (has commits)
+        cmd.push_failure("fatal: remote rejected"); // git push fails
+
+        let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1");
+        assert!(
+            result.is_err(),
+            "push failure must return Err, not Ok(None)"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("git push failed"),
+            "error should mention push failure"
+        );
+    }
+
+    #[test]
+    fn auto_create_pr_existing_pr_returns_url() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("feat/rig-100-feature"); // git branch
+        cmd.push_success("abc123 feat: impl"); // git log
+        cmd.push_success(""); // git push
+        cmd.push_success("https://github.com/org/repo/pull/42"); // gh pr view → existing PR
+
+        let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1").unwrap();
+        assert_eq!(
+            result,
+            Some("https://github.com/org/repo/pull/42".to_string()),
+            "should return existing PR URL"
+        );
+    }
+
+    #[test]
+    fn auto_create_pr_existing_pr_empty_url_creates_new() {
+        // Edge case: gh pr view succeeds but returns empty URL → falls through to create
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("feat/rig-100-feature"); // git branch
+        cmd.push_success("abc123 feat: impl"); // git log
+        cmd.push_success(""); // git push
+        cmd.push_success(""); // gh pr view → empty URL (edge case)
+        cmd.push_success("https://github.com/org/repo/pull/99"); // gh pr create
+
+        let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1").unwrap();
+        assert_eq!(
+            result,
+            Some("https://github.com/org/repo/pull/99".to_string()),
+            "empty existing PR URL should fall through to create"
+        );
+    }
+
+    #[test]
+    fn auto_create_pr_creates_new_pr_happy_path() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("feat/rig-200-new-feature"); // git branch
+        cmd.push_success("abc123 feat: new feature"); // git log
+        cmd.push_success(""); // git push
+        cmd.push_failure("no pull requests found"); // gh pr view (no existing PR)
+        cmd.push_success("https://github.com/org/repo/pull/77"); // gh pr create
+
+        let result = auto_create_pr(&cmd, "/tmp", "RIG-200", "task-200").unwrap();
+        assert_eq!(
+            result,
+            Some("https://github.com/org/repo/pull/77".to_string())
+        );
+
+        // Verify gh pr create was called with correct title
+        let calls = cmd.calls.borrow();
+        let create_call = &calls[4]; // 5th call = gh pr create
+        assert_eq!(create_call.0, "gh");
+        assert!(create_call.1.contains(&"create".to_string()));
+        assert!(
+            create_call
+                .1
+                .iter()
+                .any(|a| a.contains("RIG-200 feat: implementation")),
+            "PR title should contain issue ID"
+        );
+    }
+
+    #[test]
+    fn auto_create_pr_gh_create_failure_returns_err() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("feat/rig-100-feature"); // git branch
+        cmd.push_success("abc123 feat: impl"); // git log
+        cmd.push_success(""); // git push
+        cmd.push_failure("no PR found"); // gh pr view
+        cmd.push_failure("HTTP 422: Validation Failed"); // gh pr create fails
+
+        let result = auto_create_pr(&cmd, "/tmp", "RIG-100", "task-1");
+        assert!(
+            result.is_err(),
+            "gh pr create failure must return Err, not Ok(None)"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("gh pr create failed"),
+            "error should mention gh pr create failure"
+        );
+    }
+
+    // ─── RIG-353 Phase 7: pr.rs edge cases ────────────────────────────────
+
+    #[test]
+    fn post_pr_review_uppercase_approve_maps_correctly() {
+        // "approve" in lowercase should map to --approve flag
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("42"); // gh pr view
+        cmd.push_success(""); // gh pr review
+
+        post_pr_review(&cmd, "/tmp", "LGTM!", "approve").unwrap();
+
+        let calls = cmd.calls.borrow();
+        assert!(
+            calls[1].1.contains(&"--approve".to_string()),
+            "approve event must map to --approve flag"
+        );
+    }
+
+    #[test]
+    fn get_pr_review_verdict_gh_failure_returns_none() {
+        let cmd = FakeCommandRunner::new();
+        // gh pr list fails entirely (network error, auth error, etc.)
+        cmd.push_failure("HTTP 502: Bad Gateway");
+
+        let verdict = get_pr_review_verdict(&cmd, "/tmp", "RIG-100");
+        assert_eq!(verdict, None, "gh failure should return None, not crash");
+    }
+
+    #[test]
+    fn get_pr_review_verdict_malformed_json_returns_none() {
+        let cmd = FakeCommandRunner::new();
+        // gh pr list returns garbage JSON
+        cmd.push_success("this is not json at all {{{");
+
+        let verdict = get_pr_review_verdict(&cmd, "/tmp", "RIG-100");
+        assert_eq!(
+            verdict, None,
+            "malformed JSON should return None, not crash"
+        );
+    }
+
+    #[test]
+    fn pr_exists_gh_failure_returns_false() {
+        let cmd = FakeCommandRunner::new();
+        // gh pr list fails (network error)
+        cmd.push_failure("connection refused");
+
+        let found = pr_exists_for_issue(&cmd, "/tmp", "RIG-100", "open");
+        assert!(!found, "gh failure should return false (safe default)");
+    }
 }

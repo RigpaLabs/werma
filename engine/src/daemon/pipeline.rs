@@ -104,6 +104,7 @@ pub fn process_completed_tasks(
                     // in an inner cause that .to_string() (outermost only) would miss.
                     let err_msg = format!("{e:#}");
                     let is_config_error = err_msg.contains("no config for stage")
+                        || err_msg.contains("unknown pipeline stage")
                         || err_msg.contains("unknown status '");
 
                     if is_config_error {
@@ -728,6 +729,104 @@ mod tests {
         assert!(
             !log_content.contains("TTL expired"),
             "task at 59 min should not be TTL'd"
+        );
+    }
+
+    // ─── RIG-353: TTL and retry edge cases ────────────────────────────────
+
+    #[test]
+    fn ttl_skips_task_with_none_finished_at() {
+        // Task with finished_at=None should NOT be TTL'd (still processing)
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = Db::open_in_memory().unwrap();
+
+        let mut task = make_task("20260331-nofinish", "engineer", "pipeline-engineer");
+        task.finished_at = None; // explicitly None
+        db.insert_task(&task).unwrap();
+
+        let _ = super::process_completed_tasks(
+            &db,
+            dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+        );
+
+        let log_content =
+            std::fs::read_to_string(dir.path().join("logs/daemon.log")).unwrap_or_default();
+        assert!(
+            !log_content.contains("TTL expired"),
+            "task with None finished_at should not be TTL'd"
+        );
+    }
+
+    #[test]
+    fn ttl_skips_malformed_timestamp() {
+        // Task with a garbage finished_at should NOT be TTL'd (parse failure → skip TTL check)
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = Db::open_in_memory().unwrap();
+
+        let mut task = make_task("20260331-malformed", "engineer", "pipeline-engineer");
+        task.finished_at = Some("not-a-timestamp-at-all".to_string());
+        db.insert_task(&task).unwrap();
+
+        let _ = super::process_completed_tasks(
+            &db,
+            dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+        );
+
+        let log_content =
+            std::fs::read_to_string(dir.path().join("logs/daemon.log")).unwrap_or_default();
+        assert!(
+            !log_content.contains("TTL expired"),
+            "malformed timestamp should not trigger TTL"
+        );
+    }
+
+    #[test]
+    fn callback_config_error_abandons_immediately() {
+        // A config error (unknown stage) should mark the task as pushed immediately,
+        // not retry on subsequent ticks.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = Db::open_in_memory().unwrap();
+
+        // Task with an unknown pipeline stage → "unknown pipeline stage: unicorn"
+        let mut task = make_task("20260331-cfgerr", "unicorn", "pipeline-unicorn");
+        let recent = (chrono::Local::now() - chrono::Duration::minutes(5))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        task.finished_at = Some(recent);
+        db.insert_task(&task).unwrap();
+
+        // Write an output file so the callback has something to read
+        let output_path = dir.path().join("logs/20260331-cfgerr-output.md");
+        std::fs::write(&output_path, "VERDICT=DONE").unwrap();
+
+        super::process_completed_tasks(
+            &db,
+            dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+        )
+        .unwrap();
+
+        // Task should be marked pushed (abandoned, not retried)
+        let unpushed = db.unpushed_linear_tasks().unwrap();
+        assert!(
+            unpushed.is_empty(),
+            "config error should abandon task immediately (mark pushed)"
+        );
+
+        // Dead letter log should exist
+        let dead_letter =
+            std::fs::read_to_string(dir.path().join("logs/dead-letters.log")).unwrap_or_default();
+        assert!(
+            dead_letter.contains("20260331-cfgerr"),
+            "dead letter log should contain the abandoned task, got: {dead_letter}"
         );
     }
 }

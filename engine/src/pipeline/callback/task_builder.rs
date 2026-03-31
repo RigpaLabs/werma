@@ -921,4 +921,124 @@ stages:
             "should return None when reviewer has no handoff"
         );
     }
+
+    // ─── RIG-353: task_builder working_dir + handoff coverage ─────────────
+
+    /// build_next_stage_task inherits working_dir from previous task.
+    #[test]
+    fn build_next_stage_task_inherits_working_dir() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let config = test_config();
+        let issue_id = "RIG-353-WDIR";
+
+        // Insert a completed engineer task
+        let mut eng = crate::db::make_test_task("353-eng-wd");
+        eng.status = Status::Completed;
+        eng.linear_issue_id = issue_id.to_string();
+        eng.pipeline_stage = "engineer".to_string();
+        eng.working_dir = "/Users/dev/projects/werma/.trees/feat--RIG-353".to_string();
+        db.insert_task(&eng).unwrap();
+
+        let result = build_next_stage_task(
+            &db,
+            &config,
+            issue_id,
+            "reviewer",
+            "Implementation complete.\nVERDICT=DONE",
+            "353-eng-wd",
+            "engineer",
+            "/Users/dev/projects/werma/.trees/feat--RIG-353",
+            3,
+            Some("https://github.com/org/repo/pull/42"),
+        )
+        .unwrap();
+
+        let task = result.expect("should create reviewer task");
+        assert_eq!(task.pipeline_stage, "reviewer");
+        // working_dir should be the same as what was passed (worktree path)
+        assert_eq!(
+            task.working_dir, "/Users/dev/projects/werma/.trees/feat--RIG-353",
+            "reviewer should inherit the worktree working_dir"
+        );
+    }
+
+    /// build_next_stage_task stores handoff_content in the task, not filesystem.
+    #[test]
+    fn build_next_stage_task_stores_handoff_in_db() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let config = test_config();
+        let issue_id = "RIG-353-HANDOFF";
+
+        let result = build_next_stage_task(
+            &db,
+            &config,
+            issue_id,
+            "reviewer",
+            "## Implementation\nCode changes done.\nVERDICT=DONE",
+            "353-eng-ho",
+            "engineer",
+            "~/projects/werma",
+            3,
+            None,
+        )
+        .unwrap();
+
+        let task = result.expect("should create reviewer task");
+
+        // handoff_content should be stored in the task itself (DB column)
+        assert!(
+            !task.handoff_content.is_empty(),
+            "handoff_content must be stored in task, not filesystem"
+        );
+        assert!(
+            task.handoff_content.contains("Pipeline Handoff"),
+            "handoff should contain handoff header, got: {}",
+            &task.handoff_content[..100.min(task.handoff_content.len())]
+        );
+        assert!(
+            task.handoff_content.contains(issue_id),
+            "handoff should reference the issue ID"
+        );
+
+        // context_files should be empty (no filesystem dependency)
+        assert!(
+            task.context_files.is_empty(),
+            "build_next_stage_task must not use filesystem — context_files should be empty"
+        );
+    }
+
+    /// build_next_stage_task returns None when active task already exists for issue+stage.
+    #[test]
+    fn build_next_stage_task_guards_duplicate_spawn() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let config = test_config();
+        let issue_id = "RIG-353-GUARD";
+
+        // Insert an active (pending) reviewer task
+        let mut existing = crate::db::make_test_task("353-rev-active");
+        existing.status = Status::Pending;
+        existing.linear_issue_id = issue_id.to_string();
+        existing.pipeline_stage = "reviewer".to_string();
+        existing.task_type = "pipeline-reviewer".to_string();
+        db.insert_task(&existing).unwrap();
+
+        let result = build_next_stage_task(
+            &db,
+            &config,
+            issue_id,
+            "reviewer",
+            "engineer output",
+            "353-eng-guard",
+            "engineer",
+            "~/projects/werma",
+            3,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            result.is_none(),
+            "should return None when active task exists for issue+stage"
+        );
+    }
 }
