@@ -18,6 +18,14 @@ The issue context is provided above in the ---ISSUE--- block.
 6. Include acceptance criteria
 7. Identify risks and dependencies
 
+### Required Spec Sections
+
+Your spec **MUST** include all of the following markdown headings. The pipeline validates their presence — missing any will block the transition to the next stage.
+
+- `## Scope` — what this issue covers, key changes
+- `## Acceptance Criteria` — testable conditions for "done"
+- `## Out of Scope` — what is explicitly NOT included in this issue
+
 ### Epic / Parent Issue Analysis
 If this issue has **sub-issues** (listed in the "Sub-issues" section above), this is an **epic**. In that case, adjust your analysis:
 
