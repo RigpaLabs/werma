@@ -7,6 +7,7 @@ use super::super::helpers::{infer_working_dir_from_issue, truncate_lines};
 use super::super::loader::resolve_prompt;
 use super::super::prompt::{build_vars, render_prompt};
 use super::super::verdict::{extract_rejection_feedback, is_heavy_track};
+use crate::config::UserConfig;
 use crate::db::Db;
 use crate::linear::LinearApi;
 
@@ -99,8 +100,10 @@ pub(super) fn build_next_stage_task(
         truncate_lines(previous_output, 200),
     );
 
-    let effective_working_dir = if working_dir.is_empty() || working_dir == "~/projects/ar" {
-        infer_working_dir_from_issue(db, linear_issue_id)
+    let user_cfg = UserConfig::load();
+    let default_dir = user_cfg.repo_dir("werma");
+    let effective_working_dir = if working_dir.is_empty() || working_dir == default_dir {
+        infer_working_dir_from_issue(db, linear_issue_id, &user_cfg)
     } else {
         working_dir.to_string()
     };
@@ -255,8 +258,10 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
     );
     std::fs::write(&handoff_path, &handoff_content)?;
 
-    let effective_working_dir = if working_dir.is_empty() || *working_dir == "~/projects/ar" {
-        infer_working_dir_from_issue(db, linear_issue_id)
+    let user_cfg = UserConfig::load();
+    let default_dir = user_cfg.repo_dir("werma");
+    let effective_working_dir = if working_dir.is_empty() || *working_dir == default_dir {
+        infer_working_dir_from_issue(db, linear_issue_id, &user_cfg)
     } else {
         working_dir.to_string()
     };

@@ -128,6 +128,7 @@ pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<(
             &description,
             &working_dir,
             estimate,
+            &user_cfg,
         )?;
 
         println!("  + {task_id} [{ident}] stage={effective_stage}");

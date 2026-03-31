@@ -65,9 +65,11 @@ pub fn version_string() -> &'static str {
 /// Get the current git HEAD hash of the werma repo at runtime.
 pub fn runtime_repo_hash() -> String {
     let repo = std::env::var("WERMA_REPO").unwrap_or_else(|_| {
-        dirs::home_dir()
-            .map(|h| h.join("projects/werma").to_string_lossy().into_owned())
-            .unwrap_or_default()
+        let cfg = config::UserConfig::load();
+        let dir = cfg.repo_dir("werma");
+        pipeline::helpers::resolve_home(&dir)
+            .to_string_lossy()
+            .into_owned()
     });
     std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
