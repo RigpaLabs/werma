@@ -397,6 +397,11 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
             );
         }
 
+        // RIG-351: persist worktree path so callbacks (CreatePr, PostPrComment)
+        // run from the correct directory instead of the base repo checkout.
+        let wt_str = worktree_dir.to_string_lossy();
+        db.update_task_field(task_id, "working_dir", &wt_str)?;
+
         worktree_dir
     } else {
         working_dir.clone()
