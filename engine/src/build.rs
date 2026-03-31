@@ -225,9 +225,15 @@ fn resolve_engine_dir(
 
 /// Find the engine/ directory relative to the werma repo checkout.
 fn find_engine_dir() -> Result<std::path::PathBuf> {
-    let effective_repo: Option<String> = match std::env::var("WERMA_REPO").ok() {
-        Some(val) => Some(val),
-        None => dirs::home_dir().map(|h| h.join("projects/werma").to_string_lossy().into_owned()),
+    let effective_repo: Option<String> = if let Ok(val) = std::env::var("WERMA_REPO") {
+        Some(val)
+    } else {
+        let cfg = crate::config::UserConfig::load();
+        let dir = cfg.repo_dir("werma");
+        let resolved = crate::pipeline::helpers::resolve_home(&dir)
+            .to_string_lossy()
+            .into_owned();
+        Some(resolved)
     };
 
     let cwd = std::env::current_dir().context("cannot get current directory")?;

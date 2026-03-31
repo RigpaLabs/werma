@@ -21,6 +21,7 @@ use super::helpers::infer_working_dir_from_issue;
 use super::poll::build_poll_prompt;
 
 use super::config::PipelineConfig;
+use crate::config::UserConfig;
 use crate::db::Db;
 use crate::models::{Status, Task};
 
@@ -36,6 +37,7 @@ pub fn create_initial_stage_task(
     description: &str,
     working_dir: &str,
     estimate: i32,
+    user_cfg: &UserConfig,
 ) -> Result<String> {
     let stage_cfg = config
         .stage(stage_name)
@@ -53,8 +55,9 @@ pub fn create_initial_stage_task(
 
     let prompt = build_poll_prompt(config, stage_cfg, identifier, title, description, db);
 
-    let effective_working_dir = if working_dir.is_empty() || working_dir == "~/projects/werma" {
-        infer_working_dir_from_issue(db, identifier)
+    let default_dir = user_cfg.repo_dir("werma");
+    let effective_working_dir = if working_dir.is_empty() || working_dir == default_dir {
+        infer_working_dir_from_issue(db, identifier, user_cfg)
     } else {
         working_dir.to_string()
     };
@@ -102,10 +105,15 @@ mod tests {
         load_from_str(include_str!("../../pipelines/default.yaml"), "<test>").unwrap()
     }
 
+    fn test_user_config() -> UserConfig {
+        UserConfig::default()
+    }
+
     #[test]
     fn create_initial_stage_task_creates_pending_task() {
         let db = crate::db::Db::open_in_memory().unwrap();
         let config = test_config();
+        let user_cfg = test_user_config();
 
         let task_id = create_initial_stage_task(
             &db,
@@ -116,6 +124,7 @@ mod tests {
             "Test description",
             "~/projects/werma",
             3,
+            &user_cfg,
         )
         .unwrap();
 
@@ -132,6 +141,7 @@ mod tests {
     fn create_initial_stage_task_unknown_stage_errors() {
         let db = crate::db::Db::open_in_memory().unwrap();
         let config = test_config();
+        let user_cfg = test_user_config();
 
         let result = create_initial_stage_task(
             &db,
@@ -142,6 +152,7 @@ mod tests {
             "Desc",
             "/tmp",
             0,
+            &user_cfg,
         );
         assert!(result.is_err());
         assert!(
@@ -156,7 +167,9 @@ mod tests {
     fn create_initial_stage_task_infers_working_dir_from_existing() {
         let db = crate::db::Db::open_in_memory().unwrap();
         let config = test_config();
+        let user_cfg = test_user_config();
 
+        // Prior task has a non-default working dir
         let prior = Task {
             id: "20260313-001".to_string(),
             linear_issue_id: "RIG-202".to_string(),
@@ -167,6 +180,7 @@ mod tests {
         };
         db.insert_task(&prior).unwrap();
 
+        // When passed the default werma dir, it should infer from prior task
         let task_id = create_initial_stage_task(
             &db,
             &config,
@@ -176,10 +190,64 @@ mod tests {
             "Description",
             "~/projects/werma",
             0,
+            &user_cfg,
         )
         .unwrap();
 
         let task = db.task(&task_id).unwrap().unwrap();
+        // Should pick up the non-default dir from the existing task
         assert_eq!(task.working_dir, "~/projects/fathom");
+    }
+
+    #[test]
+    fn create_initial_stage_task_preserves_explicit_working_dir() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let config = test_config();
+        let user_cfg = test_user_config();
+
+        // When an explicit non-default dir is passed, it should be preserved
+        let task_id = create_initial_stage_task(
+            &db,
+            &config,
+            "analyst",
+            "RIG-203",
+            "Custom dir task",
+            "Description",
+            "/custom/project/path",
+            0,
+            &user_cfg,
+        )
+        .unwrap();
+
+        let task = db.task(&task_id).unwrap().unwrap();
+        assert_eq!(task.working_dir, "/custom/project/path");
+    }
+
+    #[test]
+    fn create_initial_stage_task_uses_config_override() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let config = test_config();
+        let mut user_cfg = UserConfig::default();
+        user_cfg
+            .repos
+            .insert("werma".to_string(), "/custom/werma".to_string());
+
+        // When passed the config-overridden default dir, it should still trigger inference
+        let task_id = create_initial_stage_task(
+            &db,
+            &config,
+            "analyst",
+            "RIG-204",
+            "Config test",
+            "Description",
+            "/custom/werma",
+            0,
+            &user_cfg,
+        )
+        .unwrap();
+
+        let task = db.task(&task_id).unwrap().unwrap();
+        // No prior tasks, so falls back to config default
+        assert_eq!(task.working_dir, "/custom/werma");
     }
 }

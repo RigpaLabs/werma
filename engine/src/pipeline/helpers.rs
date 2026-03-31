@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::config::UserConfig;
 use crate::db::Db;
 
 /// Resolve `~/` prefix to the user's home directory.
@@ -27,10 +28,16 @@ pub(crate) fn truncate_lines(text: &str, max: usize) -> String {
 }
 
 /// Infer working directory from existing tasks for the same Linear issue.
-pub(crate) fn infer_working_dir_from_issue(db: &Db, linear_issue_id: &str) -> String {
+/// Falls back to `config.repo_dir("werma")` when no prior task has a non-default working dir.
+pub(crate) fn infer_working_dir_from_issue(
+    db: &Db,
+    linear_issue_id: &str,
+    config: &UserConfig,
+) -> String {
+    let default_dir = config.repo_dir("werma");
     if let Ok(tasks) = db.tasks_by_linear_issue(linear_issue_id, None, false) {
         for task in &tasks {
-            if !task.working_dir.is_empty() && task.working_dir != "~/projects/werma" {
+            if !task.working_dir.is_empty() && task.working_dir != default_dir {
                 return task.working_dir.clone();
             }
         }
@@ -38,7 +45,7 @@ pub(crate) fn infer_working_dir_from_issue(db: &Db, linear_issue_id: &str) -> St
             return task.working_dir.clone();
         }
     }
-    "~/projects/werma".to_string()
+    default_dir
 }
 
 #[cfg(test)]
@@ -92,6 +99,7 @@ mod tests {
     #[test]
     fn infer_working_dir_from_existing_tasks() {
         let db = crate::db::Db::open_in_memory().unwrap();
+        let cfg = crate::config::UserConfig::default();
 
         let task = Task {
             id: "20260310-010".to_string(),
@@ -124,10 +132,48 @@ mod tests {
         };
         db.insert_task(&task).unwrap();
 
-        let dir = infer_working_dir_from_issue(&db, "issue-xyz");
+        let dir = infer_working_dir_from_issue(&db, "issue-xyz", &cfg);
         assert_eq!(dir, "~/projects/werma");
 
-        let dir = infer_working_dir_from_issue(&db, "unknown-issue");
+        let dir = infer_working_dir_from_issue(&db, "unknown-issue", &cfg);
         assert_eq!(dir, "~/projects/werma");
+    }
+
+    #[test]
+    fn infer_working_dir_respects_config_override() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let mut cfg = crate::config::UserConfig::default();
+        cfg.repos
+            .insert("werma".to_string(), "/custom/path/werma".to_string());
+
+        // No tasks exist — should fall back to config default
+        let dir = infer_working_dir_from_issue(&db, "unknown-issue", &cfg);
+        assert_eq!(dir, "/custom/path/werma");
+
+        // Task with the config default should be treated as "default"
+        let task = Task {
+            id: "20260310-011".to_string(),
+            status: Status::Completed,
+            working_dir: "/custom/path/werma".to_string(),
+            linear_issue_id: "issue-abc".to_string(),
+            task_type: "pipeline-analyst".to_string(),
+            ..Default::default()
+        };
+        db.insert_task(&task).unwrap();
+        let dir = infer_working_dir_from_issue(&db, "issue-abc", &cfg);
+        assert_eq!(dir, "/custom/path/werma");
+
+        // Task with a non-default working dir should be preferred
+        let task2 = Task {
+            id: "20260310-012".to_string(),
+            status: Status::Completed,
+            working_dir: "~/projects/fathom".to_string(),
+            linear_issue_id: "issue-abc".to_string(),
+            task_type: "pipeline-engineer".to_string(),
+            ..Default::default()
+        };
+        db.insert_task(&task2).unwrap();
+        let dir = infer_working_dir_from_issue(&db, "issue-abc", &cfg);
+        assert_eq!(dir, "~/projects/fathom");
     }
 }
