@@ -95,6 +95,7 @@ fn fetch_origin_main(working_dir: &Path) -> Result<()> {
 /// Set up a git worktree for the given branch.
 /// Creates .trees/{branch} inside working_dir.
 /// If the worktree already exists (resume case), returns its path.
+/// If the worktree directory exists but is stale (not a valid git worktree), removes and recreates it.
 /// Installs a pre-commit hook to enforce cargo fmt in all worktrees.
 pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> {
     let trees_dir = working_dir.join(".trees");
@@ -102,9 +103,21 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
         .with_context(|| format!("creating .trees/ in {}", working_dir.display()))?;
 
     let dir_name = branch_name.replace('/', "--");
-    let worktree_path = trees_dir.join(dir_name);
+    let worktree_path = trees_dir.join(&dir_name);
 
-    if !worktree_path.exists() {
+    if worktree_path.exists() {
+        // RIG-372: Verify the existing worktree is valid (has .git file/dir and git recognizes it).
+        // If it's stale (e.g. `werma clean` deleted git metadata, or it's orphaned),
+        // remove it and recreate fresh from current main.
+        if !is_valid_worktree(&worktree_path) {
+            eprintln!(
+                "worktree: stale worktree at {} — removing and recreating",
+                worktree_path.display()
+            );
+            remove_stale_worktree(working_dir, &worktree_path)?;
+            create_worktree_dir(working_dir, branch_name, &worktree_path)?;
+        }
+    } else {
         create_worktree_dir(working_dir, branch_name, &worktree_path)?;
     }
 
@@ -112,6 +125,59 @@ pub fn setup_worktree(working_dir: &Path, branch_name: &str) -> Result<PathBuf> 
     install_pre_commit_hook(&worktree_path)?;
 
     Ok(worktree_path)
+}
+
+/// Check if a worktree directory is valid (git recognizes it as a working tree).
+fn is_valid_worktree(worktree_path: &Path) -> bool {
+    // A valid worktree has a .git file (not directory) pointing to the main repo's worktrees/ dir
+    let git_marker = worktree_path.join(".git");
+    if !git_marker.exists() {
+        return false;
+    }
+
+    // Verify git can actually resolve this as a working tree
+    Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(worktree_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Remove a stale worktree directory. Tries `git worktree remove --force` first,
+/// falls back to filesystem removal if git doesn't know about this worktree.
+fn remove_stale_worktree(working_dir: &Path, worktree_path: &Path) -> Result<()> {
+    // Try git worktree remove first (cleanest — updates git's worktree list)
+    let output = Command::new("git")
+        .args([
+            "worktree",
+            "remove",
+            "--force",
+            &worktree_path.to_string_lossy(),
+        ])
+        .current_dir(working_dir)
+        .output();
+
+    if let Ok(o) = output {
+        if o.status.success() {
+            return Ok(());
+        }
+    }
+
+    // Fallback: prune git's worktree list and remove directory manually
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(working_dir)
+        .output();
+
+    std::fs::remove_dir_all(worktree_path).with_context(|| {
+        format!(
+            "removing stale worktree directory {}",
+            worktree_path.display()
+        )
+    })?;
+
+    Ok(())
 }
 
 /// Create the git worktree directory for the given branch.
@@ -300,6 +366,25 @@ fi
 /// Used as a safety guard to prevent write tasks from running on the main repo.
 pub fn is_inside_worktree(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == ".trees")
+}
+
+/// Resolve a worktree path back to the base repository root.
+///
+/// If the path contains `/.trees/`, returns the portion before the first `/.trees/` segment.
+/// This prevents nested worktree creation when a task's `working_dir` already points to
+/// a worktree from a previous (failed) run.
+///
+/// Examples:
+/// - `/home/user/project/.trees/feat--RIG-42` → `/home/user/project`
+/// - `/home/user/project` → `/home/user/project` (unchanged)
+/// - `/home/user/project/.trees/a/.trees/b` → `/home/user/project` (strips all nesting)
+pub fn resolve_base_repo(path: &Path) -> PathBuf {
+    let path_str = path.to_string_lossy();
+    if let Some(idx) = path_str.find("/.trees/") {
+        PathBuf::from(&path_str[..idx])
+    } else {
+        path.to_path_buf()
+    }
 }
 
 /// Remove a worktree (does NOT delete the branch).
@@ -955,5 +1040,88 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // No error on missing worktree
         assert!(cleanup_worktree(dir.path(), "nonexistent").is_ok());
+    }
+
+    // --- resolve_base_repo (RIG-372) ---
+
+    #[test]
+    fn resolve_base_repo_strips_trees_path() {
+        let path = Path::new("/home/user/project/.trees/feat--RIG-42-thing");
+        assert_eq!(resolve_base_repo(path), PathBuf::from("/home/user/project"));
+    }
+
+    #[test]
+    fn resolve_base_repo_strips_nested_trees() {
+        // Double-nested worktree path — should resolve to outermost base
+        let path = Path::new("/home/user/project/.trees/feat--RIG-42/.trees/feat--RIG-42");
+        assert_eq!(resolve_base_repo(path), PathBuf::from("/home/user/project"));
+    }
+
+    #[test]
+    fn resolve_base_repo_preserves_normal_path() {
+        let path = Path::new("/home/user/project");
+        assert_eq!(resolve_base_repo(path), PathBuf::from("/home/user/project"));
+    }
+
+    #[test]
+    fn resolve_base_repo_tilde_path_with_trees() {
+        let path = Path::new("~/projects/rigpa/werma/.trees/feat--RIG-356-pipeline-engineer-stage");
+        assert_eq!(
+            resolve_base_repo(path),
+            PathBuf::from("~/projects/rigpa/werma")
+        );
+    }
+
+    // --- stale worktree detection + recreation (RIG-372) ---
+
+    #[test]
+    fn setup_worktree_recreates_stale_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = init_repo_with_origin(&dir);
+
+        let branch = "feat/RIG-372-stale-test";
+        let dir_name = branch.replace('/', "--");
+        let trees_dir = repo_dir.join(".trees");
+        std::fs::create_dir_all(&trees_dir).unwrap();
+        let stale_path = trees_dir.join(&dir_name);
+
+        // Create a stale worktree directory (plain dir, no .git)
+        std::fs::create_dir_all(&stale_path).unwrap();
+        std::fs::write(stale_path.join("stale-marker.txt"), "stale").unwrap();
+        assert!(!is_valid_worktree(&stale_path));
+
+        // setup_worktree should detect stale, remove, and recreate
+        let path = setup_worktree(&repo_dir, branch).unwrap();
+        assert!(path.exists());
+        assert!(is_valid_worktree(&path));
+        // Stale marker should be gone (directory was recreated)
+        assert!(!path.join("stale-marker.txt").exists());
+
+        cleanup_worktree(&repo_dir, branch).unwrap();
+    }
+
+    #[test]
+    fn setup_worktree_no_nested_trees() {
+        // Simulates the RIG-372 bug: working_dir is already a worktree path
+        let dir = tempfile::tempdir().unwrap();
+        let repo_dir = init_repo_with_origin(&dir);
+
+        let branch = "feat/RIG-372-nesting-test";
+
+        // First: create a legitimate worktree
+        let worktree_path = setup_worktree(&repo_dir, branch).unwrap();
+        assert!(worktree_path.exists());
+
+        // Now simulate what the bug did: use the worktree path as working_dir
+        // resolve_base_repo should strip it back to repo_dir
+        let resolved = resolve_base_repo(&worktree_path);
+        assert_eq!(resolved, repo_dir);
+
+        // Setting up a worktree from the resolved base should NOT create nested .trees
+        let worktree_path_2 = setup_worktree(&resolved, branch).unwrap();
+        assert!(!worktree_path_2.to_string_lossy().contains(".trees/.trees"));
+        assert_eq!(worktree_path, worktree_path_2);
+
+        cleanup_worktree(&repo_dir, branch).unwrap();
     }
 }
