@@ -47,7 +47,7 @@ pub fn process_effects(
         let effects = by_task.remove(&task_id).unwrap_or_default();
 
         for effect in &effects {
-            match execute_effect(effect, linear, cmd, notifier) {
+            match execute_effect(effect, db, linear, cmd, notifier) {
                 Ok(()) => {
                     db.mark_effect_done(effect.id)?;
                     processed += 1;
@@ -81,8 +81,11 @@ pub fn process_effects(
 /// Execute a single effect, dispatching on its type.
 ///
 /// All EffectType variants are matched explicitly — no catch-all.
+/// RIG-355: accepts `&Db` so CreatePr/PostPrComment can re-read the task's current
+/// working_dir (the payload may have been created before the runner updated the DB).
 pub fn execute_effect(
     effect: &Effect,
+    db: &Db,
     linear: &dyn LinearApi,
     cmd: &dyn CommandRunner,
     notifier: &dyn Notifier,
@@ -121,10 +124,23 @@ pub fn execute_effect(
         }
 
         EffectType::CreatePr => {
-            let working_dir = payload_str(payload, "working_dir")?;
-            // If no PR created, logs and continues (no failure).
-            // If PR created, attaches URL to Linear; propagates error if attach fails.
-            if let Some(url) = auto_create_pr(cmd, working_dir, issue_id, task_id)? {
+            // RIG-355: Re-read working_dir from task DB record. The payload may have
+            // been created before the runner updated task.working_dir to the worktree path.
+            let payload_wd = payload_str(payload, "working_dir")?;
+            let working_dir = db
+                .task(task_id)
+                .ok()
+                .flatten()
+                .map(|t| t.working_dir.clone())
+                .filter(|wd| !wd.is_empty())
+                .unwrap_or_else(|| payload_wd.to_string());
+            if working_dir != payload_wd {
+                eprintln!(
+                    "[effects] CreatePr: using DB working_dir '{working_dir}' \
+                     (payload had '{payload_wd}') for {issue_id}"
+                );
+            }
+            if let Some(url) = auto_create_pr(cmd, &working_dir, issue_id, task_id)? {
                 eprintln!("[effects] CreatePr: created PR {url} for {issue_id}");
                 let title = pr_title_from_url(&url);
                 linear.attach_url(issue_id, &url, &title)?;
@@ -144,17 +160,22 @@ pub fn execute_effect(
 
         EffectType::PostPrComment => {
             let body = payload_str(payload, "body")?;
-            let working_dir = payload
+            let payload_wd = payload
                 .get("working_dir")
                 .and_then(|v| v.as_str())
                 .unwrap_or("/tmp");
+            // RIG-355: Re-read working_dir from task DB record for the same reason
+            // as CreatePr. For reviewer tasks (read-only, no worktree), also try to
+            // find the engineer task's worktree for the same issue — that's where the
+            // PR's feature branch lives.
+            let working_dir = resolve_pr_working_dir(db, task_id, issue_id, payload_wd);
             let review_event = payload
                 .get("review_event")
                 .and_then(|v| v.as_str())
                 .unwrap_or("comment");
             // RIG-318: post a proper PR review (not an issue comment).
             // Errors propagate so the outbox retries (e.g. PR not yet created).
-            post_pr_review(cmd, working_dir, body, review_event)
+            post_pr_review(cmd, &working_dir, body, review_event)
         }
 
         EffectType::Notify => {
@@ -164,6 +185,40 @@ pub fn execute_effect(
             Ok(())
         }
     }
+}
+
+/// RIG-355: Resolve the working_dir for PR operations (CreatePr, PostPrComment).
+///
+/// For reviewer tasks (read-only, no worktree), the task's own working_dir is the base
+/// repo (on main branch) — useless for finding the PR. Instead, look up the most recent
+/// completed engineer task for the same issue — its working_dir is the worktree where
+/// the feature branch lives.
+fn resolve_pr_working_dir(db: &Db, task_id: &str, issue_id: &str, fallback: &str) -> String {
+    // First: try the current task's working_dir from DB
+    if let Ok(Some(task)) = db.task(task_id) {
+        if !task.working_dir.is_empty() && task.working_dir.contains(".trees/") {
+            return task.working_dir;
+        }
+    }
+
+    // Second: look for the engineer task's worktree for the same issue
+    if let Ok(tasks) = db.tasks_by_linear_issue(issue_id, None, false) {
+        // Find the most recent completed engineer task with a worktree path
+        if let Some(eng_task) = tasks
+            .iter()
+            .rev()
+            .find(|t| t.pipeline_stage == "engineer" && t.working_dir.contains(".trees/"))
+        {
+            eprintln!(
+                "[effects] PostPrComment: using engineer worktree '{}' for {issue_id} \
+                 (reviewer task {task_id} has no worktree)",
+                eng_task.working_dir
+            );
+            return eng_task.working_dir.clone();
+        }
+    }
+
+    fallback.to_string()
 }
 
 /// Extract a string field from an effect payload, returning `Err` if absent or not a string.
@@ -382,6 +437,7 @@ mod tests {
 
     #[test]
     fn execute_effect_move_issue_uses_move_with_retry() {
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -395,7 +451,7 @@ mod tests {
             serde_json::json!({ "target_status": "in_progress" }),
         );
 
-        execute_effect(&effect, &linear, &cmd, &notifier).unwrap();
+        execute_effect(&effect, &db, &linear, &cmd, &notifier).unwrap();
 
         let moves = linear.move_calls.borrow();
         assert_eq!(moves.len(), 1);
@@ -404,6 +460,7 @@ mod tests {
 
     #[test]
     fn execute_effect_post_comment() {
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -415,7 +472,7 @@ mod tests {
             serde_json::json!({ "body": "Hello from processor" }),
         );
 
-        execute_effect(&effect, &linear, &cmd, &notifier).unwrap();
+        execute_effect(&effect, &db, &linear, &cmd, &notifier).unwrap();
 
         let comments = linear.comment_calls.borrow();
         assert_eq!(comments.len(), 1);
@@ -424,6 +481,7 @@ mod tests {
 
     #[test]
     fn execute_effect_add_label() {
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -435,7 +493,7 @@ mod tests {
             serde_json::json!({ "label": "spec:done" }),
         );
 
-        execute_effect(&effect, &linear, &cmd, &notifier).unwrap();
+        execute_effect(&effect, &db, &linear, &cmd, &notifier).unwrap();
 
         let labels = linear.add_label_calls.borrow();
         assert_eq!(labels.len(), 1);
@@ -444,6 +502,7 @@ mod tests {
 
     #[test]
     fn execute_effect_remove_label() {
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -455,7 +514,7 @@ mod tests {
             serde_json::json!({ "label": "analyze" }),
         );
 
-        execute_effect(&effect, &linear, &cmd, &notifier).unwrap();
+        execute_effect(&effect, &db, &linear, &cmd, &notifier).unwrap();
 
         let labels = linear.remove_label_calls.borrow();
         assert_eq!(labels.len(), 1);
@@ -464,6 +523,7 @@ mod tests {
 
     #[test]
     fn execute_effect_update_estimate() {
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -475,7 +535,7 @@ mod tests {
             serde_json::json!({ "estimate": 5 }),
         );
 
-        execute_effect(&effect, &linear, &cmd, &notifier).unwrap();
+        execute_effect(&effect, &db, &linear, &cmd, &notifier).unwrap();
 
         let estimates = linear.estimate_calls.borrow();
         assert_eq!(estimates.len(), 1);
@@ -484,6 +544,7 @@ mod tests {
 
     #[test]
     fn execute_effect_attach_url() {
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -495,7 +556,7 @@ mod tests {
             serde_json::json!({ "url": "https://github.com/org/repo/pull/99", "title": "PR #99" }),
         );
 
-        execute_effect(&effect, &linear, &cmd, &notifier).unwrap();
+        execute_effect(&effect, &db, &linear, &cmd, &notifier).unwrap();
 
         let attaches = linear.attach_calls.borrow();
         assert_eq!(attaches.len(), 1);
@@ -503,9 +564,10 @@ mod tests {
     }
 
     #[test]
-    fn execute_effect_create_pr_skips_gracefully() {
-        // FakeCommandRunner returns empty stdout for git commands, so auto_create_pr
-        // will detect empty branch name and return None (graceful skip, not error).
+    fn execute_effect_create_pr_returns_error_on_empty_branch() {
+        // RIG-355: FakeCommandRunner returns empty stdout → empty branch name
+        // → auto_create_pr now returns Err (not Ok(None)), so effect retries.
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -517,23 +579,17 @@ mod tests {
             serde_json::json!({ "working_dir": "/tmp" }),
         );
 
-        // Should succeed even when no PR is created (graceful skip)
-        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        // RIG-355: empty branch name → Err (not silent skip)
+        let result = execute_effect(&effect, &db, &linear, &cmd, &notifier);
         assert!(
-            result.is_ok(),
-            "CreatePr should not fail on graceful skip: {result:?}"
+            result.is_err(),
+            "CreatePr should return Err on empty branch (effect retries): {result:?}"
         );
     }
 
     #[test]
     fn execute_effect_create_pr_attaches_url_to_linear() {
-        // Arrange: FakeCommandRunner scripted to produce a PR URL from auto_create_pr.
-        // auto_create_pr calls (in order):
-        //   1. git branch --show-current  → non-main branch name
-        //   2. git log origin/main..HEAD  → has commits ahead
-        //   3. git push -u origin <branch> → success
-        //   4. gh pr view --json url -q .url → empty (no existing PR)
-        //   5. gh pr create ...           → PR URL
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -551,7 +607,7 @@ mod tests {
             serde_json::json!({ "working_dir": "/tmp" }),
         );
 
-        execute_effect(&effect, &linear, &cmd, &notifier).unwrap();
+        execute_effect(&effect, &db, &linear, &cmd, &notifier).unwrap();
 
         let attaches = linear.attach_calls.borrow();
         assert_eq!(attaches.len(), 1, "attach_url should be called once");
@@ -570,6 +626,7 @@ mod tests {
 
     #[test]
     fn execute_effect_post_pr_review_success() {
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -590,7 +647,7 @@ mod tests {
             }),
         );
 
-        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        let result = execute_effect(&effect, &db, &linear, &cmd, &notifier);
         assert!(
             result.is_ok(),
             "should succeed when PR review is posted: {result:?}"
@@ -605,7 +662,7 @@ mod tests {
 
     #[test]
     fn execute_effect_post_pr_review_no_pr_returns_error() {
-        // RIG-318: no PR → Err (not silent Ok), so the outbox retries.
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -618,7 +675,7 @@ mod tests {
             serde_json::json!({ "body": "Review posted.", "working_dir": "/tmp" }),
         );
 
-        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        let result = execute_effect(&effect, &db, &linear, &cmd, &notifier);
         assert!(
             result.is_err(),
             "PostPrComment with no PR should return Err for retry"
@@ -627,7 +684,7 @@ mod tests {
 
     #[test]
     fn execute_effect_post_pr_review_api_error_returns_error() {
-        // RIG-318: GitHub API error → Err, triggers retry.
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -648,12 +705,13 @@ mod tests {
             }),
         );
 
-        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        let result = execute_effect(&effect, &db, &linear, &cmd, &notifier);
         assert!(result.is_err(), "PostPrComment should fail on API error");
     }
 
     #[test]
     fn execute_effect_post_pr_review_defaults_to_comment_event() {
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -671,7 +729,7 @@ mod tests {
             serde_json::json!({ "body": "Review text.", "working_dir": "/tmp" }),
         );
 
-        let result = execute_effect(&effect, &linear, &cmd, &notifier);
+        let result = execute_effect(&effect, &db, &linear, &cmd, &notifier);
         assert!(result.is_ok(), "should succeed: {result:?}");
 
         let calls = cmd.calls.borrow();
@@ -680,6 +738,7 @@ mod tests {
 
     #[test]
     fn execute_effect_notify() {
+        let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
         let notifier = FakeNotifier::new();
@@ -691,12 +750,161 @@ mod tests {
             serde_json::json!({ "channel": "#alerts", "message": "Task done" }),
         );
 
-        execute_effect(&effect, &linear, &cmd, &notifier).unwrap();
+        execute_effect(&effect, &db, &linear, &cmd, &notifier).unwrap();
 
         let notifications = notifier.slack_calls.borrow();
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].0, "#alerts");
         assert!(notifications[0].1.contains("Task done"));
+    }
+
+    // ─── RIG-355: CreatePr re-reads working_dir from DB ─────────────────
+
+    #[test]
+    fn create_pr_prefers_db_working_dir_over_payload() {
+        // Payload has stale base repo path, but DB has updated worktree path.
+        // execute_effect should use the DB value.
+        let db = Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        // Insert task with worktree path in DB (simulates RIG-351 runner update)
+        let mut t = crate::db::make_test_task("rig355-eng-t");
+        t.status = Status::Completed;
+        t.linear_issue_id = "RIG-355-TEST".to_string();
+        t.pipeline_stage = "engineer".to_string();
+        t.working_dir =
+            "/home/user/projects/repo/.trees/feat--RIG-355-pipeline-engineer-stage".to_string();
+        db.insert_task(&t).unwrap();
+
+        // Script auto_create_pr to succeed from the worktree path
+        cmd.push_success("feat/RIG-355-pipeline-engineer-stage"); // git branch --show-current
+        cmd.push_success("abc1234 RIG-355 feat: fix"); // git log origin/main..HEAD
+        cmd.push_success(""); // git push
+        cmd.push_success(""); // gh pr view (no existing PR)
+        cmd.push_success("https://github.com/org/repo/pull/42"); // gh pr create
+
+        // Effect payload has STALE base repo path (before runner updated DB)
+        let effect = make_effect(
+            "rig355-eng-t",
+            "RIG-355-TEST",
+            EffectType::CreatePr,
+            serde_json::json!({
+                "working_dir": "~/projects/repo",
+                "issue_id": "RIG-355-TEST",
+                "task_id": "rig355-eng-t",
+            }),
+        );
+
+        execute_effect(&effect, &db, &linear, &cmd, &notifier).unwrap();
+
+        // Verify PR was created (attach_url was called)
+        let attaches = linear.attach_calls.borrow();
+        assert_eq!(attaches.len(), 1, "PR should be attached to Linear issue");
+
+        // Verify the command ran from the DB worktree path, not the payload path.
+        // The first git command should have been executed with the worktree path.
+        let calls = cmd.calls.borrow();
+        assert!(!calls.is_empty(), "auto_create_pr should have been called");
+        // The working_dir passed to commands should be the worktree path from DB
+        let first_call_dir = &calls[0].2;
+        assert!(
+            first_call_dir
+                .as_ref()
+                .is_some_and(|d| d.contains(".trees/")),
+            "command should run from worktree path (DB value), not base repo: {:?}",
+            first_call_dir
+        );
+    }
+
+    #[test]
+    fn create_pr_returns_error_on_main_branch() {
+        // RIG-355: auto_create_pr must return Err (not Ok(None)) when on main.
+        let db = Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        // git branch --show-current returns "main"
+        cmd.push_success("main");
+
+        let effect = make_effect(
+            "rig355-main-t",
+            "RIG-355-MAIN",
+            EffectType::CreatePr,
+            serde_json::json!({ "working_dir": "/tmp" }),
+        );
+
+        let result = execute_effect(&effect, &db, &linear, &cmd, &notifier);
+        assert!(
+            result.is_err(),
+            "CreatePr on main branch must return Err for retry: {result:?}"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected worktree feature branch"),
+            "error message should explain the problem"
+        );
+    }
+
+    #[test]
+    fn post_pr_comment_resolves_engineer_worktree() {
+        // RIG-355: PostPrComment for reviewer tasks should find the engineer's worktree.
+        let db = Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+
+        let issue_id = "RIG-355-REV";
+
+        // Insert engineer task with worktree path
+        let mut eng = crate::db::make_test_task("rig355-eng");
+        eng.status = Status::Completed;
+        eng.linear_issue_id = issue_id.to_string();
+        eng.pipeline_stage = "engineer".to_string();
+        eng.working_dir =
+            "/home/user/projects/repo/.trees/feat--RIG-355-pipeline-engineer-stage".to_string();
+        db.insert_task(&eng).unwrap();
+
+        // Insert reviewer task with base repo path (no worktree)
+        let mut rev = crate::db::make_test_task("rig355-rev");
+        rev.status = Status::Completed;
+        rev.linear_issue_id = issue_id.to_string();
+        rev.pipeline_stage = "reviewer".to_string();
+        rev.working_dir = "~/projects/repo".to_string();
+        db.insert_task(&rev).unwrap();
+
+        // Script gh pr view + gh pr review to succeed
+        cmd.push_success("42"); // gh pr view → PR number
+        cmd.push_success(""); // gh pr review → success
+
+        let effect = make_effect(
+            "rig355-rev",
+            issue_id,
+            EffectType::PostPrComment,
+            serde_json::json!({
+                "body": "LGTM!",
+                "working_dir": "~/projects/repo",
+                "review_event": "approve",
+            }),
+        );
+
+        let result = execute_effect(&effect, &db, &linear, &cmd, &notifier);
+        assert!(result.is_ok(), "PostPrComment should succeed: {result:?}");
+
+        // Verify the command ran from the ENGINEER's worktree path
+        let calls = cmd.calls.borrow();
+        let first_call_dir = &calls[0].2;
+        assert!(
+            first_call_dir
+                .as_ref()
+                .is_some_and(|d| d.contains(".trees/")),
+            "PostPrComment should resolve to engineer's worktree: {:?}",
+            first_call_dir
+        );
     }
 
     #[test]

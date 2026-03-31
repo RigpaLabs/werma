@@ -95,16 +95,33 @@ pub(crate) fn auto_create_pr(
     task_id: &str,
 ) -> Result<Option<String>> {
     let working_dir = resolve_home(working_dir);
+    eprintln!(
+        "[auto-PR] {linear_issue_id} (task {task_id}): working_dir={}",
+        working_dir.display()
+    );
 
     // 1. Get current branch
     let branch_output = cmd
         .run("git", &["branch", "--show-current"], Some(&working_dir))
         .context("git branch --show-current")?;
     let branch_name = branch_output.stdout_str();
+    eprintln!("[auto-PR] {linear_issue_id}: branch={branch_name:?}");
 
-    // 2. Safety: never PR from main/master or empty branch
-    if branch_name.is_empty() || branch_name == "main" || branch_name == "master" {
-        return Ok(None);
+    // 2. RIG-355: return Err (not Ok(None)) when on main/master — this is always
+    // unexpected for CreatePr effects (engineer tasks run in worktrees). Returning
+    // Err causes the effect to retry, and logging makes the root cause visible.
+    if branch_name.is_empty() {
+        return Err(anyhow::anyhow!(
+            "auto-PR: empty branch name in {} — working_dir may not be a git repo",
+            working_dir.display()
+        ));
+    }
+    if branch_name == "main" || branch_name == "master" {
+        return Err(anyhow::anyhow!(
+            "auto-PR: branch is '{branch_name}' in {} — expected worktree feature branch. \
+             working_dir likely points to base repo instead of .trees/ worktree",
+            working_dir.display()
+        ));
     }
 
     // 3. Check if there are commits ahead of main
