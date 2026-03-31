@@ -544,4 +544,134 @@ mod tests {
             "cmd_fail must not overwrite a Canceled task"
         );
     }
+
+    // --- cmd_complete happy path tests ---
+
+    fn make_running_task(id: &str) -> Task {
+        Task {
+            id: id.into(),
+            status: Status::Running,
+            task_type: "code".into(),
+            prompt: "implement feature".into(),
+            working_dir: "/tmp".into(),
+            model: "sonnet".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn cmd_complete_with_result_file() {
+        let db = test_db();
+        db.insert_task(&make_running_task("20260331-001")).unwrap();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "VERDICT=DONE\nAll tests pass.").unwrap();
+
+        cmd_complete(
+            &db,
+            "20260331-001",
+            None,
+            Some(tmp.path().to_str().unwrap()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let t = db.task("20260331-001").unwrap().unwrap();
+        assert_eq!(t.status, Status::Completed);
+        assert!(
+            t.finished_at.is_some(),
+            "finished_at must be set on completion"
+        );
+    }
+
+    #[test]
+    fn cmd_complete_empty_output_marks_failed() {
+        let db = test_db();
+        db.insert_task(&make_running_task("20260331-002")).unwrap();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "   \n  ").unwrap();
+
+        cmd_complete(
+            &db,
+            "20260331-002",
+            None,
+            Some(tmp.path().to_str().unwrap()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let t = db.task("20260331-002").unwrap().unwrap();
+        assert_eq!(
+            t.status,
+            Status::Failed,
+            "whitespace-only output should mark task as failed"
+        );
+    }
+
+    #[test]
+    fn cmd_complete_records_cost_and_turns() {
+        let db = test_db();
+        db.insert_task(&make_running_task("20260331-003")).unwrap();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "VERDICT=DONE").unwrap();
+
+        cmd_complete(
+            &db,
+            "20260331-003",
+            None,
+            Some(tmp.path().to_str().unwrap()),
+            Some(1.2345),
+            Some(42),
+        )
+        .unwrap();
+
+        let t = db.task("20260331-003").unwrap().unwrap();
+        assert_eq!(t.status, Status::Completed);
+        assert!(
+            (t.cost_usd.unwrap() - 1.2345).abs() < 0.001,
+            "cost_usd should be recorded"
+        );
+        assert_eq!(t.turns_used, 42, "turns_used should be recorded");
+    }
+
+    #[test]
+    fn cmd_complete_records_session_id() {
+        let db = test_db();
+        db.insert_task(&make_running_task("20260331-004")).unwrap();
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "VERDICT=DONE").unwrap();
+
+        cmd_complete(
+            &db,
+            "20260331-004",
+            Some("session-xyz-789"),
+            Some(tmp.path().to_str().unwrap()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let t = db.task("20260331-004").unwrap().unwrap();
+        assert_eq!(t.session_id, "session-xyz-789");
+    }
+
+    #[test]
+    fn cmd_complete_no_result_file_marks_failed() {
+        let db = test_db();
+        db.insert_task(&make_running_task("20260331-005")).unwrap();
+
+        cmd_complete(&db, "20260331-005", None, None, None, None).unwrap();
+
+        let t = db.task("20260331-005").unwrap().unwrap();
+        assert_eq!(
+            t.status,
+            Status::Failed,
+            "no result file → empty output → should mark failed"
+        );
+    }
 }

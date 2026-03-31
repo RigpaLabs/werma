@@ -57,6 +57,37 @@ struct ReleaseInfo {
     asset_api_url: Option<String>,
 }
 
+/// Parse release info from a GitHub API JSON response.
+/// Extracts tag_name and finds the asset URL matching the given target triple.
+fn parse_release_info(json: &serde_json::Value, target: &str) -> Result<ReleaseInfo> {
+    let tag = json["tag_name"]
+        .as_str()
+        .context("no tag_name in release")?
+        .to_string();
+
+    let asset_name = format!("werma-{target}.tar.gz");
+
+    let asset_api_url = json["assets"]
+        .as_array()
+        .and_then(|assets| {
+            assets
+                .iter()
+                .find(|a| a["name"].as_str() == Some(&asset_name))
+        })
+        .and_then(|a| a["url"].as_str())
+        .map(String::from);
+
+    Ok(ReleaseInfo { tag, asset_api_url })
+}
+
+/// Check if the release tag differs from the current version.
+/// Strips the `v` prefix from the tag before comparing. This is equality-based,
+/// NOT semantic version ordering.
+fn release_tag_differs_from_current(current: &str, latest_tag: &str) -> bool {
+    let latest_version = latest_tag.strip_prefix('v').unwrap_or(latest_tag);
+    latest_version != current
+}
+
 /// Fetch the latest release info from GitHub API.
 fn latest_release(token: &str) -> Result<ReleaseInfo> {
     let repo = github_repo();
@@ -82,28 +113,7 @@ fn latest_release(token: &str) -> Result<ReleaseInfo> {
     }
 
     let json: serde_json::Value = resp.json().context("failed to parse release JSON")?;
-
-    let tag = json["tag_name"]
-        .as_str()
-        .context("no tag_name in release")?
-        .to_string();
-
-    let target = current_target();
-    let asset_name = format!("werma-{target}.tar.gz");
-
-    // Find the matching asset and use its API URL (works for private repos).
-    // The "url" field is the API endpoint; "browser_download_url" returns 404 for private repos.
-    let asset_api_url = json["assets"]
-        .as_array()
-        .and_then(|assets| {
-            assets
-                .iter()
-                .find(|a| a["name"].as_str() == Some(&asset_name))
-        })
-        .and_then(|a| a["url"].as_str())
-        .map(String::from);
-
-    Ok(ReleaseInfo { tag, asset_api_url })
+    parse_release_info(&json, current_target())
 }
 
 /// Download a release asset and extract the binary to a temp directory.
@@ -219,9 +229,8 @@ pub fn check_and_apply_update() -> Result<bool> {
     let current = env!("CARGO_PKG_VERSION");
     let token = github_token()?;
     let release = latest_release(&token)?;
-    let latest_version = release.tag.strip_prefix('v').unwrap_or(&release.tag);
 
-    if latest_version == current {
+    if !release_tag_differs_from_current(current, &release.tag) {
         return Ok(false);
     }
 
@@ -244,9 +253,8 @@ pub fn update() -> Result<()> {
 
     let token = github_token()?;
     let release = crate::ui::with_spinner("Checking for updates...", || latest_release(&token))?;
-    let latest_version = release.tag.strip_prefix('v').unwrap_or(&release.tag);
 
-    if latest_version == current {
+    if !release_tag_differs_from_current(current, &release.tag) {
         println!("already up to date (v{current})");
         return Ok(());
     }
@@ -368,5 +376,86 @@ mod tests {
         let target = current_target();
         // In CI/test, should always be one of the known targets
         assert_ne!(target, "unknown", "running on unsupported platform");
+    }
+
+    // --- parse_release_info tests ---
+
+    #[test]
+    fn parse_release_info_with_matching_asset() {
+        let json = serde_json::json!({
+            "tag_name": "v0.46.4",
+            "assets": [
+                {
+                    "name": "werma-aarch64-apple-darwin.tar.gz",
+                    "url": "https://api.github.com/repos/R/W/releases/assets/12345"
+                }
+            ]
+        });
+        let info = parse_release_info(&json, "aarch64-apple-darwin").unwrap();
+        assert_eq!(info.tag, "v0.46.4");
+        assert_eq!(
+            info.asset_api_url.as_deref(),
+            Some("https://api.github.com/repos/R/W/releases/assets/12345")
+        );
+    }
+
+    #[test]
+    fn parse_release_info_no_matching_asset() {
+        let json = serde_json::json!({
+            "tag_name": "v0.46.4",
+            "assets": [
+                {"name": "werma-x86_64-unknown-linux-gnu.tar.gz", "url": "https://example.com"}
+            ]
+        });
+        let info = parse_release_info(&json, "aarch64-apple-darwin").unwrap();
+        assert_eq!(info.tag, "v0.46.4");
+        assert!(
+            info.asset_api_url.is_none(),
+            "wrong platform should yield None"
+        );
+    }
+
+    #[test]
+    fn parse_release_info_no_tag_name() {
+        let json = serde_json::json!({"assets": []});
+        let result = parse_release_info(&json, "aarch64-apple-darwin");
+        assert!(result.is_err(), "missing tag_name should be an error");
+    }
+
+    #[test]
+    fn parse_release_info_empty_assets() {
+        let json = serde_json::json!({
+            "tag_name": "v1.0.0",
+            "assets": []
+        });
+        let info = parse_release_info(&json, "aarch64-apple-darwin").unwrap();
+        assert_eq!(info.tag, "v1.0.0");
+        assert!(info.asset_api_url.is_none());
+    }
+
+    // --- release_tag_differs_from_current tests ---
+
+    #[test]
+    fn release_tag_same_with_v_prefix() {
+        assert!(
+            !release_tag_differs_from_current("0.40.0", "v0.40.0"),
+            "v0.40.0 vs 0.40.0 should be the same"
+        );
+    }
+
+    #[test]
+    fn release_tag_same_without_prefix() {
+        assert!(
+            !release_tag_differs_from_current("0.40.0", "0.40.0"),
+            "identical strings should not differ"
+        );
+    }
+
+    #[test]
+    fn release_tag_different() {
+        assert!(
+            release_tag_differs_from_current("0.40.0", "v0.41.0"),
+            "v0.41.0 vs 0.40.0 should differ"
+        );
     }
 }
