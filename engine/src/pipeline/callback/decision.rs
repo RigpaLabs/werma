@@ -1844,4 +1844,219 @@ mod tests {
             "BLOCKED verdict must skip spec validation"
         );
     }
+
+    // ─── RIG-353: Additional verdict path coverage ────────────────────────
+
+    /// Reviewer empty output + no GitHub review → PostComment "empty output", no transition.
+    #[test]
+    fn decide_reviewer_empty_output_no_github_review() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-353-REMPTY";
+        let task_id = "353-rempty-t1";
+        insert_reviewer_task(&db, task_id, issue_id);
+
+        let decision = decide_callback(
+            &db,
+            task_id,
+            "reviewer",
+            "   \n  \n  ",
+            issue_id,
+            "/tmp",
+            &cmd,
+        )
+        .unwrap();
+
+        let effects = &decision.effects;
+
+        assert!(
+            effects.iter().any(|e| {
+                e.effect_type == EffectType::PostComment
+                    && e.payload
+                        .get("body")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|b| b.contains("empty output"))
+            }),
+            "reviewer empty output should queue 'empty output' comment, got: {effects:?}"
+        );
+
+        assert!(
+            !effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "reviewer empty output must not queue MoveIssue"
+        );
+
+        assert!(
+            decision.internal.spawn_task.is_none(),
+            "reviewer empty output must not spawn next task"
+        );
+    }
+
+    #[test]
+    fn decide_reviewer_fallback_to_github_verdict_approved() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-353-GHAPPR";
+        let task_id = "353-ghappr-t1";
+        insert_reviewer_task(&db, task_id, issue_id);
+
+        cmd.push_success(&format!(
+            r#"[{{"number":42,"headRefName":"feat/rig-353-ghappr-fix","reviewDecision":"APPROVED"}}]"#
+        ));
+
+        let decision = decide_callback(
+            &db, task_id, "reviewer", "",
+            issue_id, "/tmp", &cmd,
+        )
+        .unwrap();
+
+        let effects = &decision.effects;
+
+        assert!(
+            effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "GitHub APPROVED fallback should produce MoveIssue, got: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn decide_reviewer_fallback_to_github_verdict_rejected() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-353-GHREJ";
+        let task_id = "353-ghrej-t1";
+        insert_reviewer_task(&db, task_id, issue_id);
+
+        cmd.push_success(&format!(
+            r#"[{{"number":42,"headRefName":"feat/rig-353-ghrej-fix","reviewDecision":"CHANGES_REQUESTED"}}]"#
+        ));
+
+        let decision = decide_callback(
+            &db, task_id, "reviewer", "",
+            issue_id, "/tmp", &cmd,
+        )
+        .unwrap();
+
+        let effects = &decision.effects;
+
+        assert!(
+            effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "GitHub REJECTED fallback should produce MoveIssue, got: {effects:?}"
+        );
+
+        assert!(
+            decision.internal.spawn_task.is_some(),
+            "GitHub REJECTED fallback should spawn engineer for fixes"
+        );
+        assert_eq!(
+            decision
+                .internal
+                .spawn_task
+                .as_ref()
+                .unwrap()
+                .pipeline_stage,
+            "engineer",
+            "spawned task should be engineer"
+        );
+    }
+
+    #[test]
+    fn decide_analyst_blocked_queues_label_swap() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-353-ABLK";
+        let task_id = "353-ablk-t1";
+        insert_analyst_task(&db, task_id, issue_id);
+
+        let result = "Cannot analyze: missing requirements.\n\nVERDICT=BLOCKED";
+
+        let decision =
+            decide_callback(&db, task_id, "analyst", result, issue_id, "/tmp", &cmd).unwrap();
+
+        let effects = &decision.effects;
+
+        let remove_label = effects.iter().find(|e| {
+            e.effect_type == EffectType::RemoveLabel
+                && e.payload
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|l| l == "analyze")
+        });
+        assert!(
+            remove_label.is_some(),
+            "analyst BLOCKED should remove 'analyze' label, got: {effects:?}"
+        );
+
+        let add_label = effects.iter().find(|e| {
+            e.effect_type == EffectType::AddLabel
+                && e.payload
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|l| l == "analyze:blocked")
+        });
+        assert!(
+            add_label.is_some(),
+            "analyst BLOCKED should add 'analyze:blocked' label, got: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn decide_review_cycle_at_max_rounds_escalates() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "RIG-353-CYCLE";
+
+        for i in 0..DEFAULT_MAX_REVIEW_ROUNDS {
+            let tid = format!("353-cycle-r{i}");
+            let mut t = crate::db::make_test_task(&tid);
+            t.status = Status::Completed;
+            t.linear_issue_id = issue_id.to_string();
+            t.pipeline_stage = "reviewer".to_string();
+            t.task_type = "pipeline-reviewer".to_string();
+            t.working_dir = "~/projects/werma".to_string();
+            db.insert_task(&t).unwrap();
+        }
+
+        let task_id = "353-cycle-cur";
+        insert_reviewer_task(&db, task_id, issue_id);
+
+        let result = "## Review\n- still broken\n\nREVIEW_VERDICT=REJECTED";
+
+        let decision =
+            decide_callback(&db, task_id, "reviewer", result, issue_id, "/tmp", &cmd).unwrap();
+
+        let effects = &decision.effects;
+
+        let escalation_move = effects.iter().find(|e| {
+            e.effect_type == EffectType::MoveIssue
+                && e.payload
+                    .get("target_status")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s == "backlog")
+        });
+        assert!(
+            escalation_move.is_some(),
+            "at max_rounds, REJECTED should escalate to backlog, got: {effects:?}"
+        );
+
+        assert!(
+            effects.iter().any(|e| {
+                e.effect_type == EffectType::PostComment
+                    && e.payload
+                        .get("body")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|b| b.contains("cycle limit"))
+            }),
+            "escalation should include cycle limit comment, got: {effects:?}"
+        );
+
+        assert!(
+            decision.internal.spawn_task.is_none(),
+            "at max_rounds, must NOT spawn engineer — escalated to backlog"
+        );
+    }
 }

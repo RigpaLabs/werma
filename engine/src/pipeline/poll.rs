@@ -1061,4 +1061,112 @@ stages:
             "second poll should not create duplicate engineer task for FAT-42"
         );
     }
+
+    // ─── RIG-353: poll guards and edge cases ──────────────────────────────
+
+    #[test]
+    fn poll_skips_running_pipeline_task_for_same_issue() {
+        // RIG-296: cross-stage guard — skip if another pipeline task is running
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Insert a running engineer task for FAT-50
+        let mut running = crate::db::make_test_task("20260331-eng-run");
+        running.status = crate::models::Status::Running;
+        running.linear_issue_id = "FAT-50".to_string();
+        running.pipeline_stage = "engineer".to_string();
+        running.task_type = "pipeline-engineer".to_string();
+        db.insert_task(&running).unwrap();
+
+        // Issue in Review status → would normally spawn reviewer
+        let issue = fake_issue_with_state(
+            "uuid-fat-50",
+            "FAT-50",
+            "Fix something",
+            &["Feature", "repo:werma"],
+            "started",
+        );
+        linear.set_issues_for_status("review", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // No reviewer task should be created (engineer still running)
+        let reviewer_tasks = db
+            .tasks_by_linear_issue("FAT-50", Some("reviewer"), false)
+            .unwrap();
+        assert!(
+            reviewer_tasks.is_empty(),
+            "should not spawn reviewer while engineer is running for same issue"
+        );
+    }
+
+    #[test]
+    fn poll_on_start_move_failure_still_creates_task() {
+        // on_start move failure should NOT prevent task creation
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Make all moves fail — but task creation should still succeed
+        linear.fail_next_n_moves(10);
+
+        let issue = fake_issue_with_state(
+            "uuid-on-start",
+            "FAT-60",
+            "Fix fathom issue",
+            &["Feature", "repo:werma"],
+            "started",
+        );
+        linear.set_issues_for_status("in_progress", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // Task should still be created despite on_start move failure
+        let tasks = db
+            .tasks_by_linear_issue("FAT-60", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "on_start move failure should not prevent task creation"
+        );
+    }
+
+    #[test]
+    fn poll_skips_completed_or_canceled_issues() {
+        // Issues whose state type is "completed" or "canceled" should be skipped
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        let completed_issue = fake_issue_with_state(
+            "uuid-done",
+            "FAT-70",
+            "Already done",
+            &["Feature", "repo:werma"],
+            "completed",
+        );
+        let canceled_issue = fake_issue_with_state(
+            "uuid-cancel",
+            "FAT-71",
+            "Canceled work",
+            &["Feature", "repo:werma"],
+            "canceled",
+        );
+        linear.set_issues_for_status("in_progress", vec![completed_issue, canceled_issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        let tasks_70 = db.tasks_by_linear_issue("FAT-70", None, false).unwrap();
+        let tasks_71 = db.tasks_by_linear_issue("FAT-71", None, false).unwrap();
+        assert!(
+            tasks_70.is_empty(),
+            "completed issues should not spawn tasks"
+        );
+        assert!(
+            tasks_71.is_empty(),
+            "canceled issues should not spawn tasks"
+        );
+    }
 }
