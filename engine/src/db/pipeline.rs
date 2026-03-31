@@ -110,7 +110,8 @@ impl super::Db {
     }
 
     /// Count all attempts (completed + failed) for a given Linear issue and pipeline stage.
-    /// Used by RIG-338 retry cap to determine if stage has exceeded max_stage_attempts.
+    /// Used as a general circuit breaker (RIG-309). Retry cap (RIG-338) uses
+    /// `count_failed_tasks_for_issue_stage` instead to avoid capping successful verdicts.
     pub fn count_all_attempts_for_issue_stage(&self, issue_id: &str, stage: &str) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM tasks
