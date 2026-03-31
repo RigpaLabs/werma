@@ -183,7 +183,9 @@ pub fn cmd_fail(db: &Db, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn cmd_clean(db: &Db) -> Result<()> {
+/// Archive completed tasks to JSON. Kept for internal use; `werma clean` now prunes worktrees.
+#[allow(dead_code)]
+pub fn cmd_archive(db: &Db) -> Result<()> {
     let tasks = db.clean_completed()?;
 
     if tasks.is_empty() {
@@ -461,9 +463,9 @@ mod tests {
     }
 
     #[test]
-    fn cmd_clean_empty_db() {
+    fn cmd_archive_empty_db() {
         let db = test_db();
-        cmd_clean(&db).unwrap();
+        cmd_archive(&db).unwrap();
     }
 
     #[test]

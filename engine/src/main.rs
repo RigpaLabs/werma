@@ -207,9 +207,9 @@ fn main() -> anyhow::Result<()> {
             commands::task::cmd_fail(&db, &id)?;
         }
 
-        cli::Commands::Clean => {
+        cli::Commands::Clean { force } => {
             let db = open_db()?;
-            commands::task::cmd_clean(&db)?;
+            commands::clean::cmd_clean_worktrees(&db, force)?;
         }
 
         cli::Commands::Log { id } => {
@@ -694,9 +694,17 @@ mod tests {
         }
 
         #[test]
-        fn parse_clean() {
+        fn parse_clean_default() {
             match parse(&["clean"]) {
-                Commands::Clean => {}
+                Commands::Clean { force } => assert!(!force),
+                other => panic!("expected Clean, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_clean_force() {
+            match parse(&["clean", "--force"]) {
+                Commands::Clean { force } => assert!(force),
                 other => panic!("expected Clean, got {other:?}"),
             }
         }

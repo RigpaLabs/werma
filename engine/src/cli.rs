@@ -161,8 +161,12 @@ pub enum Commands {
         id: String,
     },
 
-    /// Archive completed tasks
-    Clean,
+    /// Prune stale worktrees from completed/failed/canceled tasks (dry-run by default)
+    Clean {
+        /// Actually delete worktrees (default: dry-run, just list)
+        #[arg(long)]
+        force: bool,
+    },
 
     /// Show logs
     Log {

@@ -1,3 +1,4 @@
+pub mod clean;
 pub mod config_cmd;
 pub mod daemon_cmd;
 pub mod display;
