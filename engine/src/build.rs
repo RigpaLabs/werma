@@ -195,30 +195,43 @@ pub fn build() -> Result<()> {
     Ok(())
 }
 
-/// Find the engine/ directory relative to the werma repo checkout.
-fn find_engine_dir() -> Result<std::path::PathBuf> {
-    // Try WERMA_REPO env, then default location
-    let repo = std::env::var("WERMA_REPO").unwrap_or_else(|_| {
-        dirs::home_dir()
-            .map(|h| h.join("projects/werma").to_string_lossy().into_owned())
-            .unwrap_or_default()
-    });
-    let engine = std::path::PathBuf::from(&repo).join("engine");
-    if engine.join("Cargo.toml").exists() {
-        return Ok(engine);
+/// Resolve engine directory from an optional WERMA_REPO path and the current working directory.
+/// Pure logic — no env var reads or std::env::current_dir() calls.
+fn resolve_engine_dir(
+    werma_repo: Option<&str>,
+    cwd: &std::path::Path,
+) -> Result<std::path::PathBuf> {
+    // Try WERMA_REPO → engine/
+    if let Some(repo) = werma_repo {
+        let engine = std::path::PathBuf::from(repo).join("engine");
+        if engine.join("Cargo.toml").exists() {
+            return Ok(engine);
+        }
     }
 
-    // Try current dir
-    let cwd = std::env::current_dir().context("cannot get current directory")?;
+    // Try cwd itself (already inside engine/)
     if cwd.join("Cargo.toml").exists() {
-        return Ok(cwd);
+        return Ok(cwd.to_path_buf());
     }
+
+    // Try cwd/engine/
     let cwd_engine = cwd.join("engine");
     if cwd_engine.join("Cargo.toml").exists() {
         return Ok(cwd_engine);
     }
 
     bail!("cannot find engine/ directory — set WERMA_REPO or run from the werma repo root");
+}
+
+/// Find the engine/ directory relative to the werma repo checkout.
+fn find_engine_dir() -> Result<std::path::PathBuf> {
+    let effective_repo: Option<String> = match std::env::var("WERMA_REPO").ok() {
+        Some(val) => Some(val),
+        None => dirs::home_dir().map(|h| h.join("projects/werma").to_string_lossy().into_owned()),
+    };
+
+    let cwd = std::env::current_dir().context("cannot get current directory")?;
+    resolve_engine_dir(effective_repo.as_deref(), &cwd)
 }
 
 #[cfg(test)]
@@ -360,5 +373,49 @@ mod tests {
         let r2 = r.clone();
         assert_eq!(r, r2);
         assert!(format!("{r:?}").contains("v1.0.0"));
+    }
+
+    // --- resolve_engine_dir tests ---
+
+    #[test]
+    fn resolve_engine_dir_from_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = tmp.path().join("engine");
+        std::fs::create_dir_all(&engine).unwrap();
+        std::fs::write(engine.join("Cargo.toml"), "[package]\nname = \"werma\"").unwrap();
+
+        let result = resolve_engine_dir(
+            Some(tmp.path().to_str().unwrap()),
+            std::path::Path::new("/tmp"),
+        )
+        .unwrap();
+        assert_eq!(result, engine);
+    }
+
+    #[test]
+    fn resolve_engine_dir_from_cwd_cargo() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "[package]\nname = \"werma\"").unwrap();
+
+        let result = resolve_engine_dir(None, tmp.path()).unwrap();
+        assert_eq!(result, tmp.path());
+    }
+
+    #[test]
+    fn resolve_engine_dir_from_cwd_engine() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = tmp.path().join("engine");
+        std::fs::create_dir_all(&engine).unwrap();
+        std::fs::write(engine.join("Cargo.toml"), "[package]\nname = \"werma\"").unwrap();
+
+        let result = resolve_engine_dir(None, tmp.path()).unwrap();
+        assert_eq!(result, engine);
+    }
+
+    #[test]
+    fn resolve_engine_dir_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = resolve_engine_dir(None, tmp.path());
+        assert!(result.is_err(), "should error when no Cargo.toml found");
     }
 }
