@@ -513,4 +513,94 @@ mod tests {
             "should not create duplicate reviewer when active one exists"
         );
     }
+
+    // ─── RIG-335: Engineer no PR → CreatePr blocking → reviewer deferred ────
+
+    /// Full-cycle test: engineer completes without PR_URL → callback defers reviewer.
+    ///
+    /// This is the RIG-325/RIG-334 failure mode tested end-to-end:
+    /// 1. Engineer outputs VERDICT=DONE but no PR_URL
+    /// 2. Callback queues blocking CreatePr effect, does NOT spawn reviewer
+    /// 3. MoveIssue to review IS still queued
+    /// 4. No reviewer task exists until CreatePr completes (poller creates it later)
+    #[test]
+    fn rig335_engineer_no_pr_defers_reviewer_spawn() {
+        ensure_working_dir();
+        let db = Db::open_in_memory().unwrap();
+        let linear = StatefulFakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        linear.add_issue(
+            "uuid-rig335",
+            "RIG-335",
+            "Engineer no PR test",
+            "Test deferred reviewer flow",
+            "in_progress",
+            vec![
+                "repo:werma".to_string(),
+                "analyze:done".to_string(),
+                "spec:done".to_string(),
+            ],
+        );
+
+        // Step 1: Poll — creates engineer task for in_progress issue.
+        poll(&db, &linear, &cmd).unwrap();
+
+        let engineer_tasks = db
+            .tasks_by_linear_issue("RIG-335", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(engineer_tasks.len(), 1, "engineer task should be created");
+
+        // Step 2: Engineer completes WITHOUT PR_URL — the critical scenario.
+        db.set_task_status(&engineer_tasks[0].id, Status::Completed)
+            .unwrap();
+
+        let engineer_output = "## Implementation\n\
+                               All changes committed and pushed.\n\
+                               cargo test passes.\n\
+                               VERDICT=DONE";
+
+        callback(
+            &db,
+            &engineer_tasks[0].id,
+            "engineer",
+            engineer_output,
+            "RIG-335",
+            "~/projects/werma",
+            &cmd,
+        )
+        .unwrap();
+
+        // CRITICAL: Reviewer must NOT be spawned yet.
+        let reviewer_tasks = db
+            .tasks_by_linear_issue("RIG-335", Some("reviewer"), false)
+            .unwrap();
+        assert_eq!(
+            reviewer_tasks.len(),
+            0,
+            "RIG-335: reviewer must NOT be spawned when engineer has no PR_URL — \
+             CreatePr must complete first"
+        );
+
+        // CreatePr effect must be queued and blocking.
+        let effects = db.pending_effects(100).unwrap();
+        let create_pr = effects
+            .iter()
+            .filter(|e| e.effect_type == crate::models::EffectType::CreatePr)
+            .collect::<Vec<_>>();
+        assert_eq!(create_pr.len(), 1, "must queue exactly one CreatePr effect");
+        assert!(
+            create_pr[0].blocking,
+            "CreatePr must be blocking — reviewer depends on PR existing"
+        );
+
+        // MoveIssue to review should still be queued.
+        assert!(
+            effects.iter().any(|e| {
+                e.effect_type == crate::models::EffectType::MoveIssue
+                    && e.payload.get("target_status").and_then(|v| v.as_str()) == Some("review")
+            }),
+            "MoveIssue('review') must still be queued even without PR_URL"
+        );
+    }
 }

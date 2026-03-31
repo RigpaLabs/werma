@@ -7,7 +7,7 @@
 mod regression {
     use crate::db::Db;
     use crate::models::{Effect, EffectStatus, EffectType, Status};
-    use crate::pipeline::callback::decide_callback;
+    use crate::pipeline::callback::{DEFAULT_MAX_REVIEW_ROUNDS, decide_callback};
     use crate::pipeline::effects::execute_effect;
     use crate::traits::fakes::{FakeCommandRunner, FakeLinearApi, FakeNotifier};
 
@@ -1127,6 +1127,141 @@ mod regression {
         assert!(
             parse_pr_url("PR_URL=https://github.com/org/repo/compare/main...feat").is_none(),
             "must not match compare URLs as PR URLs"
+        );
+    }
+
+    // ─── RIG-335: Review cycle limit escalation ────────────────────────────────
+
+    /// Reviewer reject → engineer re-run → second reviewer reject → at limit → escalation.
+    ///
+    /// Bug scenario: reviewer rejects, engineer re-runs but doesn't fix all issues,
+    /// second reviewer rejects again. After max_review_rounds (default 3), the pipeline
+    /// must escalate to backlog instead of looping forever.
+    ///
+    /// This test verifies the multi-round review cycle terminates correctly.
+    #[test]
+    fn regression_rig335_review_cycle_limit_triggers_escalation() {
+        let db = Db::open_in_memory().unwrap();
+        let cmd = FakeCommandRunner::new();
+        let issue_id = "RIG-335-CYCLE";
+
+        // Simulate 3 completed reviewer rounds (the default limit).
+        for i in 0..3 {
+            let mut t = crate::db::make_test_task(&format!("cycle-rev-{i}"));
+            t.linear_issue_id = issue_id.to_string();
+            t.pipeline_stage = "reviewer".to_string();
+            t.task_type = "pipeline-reviewer".to_string();
+            t.status = Status::Completed;
+            db.insert_task(&t).unwrap();
+        }
+
+        // Insert the current (4th) reviewer task that will reject again.
+        let mut current = crate::db::make_test_task("cycle-rev-current");
+        current.linear_issue_id = issue_id.to_string();
+        current.pipeline_stage = "reviewer".to_string();
+        current.task_type = "pipeline-reviewer".to_string();
+        current.status = Status::Completed;
+        current.working_dir = "~/projects/werma".to_string();
+        db.insert_task(&current).unwrap();
+
+        let result = "## Review\n- Still has bugs\n\nREVIEW_VERDICT=REJECTED";
+
+        let decision = decide_callback(
+            &db,
+            "cycle-rev-current",
+            "reviewer",
+            result,
+            issue_id,
+            "/tmp",
+            &cmd,
+        )
+        .unwrap();
+
+        // CRITICAL: At the limit, must NOT spawn another engineer — must escalate.
+        assert!(
+            decision.internal.spawn_task.is_none(),
+            "RIG-335 regression: after {DEFAULT_MAX_REVIEW_ROUNDS} review rounds, \
+             must NOT spawn another engineer — must escalate instead. \
+             Infinite review loops waste compute and never converge.",
+        );
+
+        // Must queue MoveIssue to escalation status (backlog).
+        assert!(
+            decision.effects.iter().any(|e| {
+                e.effect_type == EffectType::MoveIssue
+                    && e.payload
+                        .get("target_status")
+                        .and_then(|v| v.as_str())
+                        .map_or(false, |s| s != "in_progress" && s != "review")
+            }),
+            "RIG-335 regression: review cycle limit must escalate issue, not loop"
+        );
+
+        // Must post a comment explaining the escalation.
+        assert!(
+            decision.effects.iter().any(|e| {
+                e.effect_type == EffectType::PostComment
+                    && e.payload
+                        .get("body")
+                        .and_then(|v| v.as_str())
+                        .map_or(false, |s| {
+                            s.contains("cycle limit") || s.contains("Review cycle limit")
+                        })
+            }),
+            "RIG-335 regression: escalation must include explanatory comment"
+        );
+    }
+
+    /// Complement: reviewer reject BELOW the cycle limit spawns engineer for another round.
+    #[test]
+    fn regression_rig335_review_below_limit_spawns_engineer() {
+        let db = Db::open_in_memory().unwrap();
+        let cmd = FakeCommandRunner::new();
+        let issue_id = "RIG-335-BELOW";
+
+        // Only 1 prior completed reviewer (well below default limit of 3).
+        let mut prev = crate::db::make_test_task("below-rev-0");
+        prev.linear_issue_id = issue_id.to_string();
+        prev.pipeline_stage = "reviewer".to_string();
+        prev.task_type = "pipeline-reviewer".to_string();
+        prev.status = Status::Completed;
+        db.insert_task(&prev).unwrap();
+
+        // Current reviewer rejects.
+        let mut current = crate::db::make_test_task("below-rev-current");
+        current.linear_issue_id = issue_id.to_string();
+        current.pipeline_stage = "reviewer".to_string();
+        current.task_type = "pipeline-reviewer".to_string();
+        current.status = Status::Completed;
+        current.working_dir = "~/projects/werma".to_string();
+        db.insert_task(&current).unwrap();
+
+        let result = "## Review\n- Missing error handling\n\nREVIEW_VERDICT=REJECTED";
+
+        let decision = decide_callback(
+            &db,
+            "below-rev-current",
+            "reviewer",
+            result,
+            issue_id,
+            "/tmp",
+            &cmd,
+        )
+        .unwrap();
+
+        // Below limit: MUST spawn engineer for another round.
+        let spawned = decision.internal.spawn_task.as_ref();
+        assert!(
+            spawned.is_some(),
+            "RIG-335 complement: below review cycle limit, rejection must spawn engineer"
+        );
+        assert_eq!(spawned.unwrap().pipeline_stage, "engineer");
+
+        // Rejection feedback must be carried to engineer.
+        assert!(
+            spawned.unwrap().handoff_content.contains("error handling")
+                || spawned.unwrap().prompt.contains("error handling"),
+            "rejection feedback must be passed to spawned engineer"
         );
     }
 }

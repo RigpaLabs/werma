@@ -2078,4 +2078,55 @@ mod tests {
             "reviewer should use --full-auto"
         );
     }
+
+    // ─── RIG-335: Codex model mapping smoke tests ───────────────────────────
+
+    #[test]
+    fn codex_model_maps_claude_shorthands_to_empty() {
+        assert_eq!(codex_model("opus"), "", "opus must map to empty for Codex");
+        assert_eq!(
+            codex_model("sonnet"),
+            "",
+            "sonnet must map to empty for Codex"
+        );
+        assert_eq!(
+            codex_model("haiku"),
+            "",
+            "haiku must map to empty for Codex"
+        );
+    }
+
+    #[test]
+    fn codex_model_passes_through_explicit_models() {
+        assert_eq!(codex_model("gpt-5.4"), "gpt-5.4");
+        assert_eq!(codex_model("o4-mini"), "o4-mini");
+        assert_eq!(codex_model("custom-model"), "custom-model");
+    }
+
+    #[test]
+    fn resolve_model_dispatches_by_runtime() {
+        // Codex: Claude shorthands → empty (let Codex use default gpt-5.4)
+        assert_eq!(
+            resolve_model("opus", AgentRuntime::Codex),
+            "",
+            "Codex runtime: opus → empty"
+        );
+        assert_eq!(
+            resolve_model("sonnet", AgentRuntime::Codex),
+            "",
+            "Codex runtime: sonnet → empty"
+        );
+
+        // ClaudeCode: shorthands → full model IDs
+        assert_eq!(
+            resolve_model("opus", AgentRuntime::ClaudeCode),
+            "claude-opus-4-6",
+            "ClaudeCode runtime: opus → claude-opus-4-6"
+        );
+        assert_eq!(
+            resolve_model("sonnet", AgentRuntime::ClaudeCode),
+            "claude-sonnet-4-6",
+            "ClaudeCode runtime: sonnet → claude-sonnet-4-6"
+        );
+    }
 }
