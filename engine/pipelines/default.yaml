@@ -11,7 +11,7 @@ stages:
   analyst:
     linear_label: analyze
     agent: pipeline-analyst
-    model: opus
+    model: sonnet
     fallback: sonnet
     max_turns: 25
     manual: skip
@@ -46,7 +46,7 @@ stages:
   reviewer:
     linear_status: review
     agent: pipeline-reviewer
-    model: opus
+    model: sonnet
     fallback: sonnet
     recheck_model: sonnet
     max_review_rounds: 3
