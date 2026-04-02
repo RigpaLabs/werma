@@ -87,19 +87,20 @@ pub fn format_duration_secs(secs: i64) -> String {
     }
 }
 
+/// Format task metadata fields using user-configured status fields.
+/// Loads config from `~/.werma/config.toml` (cached per call).
+/// Default: `["model", "turns"]` → `(opus/19t)`.
 pub fn format_cost_turns(task: &Task) -> String {
-    let mut parts = Vec::new();
-    if let Some(cost) = task.cost_usd {
-        parts.push(format!("${cost:.2}"));
-    }
-    if task.turns_used > 0 {
-        parts.push(format!("{}t", task.turns_used));
-    }
-    if parts.is_empty() {
-        String::new()
-    } else {
-        format!("  ({})", parts.join("/"))
-    }
+    let cfg = crate::config::UserConfig::load();
+    let fields = cfg.status_fields();
+    crate::notify::format_display_fields(task, &fields)
+}
+
+/// Format task metadata fields for notifications (uses notification config).
+pub fn format_notification_fields(task: &Task) -> String {
+    let cfg = crate::config::UserConfig::load();
+    let fields = cfg.notification_fields();
+    crate::notify::format_display_fields(task, &fields)
 }
 
 pub fn format_task_line(task: &Task, time_str: &str) -> String {

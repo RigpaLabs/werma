@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 
+use crate::config::UserConfig;
 use crate::db::Db;
 use crate::models::{Status, Task};
+use crate::pipeline::verdict::parse_verdict;
 use crate::{notify, pipeline};
 
 pub fn cmd_retry(db: &Db, id: &str) -> Result<()> {
@@ -133,10 +135,32 @@ pub fn cmd_complete(
         }
     }
 
-    // Notifications
+    // Notifications — enriched for pipeline tasks with configurable fields
     let label = notify::format_notify_label(id, &task.task_type, &task.linear_issue_id);
-    notify::notify_macos("werma", &format!("{label} done"), "Glass");
-    notify::notify_slack("#werma", &format!(":white_check_mark: {label} done"));
+    let notify_msg = if !task.pipeline_stage.is_empty() {
+        let verdict = parse_verdict(&result_text);
+        let next_stage = resolve_next_stage(&task, verdict.as_deref());
+        notify::format_pipeline_notify(
+            &label,
+            &task.pipeline_stage,
+            verdict.as_deref(),
+            next_stage.as_deref(),
+        )
+    } else {
+        format!("{label} done")
+    };
+    // Re-read task for up-to-date cost/turns/model for notification fields
+    let updated_task = db.task(id)?.unwrap_or(task);
+    let notify_fields = super::super::display::format_notification_fields(&updated_task);
+    let notify_full = if notify_fields.is_empty() {
+        notify_msg.clone()
+    } else {
+        // Notification fields come as "  (model)" — trim the leading spaces
+        format!("{notify_msg} {}", notify_fields.trim())
+    };
+
+    notify::notify_macos("werma", &notify_full, "Glass");
+    notify::notify_slack("#werma", &format!(":white_check_mark: {notify_full}"));
 
     println!("completed: {id}");
     Ok(())
@@ -172,10 +196,15 @@ pub fn cmd_fail(db: &Db, id: &str) -> Result<()> {
         );
     }
 
-    // Notifications
+    // Notifications — include pipeline stage if present
     let label = notify::format_notify_label(id, &task.task_type, &task.linear_issue_id);
-    notify::notify_macos("werma", &format!("{label} FAILED"), "Basso");
-    notify::notify_slack("#werma", &format!(":x: {label} FAILED"));
+    let notify_msg = if !task.pipeline_stage.is_empty() {
+        format!("{label} {} FAILED", task.pipeline_stage.to_uppercase())
+    } else {
+        format!("{label} FAILED")
+    };
+    notify::notify_macos("werma", &notify_msg, "Basso");
+    notify::notify_slack("#werma", &format!(":x: {notify_msg}"));
 
     println!("failed: {id}");
     Ok(())
@@ -322,6 +351,25 @@ pub fn cmd_peek(db: &Db, id: &str) -> Result<()> {
 }
 
 // --- Private helpers ---
+
+/// Look up the next pipeline stage from the transition config for a given verdict.
+/// Returns `None` for non-pipeline tasks or when the transition has no `spawn`.
+fn resolve_next_stage(task: &Task, verdict: Option<&str>) -> Option<String> {
+    if task.pipeline_stage.is_empty() {
+        return None;
+    }
+    let verdict = verdict?;
+    let user_cfg = UserConfig::load();
+    let repo_label = user_cfg.repo_label_from_dir(&task.working_dir);
+    let pipeline_name = repo_label
+        .as_deref()
+        .map(|r| user_cfg.pipeline_for_repo(r))
+        .unwrap_or("default");
+    let config = pipeline::loader::load_named(pipeline_name).ok()?;
+    let stage_cfg = config.stage(&task.pipeline_stage)?;
+    let transition = stage_cfg.transition_for(verdict)?;
+    transition.spawn.clone()
+}
 
 fn parse_most_recent_from_printf(output: &str) -> Option<(i64, String)> {
     let mut best_ts: f64 = 0.0;
