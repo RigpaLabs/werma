@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use super::config::PipelineConfig;
-use super::loader::load_default;
 use super::loader::resolve_prompt;
+use super::loader::{load_default, load_named};
 use super::prompt::{build_vars, render_prompt};
 use crate::db::Db;
 use crate::linear::LinearApi;
@@ -289,9 +289,47 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     continue;
                 }
 
+                // RIG-366: Resolve per-repo pipeline config for runtime/model.
+                let repo_label = user_cfg.repo_label_from_dir(&working_dir);
+                let pipeline_name = repo_label
+                    .as_deref()
+                    .map(|r| user_cfg.pipeline_for_repo(r))
+                    .unwrap_or("default");
+                let repo_config = if pipeline_name == "default" {
+                    None // reuse `config` already loaded
+                } else {
+                    Some(load_named(pipeline_name)?)
+                };
+                let effective_config = repo_config.as_ref().unwrap_or(&config);
+                let effective_stage_cfg = effective_config.stage(stage_name).unwrap_or(stage_cfg);
+
+                // RIG-366: Validate runtime against repo allowlist (creation-time fast fail).
+                let task_runtime = effective_stage_cfg
+                    .runtime
+                    .unwrap_or(crate::models::AgentRuntime::ClaudeCode);
+                if let Some(ref repo) = repo_label {
+                    if !user_cfg.is_runtime_allowed(repo, task_runtime) {
+                        eprintln!(
+                            "  ! skipping {identifier} stage={stage_name}: runtime '{}' \
+                             not in allowlist for repo '{}' (allowed: {:?})",
+                            task_runtime,
+                            repo,
+                            user_cfg.allowed_runtimes_for_repo(repo),
+                        );
+                        total_skipped += 1;
+                        continue;
+                    }
+                }
+
                 // Build prompt from config
-                let prompt =
-                    build_poll_prompt(&config, stage_cfg, identifier, title, description, db);
+                let prompt = build_poll_prompt(
+                    effective_config,
+                    effective_stage_cfg,
+                    identifier,
+                    title,
+                    description,
+                    db,
+                );
 
                 let task_id = db.next_task_id()?;
                 let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
@@ -305,12 +343,13 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     0
                 };
 
-                let max_turns = stage_cfg
+                let max_turns = effective_stage_cfg
                     .max_turns
                     .map(|t| t as i32)
-                    .unwrap_or_else(|| crate::default_turns(&stage_cfg.agent));
-                let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
-                let effective_model = stage_cfg
+                    .unwrap_or_else(|| crate::default_turns(&effective_stage_cfg.agent));
+                let allowed_tools =
+                    crate::runner::tools_for_type(&effective_stage_cfg.agent, false);
+                let effective_model = effective_stage_cfg
                     .effective_model(issue_estimate, review_round)
                     .to_string();
 
@@ -321,7 +360,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     created_at: now,
                     started_at: None,
                     finished_at: None,
-                    task_type: stage_cfg.agent.clone(),
+                    task_type: effective_stage_cfg.agent.clone(),
                     prompt,
                     output_path: String::new(),
                     working_dir,
@@ -341,9 +380,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     cost_usd: None,
                     turns_used: 0,
                     handoff_content: String::new(),
-                    runtime: stage_cfg
-                        .runtime
-                        .unwrap_or(crate::models::AgentRuntime::ClaudeCode),
+                    runtime: task_runtime,
                 };
 
                 db.insert_task(&task)?;
@@ -525,7 +562,46 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
-            let prompt = build_poll_prompt(&config, stage_cfg, identifier, title, description, db);
+            // RIG-366: Resolve per-repo pipeline config (label path).
+            let repo_label = user_cfg.repo_label_from_dir(&working_dir);
+            let pipeline_name = repo_label
+                .as_deref()
+                .map(|r| user_cfg.pipeline_for_repo(r))
+                .unwrap_or("default");
+            let repo_config = if pipeline_name == "default" {
+                None
+            } else {
+                Some(load_named(pipeline_name)?)
+            };
+            let effective_config = repo_config.as_ref().unwrap_or(&config);
+            let effective_stage_cfg = effective_config.stage(stage_name).unwrap_or(stage_cfg);
+
+            // RIG-366: Validate runtime against repo allowlist (creation-time fast fail).
+            let task_runtime = effective_stage_cfg
+                .runtime
+                .unwrap_or(crate::models::AgentRuntime::ClaudeCode);
+            if let Some(ref repo) = repo_label {
+                if !user_cfg.is_runtime_allowed(repo, task_runtime) {
+                    eprintln!(
+                        "  ! skipping {identifier} stage={stage_name}: runtime '{}' \
+                         not in allowlist for repo '{}' (allowed: {:?})",
+                        task_runtime,
+                        repo,
+                        user_cfg.allowed_runtimes_for_repo(repo),
+                    );
+                    total_skipped += 1;
+                    continue;
+                }
+            }
+
+            let prompt = build_poll_prompt(
+                effective_config,
+                effective_stage_cfg,
+                identifier,
+                title,
+                description,
+                db,
+            );
 
             let task_id = db.next_task_id()?;
             let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
@@ -538,12 +614,12 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 0
             };
 
-            let max_turns = stage_cfg
+            let max_turns = effective_stage_cfg
                 .max_turns
                 .map(|t| t as i32)
-                .unwrap_or_else(|| crate::default_turns(&stage_cfg.agent));
-            let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
-            let effective_model = stage_cfg
+                .unwrap_or_else(|| crate::default_turns(&effective_stage_cfg.agent));
+            let allowed_tools = crate::runner::tools_for_type(&effective_stage_cfg.agent, false);
+            let effective_model = effective_stage_cfg
                 .effective_model(issue_estimate, review_round)
                 .to_string();
 
@@ -554,7 +630,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 created_at: now,
                 started_at: None,
                 finished_at: None,
-                task_type: stage_cfg.agent.clone(),
+                task_type: effective_stage_cfg.agent.clone(),
                 prompt,
                 output_path: String::new(),
                 working_dir,
@@ -574,9 +650,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 cost_usd: None,
                 turns_used: 0,
                 handoff_content: String::new(),
-                runtime: stage_cfg
-                    .runtime
-                    .unwrap_or(crate::models::AgentRuntime::ClaudeCode),
+                runtime: task_runtime,
             };
 
             db.insert_task(&task)?;

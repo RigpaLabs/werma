@@ -3,12 +3,17 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::models::AgentRuntime;
+
 /// Default number of completed/failed/canceled tasks shown in `werma st`.
 pub const DEFAULT_COMPLETED_LIMIT: usize = 17;
 
 /// Default base directory for repo convention fallback.
 /// Users can override per-repo via `[repos]` in `~/.werma/config.toml`.
 const DEFAULT_REPO_BASE: &str = "~/projects";
+
+/// Default allowed runtimes when no explicit allowlist is configured.
+const DEFAULT_ALLOWED_RUNTIMES: &[&str] = &["claude-code", "codex"];
 
 /// User-level configuration loaded from `~/.werma/config.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -20,6 +25,18 @@ pub struct UserConfig {
     /// Repo label → local directory mapping.
     /// Example: `werma = "~/projects/werma"`
     pub repos: HashMap<String, String>,
+
+    /// Repo label → named pipeline to use.
+    /// Example: `fathom = "economy"`
+    /// Repos not listed here use the "default" pipeline.
+    #[serde(default)]
+    pub repo_pipelines: HashMap<String, String>,
+
+    /// Repo label → allowed runtimes list.
+    /// Example: `fathom = ["claude-code", "codex"]`
+    /// Repos not listed here use DEFAULT_ALLOWED_RUNTIMES.
+    #[serde(default)]
+    pub repo_runtimes: HashMap<String, Vec<String>>,
 }
 
 impl UserConfig {
@@ -44,6 +61,63 @@ impl UserConfig {
     /// Return all explicitly configured repo mappings.
     pub fn all_repos(&self) -> HashMap<String, String> {
         self.repos.clone()
+    }
+
+    /// Which named pipeline to use for a given repo.
+    /// Returns "default" if no explicit mapping exists.
+    pub fn pipeline_for_repo(&self, repo: &str) -> &str {
+        self.repo_pipelines
+            .get(repo)
+            .map(String::as_str)
+            .unwrap_or("default")
+    }
+
+    /// Check if a runtime is allowed for a given repo.
+    /// Uses the explicit allowlist if configured, otherwise DEFAULT_ALLOWED_RUNTIMES.
+    pub fn is_runtime_allowed(&self, repo: &str, runtime: AgentRuntime) -> bool {
+        let runtime_str = runtime.to_string();
+        if let Some(allowed) = self.repo_runtimes.get(repo) {
+            allowed.iter().any(|r| r == &runtime_str)
+        } else {
+            DEFAULT_ALLOWED_RUNTIMES.contains(&runtime_str.as_str())
+        }
+    }
+
+    /// Return the allowed runtimes list for a repo (for error messages).
+    pub fn allowed_runtimes_for_repo(&self, repo: &str) -> Vec<String> {
+        if let Some(allowed) = self.repo_runtimes.get(repo) {
+            allowed.clone()
+        } else {
+            DEFAULT_ALLOWED_RUNTIMES
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        }
+    }
+
+    /// Infer the repo label from a working directory path.
+    /// Checks all configured repos first, then falls back to the last path component.
+    pub fn repo_label_from_dir(&self, working_dir: &str) -> Option<String> {
+        // Check explicit config mappings
+        for (label, dir) in &self.repos {
+            if working_dir == dir || working_dir.starts_with(&format!("{dir}/")) {
+                return Some(label.clone());
+            }
+        }
+        // Convention: ~/projects/{repo_name} → repo_name
+        let expanded = if let Some(stripped) = working_dir.strip_prefix("~/") {
+            if let Some(home) = dirs::home_dir() {
+                home.join(stripped).to_string_lossy().to_string()
+            } else {
+                working_dir.to_string()
+            }
+        } else {
+            working_dir.to_string()
+        };
+        let path = std::path::Path::new(&expanded);
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .map(std::string::ToString::to_string)
     }
 
     /// Load config from a specific path; returns `Default` on missing/invalid file.
@@ -278,5 +352,144 @@ mod tests {
         assert!(cfg.repos.is_empty());
         let repos = cfg.all_repos();
         assert!(repos.is_empty());
+    }
+
+    // ─── Pipeline per-repo tests ──────────────────────────────────────────
+
+    #[test]
+    fn pipeline_for_repo_defaults_to_default() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.pipeline_for_repo("werma"), "default");
+        assert_eq!(cfg.pipeline_for_repo("fathom"), "default");
+    }
+
+    #[test]
+    fn pipeline_for_repo_uses_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[repo_pipelines]\nfathom = \"economy\"\nwerma = \"default\"\n",
+        )
+        .unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        assert_eq!(cfg.pipeline_for_repo("fathom"), "economy");
+        assert_eq!(cfg.pipeline_for_repo("werma"), "default");
+        assert_eq!(cfg.pipeline_for_repo("other"), "default");
+    }
+
+    // ─── Runtime allowlist tests ───────────────────────────────────────────
+
+    #[test]
+    fn is_runtime_allowed_default_allows_both() {
+        let cfg = UserConfig::default();
+        assert!(cfg.is_runtime_allowed("any-repo", AgentRuntime::ClaudeCode));
+        assert!(cfg.is_runtime_allowed("any-repo", AgentRuntime::Codex));
+    }
+
+    #[test]
+    fn is_runtime_allowed_explicit_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[repo_runtimes]\nrestricted = [\"claude-code\"]\n").unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        assert!(cfg.is_runtime_allowed("restricted", AgentRuntime::ClaudeCode));
+        assert!(!cfg.is_runtime_allowed("restricted", AgentRuntime::Codex));
+        // Non-configured repo still has default allowlist
+        assert!(cfg.is_runtime_allowed("other", AgentRuntime::Codex));
+    }
+
+    #[test]
+    fn allowed_runtimes_for_repo_default() {
+        let cfg = UserConfig::default();
+        let allowed = cfg.allowed_runtimes_for_repo("any");
+        assert_eq!(allowed, vec!["claude-code", "codex"]);
+    }
+
+    #[test]
+    fn allowed_runtimes_for_repo_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[repo_runtimes]\nmy-repo = [\"claude-code\"]\n").unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        let allowed = cfg.allowed_runtimes_for_repo("my-repo");
+        assert_eq!(allowed, vec!["claude-code"]);
+    }
+
+    // ─── repo_label_from_dir tests ──────────────────────────────────────────
+
+    #[test]
+    fn repo_label_from_dir_convention() {
+        let cfg = UserConfig::default();
+        assert_eq!(
+            cfg.repo_label_from_dir("~/projects/werma"),
+            Some("werma".to_string())
+        );
+        assert_eq!(
+            cfg.repo_label_from_dir("~/projects/fathom"),
+            Some("fathom".to_string())
+        );
+    }
+
+    #[test]
+    fn repo_label_from_dir_explicit_config() {
+        let mut cfg = UserConfig::default();
+        cfg.repos
+            .insert("my-app".to_string(), "/custom/path/to/app".to_string());
+
+        assert_eq!(
+            cfg.repo_label_from_dir("/custom/path/to/app"),
+            Some("my-app".to_string())
+        );
+        // Also matches subdirectories
+        assert_eq!(
+            cfg.repo_label_from_dir("/custom/path/to/app/.trees/feat-branch"),
+            Some("my-app".to_string())
+        );
+    }
+
+    #[test]
+    fn repo_label_from_dir_absolute_path() {
+        let cfg = UserConfig::default();
+        assert_eq!(
+            cfg.repo_label_from_dir("/opt/my-project"),
+            Some("my-project".to_string())
+        );
+    }
+
+    // ─── Full config TOML parsing test ─────────────────────────────────────
+
+    #[test]
+    fn full_config_with_pipelines_and_runtimes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+completed_limit = 10
+
+[repos]
+werma = "~/projects/rigpa/werma"
+fathom = "~/projects/rigpa/fathom"
+
+[repo_pipelines]
+fathom = "economy"
+
+[repo_runtimes]
+fathom = ["claude-code", "codex"]
+restricted = ["claude-code"]
+"#,
+        )
+        .unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        assert_eq!(cfg.resolved_completed_limit(), Some(10));
+        assert_eq!(cfg.pipeline_for_repo("fathom"), "economy");
+        assert_eq!(cfg.pipeline_for_repo("werma"), "default");
+        assert!(cfg.is_runtime_allowed("fathom", AgentRuntime::Codex));
+        assert!(!cfg.is_runtime_allowed("restricted", AgentRuntime::Codex));
     }
 }
