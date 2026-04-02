@@ -383,7 +383,13 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     // Set up worktree for write tasks — gives each agent an isolated copy
     let effective_dir = if crate::worktree::needs_worktree(&task.task_type) {
         let branch = crate::worktree::generate_branch_name(task);
-        let worktree_dir = crate::worktree::setup_worktree(&working_dir, &branch)?;
+
+        // RIG-372: If working_dir already points inside a worktree (e.g. from a previous
+        // failed task that persisted the worktree path via RIG-351), resolve back to the
+        // base repo to prevent nested .trees/.trees/ paths.
+        let base_dir = crate::worktree::resolve_base_repo(&working_dir);
+
+        let worktree_dir = crate::worktree::setup_worktree(&base_dir, &branch)?;
 
         // SAFETY GUARD: verify the worktree is actually inside .trees/
         // This prevents agents from accidentally working on the main checkout

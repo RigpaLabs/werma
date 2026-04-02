@@ -105,7 +105,9 @@ pub(super) fn build_next_stage_task(
     let effective_working_dir = if working_dir.is_empty() || working_dir == default_dir {
         infer_working_dir_from_issue(db, linear_issue_id, &user_cfg)
     } else {
-        working_dir.to_string()
+        crate::worktree::resolve_base_repo(std::path::Path::new(working_dir))
+            .to_string_lossy()
+            .to_string()
     };
 
     use crate::models::{AgentRuntime, Status, Task};
@@ -955,10 +957,11 @@ stages:
 
         let task = result.expect("should create reviewer task");
         assert_eq!(task.pipeline_stage, "reviewer");
-        // working_dir should be the same as what was passed (worktree path)
+        // working_dir should be resolved to the base repo, not the worktree path,
+        // to prevent nested worktree creation on subsequent stages/retries.
         assert_eq!(
-            task.working_dir, "/Users/dev/projects/werma/.trees/feat--RIG-353",
-            "reviewer should inherit the worktree working_dir"
+            task.working_dir, "/Users/dev/projects/werma",
+            "reviewer should receive base repo path, not the worktree path"
         );
     }
 
