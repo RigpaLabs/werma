@@ -29,6 +29,9 @@ pub(crate) fn truncate_lines(text: &str, max: usize) -> String {
 
 /// Infer working directory from existing tasks for the same Linear issue.
 /// Falls back to `config.repo_dir("werma")` when no prior task has a non-default working dir.
+///
+/// RIG-372: Always resolves worktree paths (`.trees/...`) back to the base repo to prevent
+/// nested worktree creation on retry. The runner will create a fresh worktree from the base repo.
 pub(crate) fn infer_working_dir_from_issue(
     db: &Db,
     linear_issue_id: &str,
@@ -38,7 +41,10 @@ pub(crate) fn infer_working_dir_from_issue(
     if let Ok(tasks) = db.tasks_by_linear_issue(linear_issue_id, None, false) {
         for task in &tasks {
             if !task.working_dir.is_empty() && task.working_dir != default_dir {
-                return task.working_dir.clone();
+                // Strip worktree paths to base repo — runner creates worktrees fresh
+                let resolved =
+                    crate::worktree::resolve_base_repo(std::path::Path::new(&task.working_dir));
+                return resolved.to_string_lossy().to_string();
             }
         }
         if let Some(task) = tasks.first() {
@@ -137,6 +143,32 @@ mod tests {
 
         let dir = infer_working_dir_from_issue(&db, "unknown-issue", &cfg);
         assert_eq!(dir, "~/projects/werma");
+    }
+
+    /// RIG-372: worktree paths in existing tasks should be resolved to base repo
+    #[test]
+    fn infer_working_dir_strips_worktree_paths() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cfg = crate::config::UserConfig::default();
+
+        // Task with working_dir pointing to a worktree (set by runner after RIG-351)
+        let task = Task {
+            id: "20260401-001".to_string(),
+            status: Status::Completed,
+            working_dir: "/home/user/project/.trees/feat--RIG-356-pipeline-engineer-stage"
+                .to_string(),
+            linear_issue_id: "issue-372".to_string(),
+            task_type: "pipeline-engineer".to_string(),
+            ..Default::default()
+        };
+        db.insert_task(&task).unwrap();
+
+        let dir = infer_working_dir_from_issue(&db, "issue-372", &cfg);
+        assert_eq!(dir, "/home/user/project");
+        assert!(
+            !dir.contains(".trees"),
+            "worktree path should be stripped to base repo"
+        );
     }
 
     #[test]
