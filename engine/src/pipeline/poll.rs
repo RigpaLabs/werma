@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use super::config::PipelineConfig;
 use super::loader::resolve_prompt;
-use super::loader::{load_default, load_for_working_dir};
+use super::loader::{load_default, load_named};
 use super::prompt::{build_vars, render_prompt};
 use crate::db::Db;
 use crate::linear::LinearApi;
@@ -289,17 +289,24 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     continue;
                 }
 
-                // RIG-367: Load repo-specific pipeline for task parameters (model, prompt).
-                // The outer loop uses the default pipeline for stage iteration (poll_stages),
-                // but per-issue task creation respects the repo's configured pipeline.
-                let repo_config =
-                    load_for_working_dir(&working_dir).unwrap_or_else(|_| config.clone());
-                let repo_stage_cfg = repo_config.stage(stage_name).unwrap_or(stage_cfg);
+                // RIG-366: Resolve per-repo pipeline config and validate runtime allowlist.
+                let Some(resolved) = resolve_effective_stage(
+                    &working_dir,
+                    stage_name,
+                    stage_cfg,
+                    &config,
+                    &user_cfg,
+                    identifier,
+                )?
+                else {
+                    total_skipped += 1;
+                    continue;
+                };
 
-                // Build prompt from repo-specific config
+                // Build prompt from config
                 let prompt = build_poll_prompt(
-                    &repo_config,
-                    repo_stage_cfg,
+                    &resolved.effective_config,
+                    &resolved.effective_stage_cfg,
                     identifier,
                     title,
                     description,
@@ -318,12 +325,15 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     0
                 };
 
-                let max_turns = repo_stage_cfg
+                let max_turns = resolved
+                    .effective_stage_cfg
                     .max_turns
                     .map(|t| t as i32)
-                    .unwrap_or_else(|| crate::default_turns(&repo_stage_cfg.agent));
-                let allowed_tools = crate::runner::tools_for_type(&repo_stage_cfg.agent, false);
-                let effective_model = repo_stage_cfg
+                    .unwrap_or_else(|| crate::default_turns(&resolved.effective_stage_cfg.agent));
+                let allowed_tools =
+                    crate::runner::tools_for_type(&resolved.effective_stage_cfg.agent, false);
+                let effective_model = resolved
+                    .effective_stage_cfg
                     .effective_model(issue_estimate, review_round)
                     .to_string();
 
@@ -334,7 +344,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     created_at: now,
                     started_at: None,
                     finished_at: None,
-                    task_type: repo_stage_cfg.agent.clone(),
+                    task_type: resolved.effective_stage_cfg.agent.clone(),
                     prompt,
                     output_path: String::new(),
                     working_dir,
@@ -354,15 +364,13 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     cost_usd: None,
                     turns_used: 0,
                     handoff_content: String::new(),
-                    runtime: repo_stage_cfg
-                        .runtime
-                        .unwrap_or(crate::models::AgentRuntime::ClaudeCode),
+                    runtime: resolved.runtime,
                 };
 
                 db.insert_task(&task)?;
 
                 // on_start: move issue to a different status when task is created
-                if let Some(ref on_start) = repo_stage_cfg.on_start
+                if let Some(ref on_start) = resolved.effective_stage_cfg.on_start
                     && let Err(e) = linear.move_issue_by_name(issue_id, &on_start.status)
                 {
                     eprintln!(
@@ -373,7 +381,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
 
                 println!(
                     "  + {} [{}] stage={} type={}",
-                    task_id, identifier, stage_name, stage_cfg.agent
+                    task_id, identifier, stage_name, resolved.effective_stage_cfg.agent
                 );
                 total_created += 1;
             }
@@ -538,7 +546,28 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
-            let prompt = build_poll_prompt(&config, stage_cfg, identifier, title, description, db);
+            // RIG-366: Resolve per-repo pipeline config and validate runtime allowlist.
+            let Some(resolved) = resolve_effective_stage(
+                &working_dir,
+                stage_name,
+                stage_cfg,
+                &config,
+                &user_cfg,
+                identifier,
+            )?
+            else {
+                total_skipped += 1;
+                continue;
+            };
+
+            let prompt = build_poll_prompt(
+                &resolved.effective_config,
+                &resolved.effective_stage_cfg,
+                identifier,
+                title,
+                description,
+                db,
+            );
 
             let task_id = db.next_task_id()?;
             let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
@@ -551,12 +580,15 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 0
             };
 
-            let max_turns = stage_cfg
+            let max_turns = resolved
+                .effective_stage_cfg
                 .max_turns
                 .map(|t| t as i32)
-                .unwrap_or_else(|| crate::default_turns(&stage_cfg.agent));
-            let allowed_tools = crate::runner::tools_for_type(&stage_cfg.agent, false);
-            let effective_model = stage_cfg
+                .unwrap_or_else(|| crate::default_turns(&resolved.effective_stage_cfg.agent));
+            let allowed_tools =
+                crate::runner::tools_for_type(&resolved.effective_stage_cfg.agent, false);
+            let effective_model = resolved
+                .effective_stage_cfg
                 .effective_model(issue_estimate, review_round)
                 .to_string();
 
@@ -567,7 +599,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 created_at: now,
                 started_at: None,
                 finished_at: None,
-                task_type: stage_cfg.agent.clone(),
+                task_type: resolved.effective_stage_cfg.agent.clone(),
                 prompt,
                 output_path: String::new(),
                 working_dir,
@@ -587,9 +619,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 cost_usd: None,
                 turns_used: 0,
                 handoff_content: String::new(),
-                runtime: stage_cfg
-                    .runtime
-                    .unwrap_or(crate::models::AgentRuntime::ClaudeCode),
+                runtime: resolved.runtime,
             };
 
             db.insert_task(&task)?;
@@ -611,7 +641,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
 
             println!(
                 "  + {} [{}] stage={} type={} (label: {})",
-                task_id, identifier, stage_name, stage_cfg.agent, label
+                task_id, identifier, stage_name, resolved.effective_stage_cfg.agent, label
             );
             total_created += 1;
         }
@@ -619,6 +649,68 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
 
     println!("\nPipeline poll: {total_created} created, {total_skipped} skipped");
     Ok(())
+}
+
+/// Resolved pipeline configuration for a specific repo + stage combination (RIG-366).
+/// Groups the effective config, stage config, and validated runtime so the resolution
+/// logic isn't duplicated across status-path and label-path polling loops.
+struct ResolvedStageConfig {
+    effective_config: PipelineConfig,
+    effective_stage_cfg: super::config::StageConfig,
+    runtime: crate::models::AgentRuntime,
+}
+
+/// Resolve per-repo pipeline config and validate the runtime allowlist (RIG-366).
+///
+/// Returns `None` if the resolved runtime is not in the repo's allowlist (creation-time
+/// fast fail). Otherwise returns the effective pipeline config, stage config, and runtime.
+fn resolve_effective_stage(
+    working_dir: &str,
+    stage_name: &str,
+    default_stage_cfg: &super::config::StageConfig,
+    default_config: &PipelineConfig,
+    user_cfg: &crate::config::UserConfig,
+    identifier: &str,
+) -> Result<Option<ResolvedStageConfig>> {
+    let repo_label = user_cfg.repo_label_from_dir(working_dir);
+    let pipeline_name = repo_label
+        .as_deref()
+        .map(|r| user_cfg.pipeline_for_repo(r))
+        .unwrap_or("default");
+
+    let (effective_config, effective_stage_cfg) = if pipeline_name == "default" {
+        let stage = default_config
+            .stage(stage_name)
+            .unwrap_or(default_stage_cfg);
+        (default_config.clone(), stage.clone())
+    } else {
+        let named = load_named(pipeline_name)?;
+        let stage = named.stage(stage_name).unwrap_or(default_stage_cfg).clone();
+        (named, stage)
+    };
+
+    let task_runtime = effective_stage_cfg
+        .runtime
+        .unwrap_or(crate::models::AgentRuntime::ClaudeCode);
+
+    if let Some(ref repo) = repo_label {
+        if !user_cfg.is_runtime_allowed(repo, task_runtime) {
+            eprintln!(
+                "  ! skipping {identifier} stage={stage_name}: runtime '{}' \
+                 not in allowlist for repo '{}' (allowed: {:?})",
+                task_runtime,
+                repo,
+                user_cfg.allowed_runtimes_for_repo(repo),
+            );
+            return Ok(None);
+        }
+    }
+
+    Ok(Some(ResolvedStageConfig {
+        effective_config,
+        effective_stage_cfg,
+        runtime: task_runtime,
+    }))
 }
 
 /// Cooldown in seconds after a failed task before the poller can spawn a new one (RIG-357).

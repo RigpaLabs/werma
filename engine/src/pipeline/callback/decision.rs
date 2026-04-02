@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use super::super::config::StageConfig;
 use super::super::helpers::truncate_lines;
-use super::super::loader::load_for_working_dir;
+use super::super::loader::load_named;
 use super::super::pr::{get_pr_review_verdict, has_open_pr_for_issue, pr_title_from_url};
 use super::super::verdict::{
     extract_review_body, is_max_turns_exit, parse_comments, parse_estimate, parse_pr_url,
@@ -58,7 +58,16 @@ pub fn decide_callback(
     working_dir: &str,
     cmd: &dyn CommandRunner,
 ) -> Result<CallbackDecision> {
-    let config = load_for_working_dir(working_dir)?;
+    // RIG-366: Resolve per-repo pipeline config from working_dir.
+    // In-flight tasks use the pipeline that was resolved at creation time,
+    // but we need the correct config for spawning the NEXT stage.
+    let user_cfg = crate::config::UserConfig::load();
+    let repo_label = user_cfg.repo_label_from_dir(working_dir);
+    let pipeline_name = repo_label
+        .as_deref()
+        .map(|r| user_cfg.pipeline_for_repo(r))
+        .unwrap_or("default");
+    let config = load_named(pipeline_name)?;
     let mut effects: Vec<Effect> = Vec::new();
     let mut internal = InternalChanges {
         spawn_task: None,

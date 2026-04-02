@@ -160,11 +160,11 @@ pub fn cmd_pipeline_switch(repo: &str, pipeline: &str) -> Result<()> {
         .parse()
         .context("failed to parse ~/.werma/config.toml")?;
 
-    // Ensure [pipelines] table exists, then set the key.
-    if !doc.contains_table("pipelines") {
-        doc["pipelines"] = toml_edit::table();
+    // Ensure [repo_pipelines] table exists, then set the key.
+    if !doc.contains_table("repo_pipelines") {
+        doc["repo_pipelines"] = toml_edit::table();
     }
-    doc["pipelines"][repo] = toml_edit::value(pipeline);
+    doc["repo_pipelines"][repo] = toml_edit::value(pipeline);
 
     // Create parent dir if needed (first-time setup).
     if let Some(parent) = config_path.parent() {
@@ -188,10 +188,10 @@ pub fn cmd_pipeline_switch(repo: &str, pipeline: &str) -> Result<()> {
     );
     println!();
     println!("Active pipelines:");
-    if current.pipelines.is_empty() {
+    if current.repo_pipelines.is_empty() {
         println!("  (none configured — all repos use 'default')");
     } else {
-        let mut entries: Vec<_> = current.pipelines.iter().collect();
+        let mut entries: Vec<_> = current.repo_pipelines.iter().collect();
         entries.sort_by_key(|(k, _)| k.as_str());
         for (r, p) in &entries {
             println!("  {r:<20} → {p}");
@@ -226,8 +226,8 @@ mod tests {
         // We test the toml_edit round-trip here rather than the full cmd.
         let existing = "";
         let mut doc: toml_edit::DocumentMut = existing.parse().unwrap();
-        doc["pipelines"] = toml_edit::table();
-        doc["pipelines"]["fathom"] = toml_edit::value("economy");
+        doc["repo_pipelines"] = toml_edit::table();
+        doc["repo_pipelines"]["fathom"] = toml_edit::value("economy");
         let written = doc.to_string();
         std::fs::write(&config_path, &written).unwrap();
 
@@ -240,8 +240,8 @@ mod tests {
     fn switch_preserves_existing_config_keys() {
         let existing = "completed_limit = 25\n\n[repos]\nwerma = \"/custom/werma\"\n";
         let mut doc: toml_edit::DocumentMut = existing.parse().unwrap();
-        doc["pipelines"] = toml_edit::table();
-        doc["pipelines"]["fathom"] = toml_edit::value("economy");
+        doc["repo_pipelines"] = toml_edit::table();
+        doc["repo_pipelines"]["fathom"] = toml_edit::value("economy");
         let result = doc.to_string();
 
         // Existing keys preserved

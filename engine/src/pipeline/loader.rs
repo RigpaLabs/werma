@@ -5,6 +5,9 @@ use super::config::PipelineConfig;
 /// Built-in default pipeline YAML compiled into the binary.
 const BUILTIN_DEFAULT_YAML: &str = include_str!("../../pipelines/default.yaml");
 
+/// Built-in economy pipeline YAML compiled into the binary.
+const BUILTIN_ECONOMY_YAML: &str = include_str!("../../pipelines/economy.yaml");
+
 /// Load the pipeline config (always uses the compiled-in builtin).
 pub fn load_default() -> Result<PipelineConfig> {
     warn_stale_runtime_override();
@@ -15,14 +18,23 @@ pub fn load_default() -> Result<PipelineConfig> {
 
 /// Load a pipeline config by name.
 ///
-/// - `"default"` → the compiled-in builtin pipeline.
-/// - Any other name → looks for `~/.werma/pipelines/{name}.yaml` on disk.
-/// - Falls back to the builtin default with a warning if the named pipeline is not found.
+/// Lookup order:
+/// 1. Builtin names: `"default"` → compiled-in default, `"economy"` → compiled-in economy.
+/// 2. File on disk: `~/.werma/pipelines/{name}.yaml` (user-defined pipelines).
+/// 3. Falls back to the builtin default with a warning if no file is found.
 pub fn load_named(name: &str) -> Result<PipelineConfig> {
-    if name == "default" {
-        return load_default();
+    // Check builtins first.
+    match name {
+        "default" => return load_default(),
+        "economy" => {
+            let config = load_from_str(BUILTIN_ECONOMY_YAML, "<builtin:economy>")?;
+            warn_deprecated_per_stage(&config);
+            return Ok(config);
+        }
+        _ => {}
     }
 
+    // Try user-defined pipeline file.
     if let Some(home) = dirs::home_dir() {
         let path = home.join(format!(".werma/pipelines/{name}.yaml"));
         if path.exists() {
@@ -41,11 +53,14 @@ pub fn load_named(name: &str) -> Result<PipelineConfig> {
 }
 
 /// Load the pipeline config for a specific working directory, consulting
-/// `UserConfig::active_pipeline()` to select the right pipeline name.
+/// `UserConfig::pipeline_for_repo()` to select the right pipeline name.
 pub fn load_for_working_dir(working_dir: &str) -> Result<PipelineConfig> {
     let user_cfg = crate::config::UserConfig::load();
-    let repo = user_cfg.repo_from_working_dir(working_dir);
-    let pipeline_name = user_cfg.active_pipeline(&repo);
+    let repo_label = user_cfg.repo_label_from_dir(working_dir);
+    let pipeline_name = repo_label
+        .as_deref()
+        .map(|r| user_cfg.pipeline_for_repo(r))
+        .unwrap_or("default");
     load_named(pipeline_name)
 }
 
@@ -177,6 +192,64 @@ mod tests {
     }
 
     #[test]
+    fn load_named_default_succeeds() {
+        let config = load_named("default").unwrap();
+        assert_eq!(config.pipeline, "default");
+        assert!(!config.stages.is_empty());
+    }
+
+    #[test]
+    fn load_named_economy_succeeds() {
+        let config = load_named("economy").unwrap();
+        assert_eq!(config.pipeline, "economy");
+        assert!(!config.stages.is_empty());
+        // Economy pipeline engineer uses codex runtime
+        let engineer = config.stage("engineer").unwrap();
+        assert_eq!(engineer.runtime, Some(crate::models::AgentRuntime::Codex));
+    }
+
+    #[test]
+    fn load_named_unknown_falls_back_to_default() {
+        // Non-builtin names without a matching ~/.werma/pipelines/{name}.yaml
+        // fall back to the default pipeline with a warning (no error).
+        let result = load_named("nonexistent-pipeline");
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.pipeline, "default");
+    }
+
+    #[test]
+    fn economy_pipeline_stages_match_default() {
+        // Economy pipeline should have the same stage names as default
+        let default = load_named("default").unwrap();
+        let economy = load_named("economy").unwrap();
+        let default_stages: Vec<&str> = default.stages.keys().map(String::as_str).collect();
+        let economy_stages: Vec<&str> = economy.stages.keys().map(String::as_str).collect();
+        assert_eq!(default_stages, economy_stages);
+    }
+
+    #[test]
+    fn economy_pipeline_uses_sonnet_for_analyst() {
+        let config = load_named("economy").unwrap();
+        let analyst = config.stage("analyst").unwrap();
+        assert_eq!(analyst.model, "sonnet");
+    }
+
+    #[test]
+    fn economy_pipeline_reviewer_uses_codex() {
+        let config = load_named("economy").unwrap();
+        let reviewer = config.stage("reviewer").unwrap();
+        assert_eq!(reviewer.runtime, Some(crate::models::AgentRuntime::Codex));
+    }
+
+    #[test]
+    fn economy_pipeline_deployer_uses_codex() {
+        let config = load_named("economy").unwrap();
+        let deployer = config.stage("deployer").unwrap();
+        assert_eq!(deployer.runtime, Some(crate::models::AgentRuntime::Codex));
+    }
+
+    #[test]
     fn load_from_str_invalid_yaml_errors() {
         let result = load_from_str("not: valid: yaml: {{{", "<test>");
         assert!(result.is_err());
@@ -278,20 +351,6 @@ stages:
     fn resolve_builtin_devops_prompt() {
         let content = builtin_prompt("prompts/devops.md");
         assert!(content.is_some());
-    }
-
-    #[test]
-    fn load_named_default_returns_builtin() {
-        let config = load_named("default").unwrap();
-        assert_eq!(config.pipeline, "default");
-        assert!(!config.stages.is_empty());
-    }
-
-    #[test]
-    fn load_named_unknown_falls_back_to_default() {
-        // Non-existent pipeline name should fallback to default with a warning.
-        let config = load_named("nonexistent-pipeline").unwrap();
-        assert_eq!(config.pipeline, "default");
     }
 
     #[test]
