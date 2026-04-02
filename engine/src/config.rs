@@ -466,6 +466,37 @@ mod tests {
         assert_eq!(allowed, vec!["claude-code"]);
     }
 
+    #[test]
+    fn gemini_qwen_blocked_by_default_allowlist() {
+        let cfg = UserConfig::default();
+        assert!(
+            !cfg.is_runtime_allowed("any-repo", AgentRuntime::GeminiCli),
+            "gemini should be blocked by default"
+        );
+        assert!(
+            !cfg.is_runtime_allowed("any-repo", AgentRuntime::QwenCode),
+            "qwen should be blocked by default"
+        );
+    }
+
+    #[test]
+    fn gemini_qwen_allowed_with_explicit_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[repo_runtimes]\nmy-repo = [\"claude-code\", \"gemini-cli\", \"qwen-code\"]\n",
+        )
+        .unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        assert!(cfg.is_runtime_allowed("my-repo", AgentRuntime::GeminiCli));
+        assert!(cfg.is_runtime_allowed("my-repo", AgentRuntime::QwenCode));
+        assert!(cfg.is_runtime_allowed("my-repo", AgentRuntime::ClaudeCode));
+        // Not in allowlist for other repos
+        assert!(!cfg.is_runtime_allowed("other", AgentRuntime::GeminiCli));
+    }
+
     // ─── repo_label_from_dir tests ──────────────────────────────────────────
 
     #[test]
