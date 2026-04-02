@@ -8,6 +8,9 @@ const BUILTIN_DEFAULT_YAML: &str = include_str!("../../pipelines/default.yaml");
 /// Built-in economy pipeline YAML compiled into the binary.
 const BUILTIN_ECONOMY_YAML: &str = include_str!("../../pipelines/economy.yaml");
 
+/// Built-in honeyjourney pipeline YAML compiled into the binary.
+const BUILTIN_HONEYJOURNEY_YAML: &str = include_str!("../../pipelines/honeyjourney.yaml");
+
 /// Load the pipeline config (always uses the compiled-in builtin).
 pub fn load_default() -> Result<PipelineConfig> {
     warn_stale_runtime_override();
@@ -28,6 +31,11 @@ pub fn load_named(name: &str) -> Result<PipelineConfig> {
         "default" => return load_default(),
         "economy" => {
             let config = load_from_str(BUILTIN_ECONOMY_YAML, "<builtin:economy>")?;
+            warn_deprecated_per_stage(&config);
+            return Ok(config);
+        }
+        "honeyjourney" => {
+            let config = load_from_str(BUILTIN_HONEYJOURNEY_YAML, "<builtin:honeyjourney>")?;
             warn_deprecated_per_stage(&config);
             return Ok(config);
         }
@@ -247,6 +255,59 @@ mod tests {
         let config = load_named("economy").unwrap();
         let deployer = config.stage("deployer").unwrap();
         assert_eq!(deployer.runtime, Some(crate::models::AgentRuntime::Codex));
+    }
+
+    #[test]
+    fn load_named_honeyjourney_succeeds() {
+        let config = load_named("honeyjourney").unwrap();
+        assert_eq!(config.pipeline, "honeyjourney");
+        assert!(!config.stages.is_empty());
+    }
+
+    #[test]
+    fn honeyjourney_pipeline_engineer_uses_qwen() {
+        let config = load_named("honeyjourney").unwrap();
+        let engineer = config.stage("engineer").unwrap();
+        assert_eq!(
+            engineer.runtime,
+            Some(crate::models::AgentRuntime::QwenCode)
+        );
+    }
+
+    #[test]
+    fn honeyjourney_pipeline_reviewer_uses_gemini() {
+        let config = load_named("honeyjourney").unwrap();
+        let reviewer = config.stage("reviewer").unwrap();
+        assert_eq!(
+            reviewer.runtime,
+            Some(crate::models::AgentRuntime::GeminiCli)
+        );
+    }
+
+    #[test]
+    fn honeyjourney_pipeline_analyst_uses_claude_code() {
+        let config = load_named("honeyjourney").unwrap();
+        let analyst = config.stage("analyst").unwrap();
+        assert_eq!(analyst.runtime, None); // no runtime override = claude-code default
+        assert_eq!(analyst.model, "sonnet");
+    }
+
+    #[test]
+    fn honeyjourney_pipeline_deployer_uses_claude_code() {
+        let config = load_named("honeyjourney").unwrap();
+        let deployer = config.stage("deployer").unwrap();
+        assert_eq!(deployer.runtime, None); // no runtime override = claude-code default
+        assert_eq!(deployer.model, "sonnet");
+    }
+
+    #[test]
+    fn honeyjourney_pipeline_stages_match_default() {
+        let default = load_named("default").unwrap();
+        let honeyjourney = load_named("honeyjourney").unwrap();
+        let default_stages: Vec<&str> = default.stages.keys().map(String::as_str).collect();
+        let honeyjourney_stages: Vec<&str> =
+            honeyjourney.stages.keys().map(String::as_str).collect();
+        assert_eq!(default_stages, honeyjourney_stages);
     }
 
     #[test]

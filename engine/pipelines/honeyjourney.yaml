@@ -1,0 +1,89 @@
+pipeline: honeyjourney
+description: Django honey business — Sonnet analyst, Qwen engineer, Gemini reviewer
+max_concurrent: 8
+launch_stagger_secs: 4
+
+templates:
+  verdict_instruction: "Output your verdict on the LAST line of your response"
+  nit_threshold: "0"
+
+stages:
+  analyst:
+    linear_label: analyze
+    agent: pipeline-analyst
+    model: sonnet
+    fallback: sonnet
+    max_turns: 25
+    manual: skip
+    prompt: prompts/analyst.md
+    transitions:
+      done:
+        status: todo
+      blocked:
+        status: blocked
+      already_done:
+        status: done
+
+  engineer:
+    linear_status: in_progress
+    agent: pipeline-engineer
+    model: sonnet
+    fallback: sonnet
+    light_model: sonnet
+    light_threshold: 3
+    max_turns: 100
+    max_stage_attempts: 3
+    on_max_rounds: blocked
+    runtime: qwen-code
+    manual: skip
+    prompt: prompts/engineer.md
+    transitions:
+      done:
+        status: review
+        spawn: reviewer
+      blocked:
+        status: backlog
+
+  reviewer:
+    linear_status: review
+    agent: pipeline-reviewer
+    model: sonnet
+    fallback: sonnet
+    recheck_model: sonnet
+    max_review_rounds: 3
+    max_turns: 50
+    max_stage_attempts: 3
+    on_max_rounds: blocked
+    runtime: gemini-cli
+    manual: process
+    prompt: prompts/reviewer.md
+    transitions:
+      approved:
+        status: ready
+      passed:
+        status: ready
+      rejected:
+        status: in_progress
+        spawn: engineer
+      blocked:
+        status: backlog
+
+  deployer:
+    linear_status: deploy
+    agent: pipeline-deployer
+    model: sonnet
+    max_turns: 50
+    max_stage_attempts: 2
+    on_max_rounds: blocked
+    manual: skip
+    prompt: prompts/deployer.md
+    transitions:
+      done:
+        status: done
+      conflicts:
+        status: in_progress
+        spawn: engineer
+      failed:
+        status: ready
+      blocked:
+        status: backlog

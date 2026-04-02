@@ -366,6 +366,9 @@ pub enum PipelineAction {
         /// Show only this stage
         #[arg(long)]
         stage: Option<String>,
+        /// Pipeline name to show (default: current repo's pipeline)
+        #[arg(long)]
+        pipeline: Option<String>,
     },
     /// Validate pipeline YAML config
     Validate,

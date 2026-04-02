@@ -26,8 +26,8 @@ pub fn cmd_pipeline_status(db: &Db) -> Result<()> {
     })
 }
 
-pub fn cmd_pipeline_show(stage: Option<&str>) -> Result<()> {
-    pipeline::cmd_show(stage)
+pub fn cmd_pipeline_show(stage: Option<&str>, pipeline: Option<&str>) -> Result<()> {
+    pipeline::cmd_show(stage, pipeline)
 }
 
 pub fn cmd_pipeline_validate() -> Result<()> {

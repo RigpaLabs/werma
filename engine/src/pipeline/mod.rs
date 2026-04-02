@@ -236,9 +236,12 @@ pub fn status(db: &Db, linear: Option<&dyn LinearApi>) -> Result<()> {
 
 // ─── CLI commands ─────────────────────────────────────────────────────────────
 
-/// `werma pipeline show [--stage <name>]` — pretty-print pipeline config.
-pub fn cmd_show(stage_filter: Option<&str>) -> Result<()> {
-    let config = loader::load_default()?;
+/// `werma pipeline show [--stage <name>] [--pipeline <name>]` — pretty-print pipeline config.
+pub fn cmd_show(stage_filter: Option<&str>, pipeline_name: Option<&str>) -> Result<()> {
+    let config = match pipeline_name {
+        Some(name) => loader::load_named(name)?,
+        None => loader::load_default()?,
+    };
 
     println!("\nPipeline: {} — {}", config.pipeline, config.description);
     println!("Max concurrent: {}", config.max_concurrent);
