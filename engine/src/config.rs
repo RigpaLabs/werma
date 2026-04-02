@@ -137,6 +137,7 @@ impl UserConfig {
     ///
     /// Checks explicit `[repos]` config first (reverse lookup), then falls back
     /// to the last path component (matches `~/projects/{repo}` convention).
+    #[allow(dead_code)] // Used by `werma pipeline switch` — callers coming in RIG-367
     pub fn repo_from_working_dir(&self, working_dir: &str) -> String {
         let normalized =
             working_dir.replace('~', &dirs::home_dir().unwrap_or_default().to_string_lossy());
