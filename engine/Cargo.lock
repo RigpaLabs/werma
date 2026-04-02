@@ -2127,6 +2127,7 @@ dependencies = [
  "tempfile",
  "terminal_size",
  "toml",
+ "toml_edit",
  "uuid",
 ]
 

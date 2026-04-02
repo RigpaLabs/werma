@@ -72,6 +72,11 @@ impl UserConfig {
             .unwrap_or("default")
     }
 
+    /// Alias for `pipeline_for_repo` — used by `pipeline switch` command.
+    pub fn active_pipeline(&self, repo: &str) -> &str {
+        self.pipeline_for_repo(repo)
+    }
+
     /// Check if a runtime is allowed for a given repo.
     /// Uses the explicit allowlist if configured, otherwise DEFAULT_ALLOWED_RUNTIMES.
     pub fn is_runtime_allowed(&self, repo: &str, runtime: AgentRuntime) -> bool {
@@ -126,6 +131,34 @@ impl UserConfig {
             .ok()
             .and_then(|content| toml::from_str(&content).ok())
             .unwrap_or_default()
+    }
+
+    /// Derive the repo name from a working directory path.
+    ///
+    /// Checks explicit `[repos]` config first (reverse lookup), then falls back
+    /// to the last path component (matches `~/projects/{repo}` convention).
+    #[allow(dead_code)] // Used by `werma pipeline switch` — callers coming in RIG-367
+    pub fn repo_from_working_dir(&self, working_dir: &str) -> String {
+        let normalized =
+            working_dir.replace('~', &dirs::home_dir().unwrap_or_default().to_string_lossy());
+
+        // Exact match against configured repos
+        for (name, dir) in &self.repos {
+            let norm_dir =
+                dir.replace('~', &dirs::home_dir().unwrap_or_default().to_string_lossy());
+            if normalized == norm_dir
+                || normalized.ends_with(&format!("/{}", norm_dir.trim_start_matches('/')))
+            {
+                return name.clone();
+            }
+        }
+
+        // Convention fallback: last path component
+        std::path::Path::new(working_dir)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("unknown")
+            .to_string()
     }
 
     /// Load from the default location `~/.werma/config.toml`.
@@ -379,6 +412,20 @@ mod tests {
         assert_eq!(cfg.pipeline_for_repo("other"), "default");
     }
 
+    #[test]
+    fn active_pipeline_is_alias_for_pipeline_for_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[repo_pipelines]\nfathom = \"economy\"\n").unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        assert_eq!(
+            cfg.active_pipeline("fathom"),
+            cfg.pipeline_for_repo("fathom")
+        );
+        assert_eq!(cfg.active_pipeline("werma"), "default");
+    }
+
     // ─── Runtime allowlist tests ───────────────────────────────────────────
 
     #[test]
@@ -458,6 +505,37 @@ mod tests {
             cfg.repo_label_from_dir("/opt/my-project"),
             Some("my-project".to_string())
         );
+    }
+
+    // ─── repo_from_working_dir tests ──────────────────────────────────────
+
+    #[test]
+    fn repo_from_working_dir_convention_fallback() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.repo_from_working_dir("~/projects/werma"), "werma");
+        assert_eq!(cfg.repo_from_working_dir("~/projects/fathom"), "fathom");
+        assert_eq!(
+            cfg.repo_from_working_dir("/home/user/projects/my-app"),
+            "my-app"
+        );
+    }
+
+    #[test]
+    fn repo_from_working_dir_explicit_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[repos]\nwerma = \"~/projects/rigpa/werma\"\n").unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        // The last path component is "werma", which matches convention.
+        // Even without explicit match, it resolves correctly.
+        assert_eq!(cfg.repo_from_working_dir("~/projects/rigpa/werma"), "werma");
+    }
+
+    #[test]
+    fn repo_from_working_dir_unknown_returns_dirname() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.repo_from_working_dir("/opt/custom/my-repo"), "my-repo");
     }
 
     // ─── Full config TOML parsing test ─────────────────────────────────────

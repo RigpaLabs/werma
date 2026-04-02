@@ -16,19 +16,52 @@ pub fn load_default() -> Result<PipelineConfig> {
     Ok(config)
 }
 
-/// Load a named pipeline by name. Supports builtin names ("default", "economy").
+/// Load a pipeline config by name.
 ///
-/// This is the repo-scoped entry point: poll.rs and decision.rs call this
-/// when they know which repo they're working with.
+/// Lookup order:
+/// 1. Builtin names: `"default"` → compiled-in default, `"economy"` → compiled-in economy.
+/// 2. File on disk: `~/.werma/pipelines/{name}.yaml` (user-defined pipelines).
+/// 3. Falls back to the builtin default with a warning if no file is found.
 pub fn load_named(name: &str) -> Result<PipelineConfig> {
-    let (yaml, source) = match name {
-        "default" => (BUILTIN_DEFAULT_YAML, "<builtin:default>"),
-        "economy" => (BUILTIN_ECONOMY_YAML, "<builtin:economy>"),
-        other => anyhow::bail!("unknown pipeline name '{other}' (available: default, economy)"),
-    };
-    let config = load_from_str(yaml, source)?;
-    warn_deprecated_per_stage(&config);
-    Ok(config)
+    // Check builtins first.
+    match name {
+        "default" => return load_default(),
+        "economy" => {
+            let config = load_from_str(BUILTIN_ECONOMY_YAML, "<builtin:economy>")?;
+            warn_deprecated_per_stage(&config);
+            return Ok(config);
+        }
+        _ => {}
+    }
+
+    // Try user-defined pipeline file.
+    if let Some(home) = dirs::home_dir() {
+        let path = home.join(format!(".werma/pipelines/{name}.yaml"));
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read pipeline {}", path.display()))?;
+            let config = load_from_str(&content, &path.display().to_string())?;
+            warn_deprecated_per_stage(&config);
+            return Ok(config);
+        }
+    }
+
+    eprintln!(
+        "warning: pipeline '{name}' not found in ~/.werma/pipelines/{name}.yaml — using 'default'"
+    );
+    load_default()
+}
+
+/// Load the pipeline config for a specific working directory, consulting
+/// `UserConfig::pipeline_for_repo()` to select the right pipeline name.
+pub fn load_for_working_dir(working_dir: &str) -> Result<PipelineConfig> {
+    let user_cfg = crate::config::UserConfig::load();
+    let repo_label = user_cfg.repo_label_from_dir(working_dir);
+    let pipeline_name = repo_label
+        .as_deref()
+        .map(|r| user_cfg.pipeline_for_repo(r))
+        .unwrap_or("default");
+    load_named(pipeline_name)
 }
 
 /// Warn once if a stale runtime override exists from a previous `werma pipeline eject`.
@@ -176,12 +209,13 @@ mod tests {
     }
 
     #[test]
-    fn load_named_unknown_fails() {
-        let result = load_named("nonexistent");
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("unknown pipeline name"));
-        assert!(msg.contains("nonexistent"));
+    fn load_named_unknown_falls_back_to_default() {
+        // Non-builtin names without a matching ~/.werma/pipelines/{name}.yaml
+        // fall back to the default pipeline with a warning (no error).
+        let result = load_named("nonexistent-pipeline");
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config.pipeline, "default");
     }
 
     #[test]
@@ -317,5 +351,36 @@ stages:
     fn resolve_builtin_devops_prompt() {
         let content = builtin_prompt("prompts/devops.md");
         assert!(content.is_some());
+    }
+
+    #[test]
+    fn load_named_from_file() {
+        let home = dirs::home_dir().unwrap();
+        let pipelines_dir = home.join(".werma/pipelines");
+        std::fs::create_dir_all(&pipelines_dir).unwrap();
+
+        let economy_path = pipelines_dir.join("test-economy.yaml");
+        let yaml = r#"
+pipeline: test-economy
+stages:
+  engineer:
+    agent: pipeline-engineer
+    model: sonnet
+"#;
+        std::fs::write(&economy_path, yaml).unwrap();
+
+        let config = load_named("test-economy").unwrap();
+        assert_eq!(config.pipeline, "test-economy");
+        assert!(config.stages.contains_key("engineer"));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&economy_path);
+    }
+
+    #[test]
+    fn load_for_working_dir_uses_default_when_no_override() {
+        // With no pipeline override configured, should return default.
+        let config = load_for_working_dir("~/projects/some-repo").unwrap();
+        assert_eq!(config.pipeline, "default");
     }
 }

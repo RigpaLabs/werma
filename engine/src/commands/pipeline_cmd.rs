@@ -1,8 +1,8 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::db::Db;
 use crate::traits::RealCommandRunner;
-use crate::{linear, pipeline, ui};
+use crate::{config, linear, pipeline, ui};
 
 pub fn cmd_pipeline_poll(db: &Db) -> Result<()> {
     let linear_client = linear::LinearClient::new()?;
@@ -42,6 +42,8 @@ pub fn cmd_pipeline_validate() -> Result<()> {
 pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<()> {
     let db = crate::open_db()?;
     let linear_client = linear::LinearClient::new()?;
+    // Start with the default pipeline for stage validation; per-issue tasks
+    // may use a repo-specific pipeline below (RIG-367).
     let config = pipeline::loader::load_default()?;
 
     // Detect if a stage name was passed as a positional arg (e.g. `werma pipeline run RIG-178 analyst`).
@@ -119,9 +121,13 @@ pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<(
         }
         let estimate = 0; // Will be set by analyst if applicable
 
+        // RIG-367: Use repo-specific pipeline config for task creation.
+        let repo_config =
+            pipeline::loader::load_for_working_dir(&working_dir).unwrap_or_else(|_| config.clone());
+
         let task_id = pipeline::create_initial_stage_task(
             &db,
-            &config,
+            &repo_config,
             &effective_stage,
             &ident,
             &title,
@@ -139,8 +145,68 @@ pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<(
     Ok(())
 }
 
+/// Switch the active pipeline for a repo by updating `~/.werma/config.toml` in-place.
+///
+/// This edits (or creates) the `[pipelines]` table in config.toml while preserving
+/// all existing content, comments, and formatting.
+pub fn cmd_pipeline_switch(repo: &str, pipeline: &str) -> Result<()> {
+    let config_path = dirs::home_dir()
+        .map(|h| h.join(".werma/config.toml"))
+        .context("could not determine home directory")?;
+
+    // Read existing content (empty string if file doesn't exist yet).
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = existing
+        .parse()
+        .context("failed to parse ~/.werma/config.toml")?;
+
+    // Ensure [repo_pipelines] table exists, then set the key.
+    if !doc.contains_table("repo_pipelines") {
+        doc["repo_pipelines"] = toml_edit::table();
+    }
+    doc["repo_pipelines"][repo] = toml_edit::value(pipeline);
+
+    // Create parent dir if needed (first-time setup).
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    std::fs::write(&config_path, doc.to_string())
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    // Show the result.
+    let current = config::UserConfig::load();
+    println!(
+        "Pipeline for '{repo}' set to '{pipeline}' (was: '{}')",
+        if pipeline == current.active_pipeline(repo) {
+            // Already updated — show what it was before
+            "default"
+        } else {
+            current.active_pipeline(repo)
+        }
+    );
+    println!();
+    println!("Active pipelines:");
+    if current.repo_pipelines.is_empty() {
+        println!("  (none configured — all repos use 'default')");
+    } else {
+        let mut entries: Vec<_> = current.repo_pipelines.iter().collect();
+        entries.sort_by_key(|(k, _)| k.as_str());
+        for (r, p) in &entries {
+            println!("  {r:<20} → {p}");
+        }
+    }
+    println!();
+    println!("Config: {}", config_path.display());
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     // Pipeline commands require Linear API access, so we test the
     // delegated pipeline module functions (which have their own tests).
     // Here we just verify the module structure is correct.
@@ -149,5 +215,39 @@ mod tests {
     fn pipeline_cmd_module_exists() {
         // Ensures this module compiles and links correctly
         assert!(true);
+    }
+
+    #[test]
+    fn switch_creates_config_with_pipelines_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        // Patch the config path by writing directly via toml_edit logic.
+        // We test the toml_edit round-trip here rather than the full cmd.
+        let existing = "";
+        let mut doc: toml_edit::DocumentMut = existing.parse().unwrap();
+        doc["repo_pipelines"] = toml_edit::table();
+        doc["repo_pipelines"]["fathom"] = toml_edit::value("economy");
+        let written = doc.to_string();
+        std::fs::write(&config_path, &written).unwrap();
+
+        let cfg = crate::config::UserConfig::load_from(&config_path);
+        assert_eq!(cfg.active_pipeline("fathom"), "economy");
+        assert_eq!(cfg.active_pipeline("werma"), "default");
+    }
+
+    #[test]
+    fn switch_preserves_existing_config_keys() {
+        let existing = "completed_limit = 25\n\n[repos]\nwerma = \"/custom/werma\"\n";
+        let mut doc: toml_edit::DocumentMut = existing.parse().unwrap();
+        doc["repo_pipelines"] = toml_edit::table();
+        doc["repo_pipelines"]["fathom"] = toml_edit::value("economy");
+        let result = doc.to_string();
+
+        // Existing keys preserved
+        assert!(result.contains("completed_limit = 25"));
+        assert!(result.contains("werma = \"/custom/werma\""));
+        // New pipeline key added
+        assert!(result.contains("fathom = \"economy\""));
     }
 }

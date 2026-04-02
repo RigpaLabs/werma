@@ -564,7 +564,8 @@ fn resolve_fallback_model(task: &Task) -> Option<String> {
     if task.pipeline_stage.is_empty() {
         return None;
     }
-    let config = crate::pipeline::loader::load_default().ok()?;
+    // RIG-367: Use repo-specific pipeline config to resolve fallback model.
+    let config = crate::pipeline::loader::load_for_working_dir(&task.working_dir).ok()?;
     let stage_cfg = config.stage(&task.pipeline_stage)?;
     stage_cfg
         .fallback
@@ -796,6 +797,13 @@ $stdout_text"
     echo "$combined" | grep -qiE "rate.?limit|429|too many requests|quota.?exceeded|server.?overloaded|api.?capacity|overloaded_error"
 }}
 
+emit_rate_limit_warning() {{
+    local model="$1"
+    echo "$(date): RATE_LIMIT_WARNING — $model quota exceeded for task $TASK_ID. Switch pipeline: werma pipeline switch <repo> <pipeline>" >> "$LOG_FILE"
+    osascript -e "display notification \"$model quota exceeded for $TASK_ID — run: werma pipeline switch <repo> <pipeline>\" with title \"werma — Rate Limit\" sound name \"Sosumi\"" 2>/dev/null || true
+}}
+
+ORIGINAL_MODEL="$MODEL"
 RESULT_JSON=$(run_claude "$MODEL") || {{
     EXIT_CODE=$?
     echo "$(date): CLAUDE_EXIT code=$EXIT_CODE model=$MODEL" >> "$LOG_FILE"
@@ -803,11 +811,15 @@ RESULT_JSON=$(run_claude "$MODEL") || {{
         echo "$(date): WARNING: $MODEL rate-limited, falling back to $FALLBACK_MODEL for task $TASK_ID" >> "$LOG_FILE"
         RESULT_JSON=$(run_claude "$FALLBACK_MODEL") || {{
             echo "$(date): FAILED — fallback model $FALLBACK_MODEL also failed (exit $?)" >> "$LOG_FILE"
+            emit_rate_limit_warning "$ORIGINAL_MODEL"
             werma fail "$TASK_ID"
             exit 1
         }}
         MODEL="$FALLBACK_MODEL"
     else
+        if is_rate_limit "$EXIT_CODE" "$RESULT_JSON"; then
+            emit_rate_limit_warning "$MODEL"
+        fi
         echo "$(date): FAILED (exit $EXIT_CODE)" >> "$LOG_FILE"
         werma fail "$TASK_ID"
         exit 1
@@ -854,6 +866,7 @@ if [ "$IS_ERROR" = "true" ] && is_rate_limit 0 "$RESULT_JSON"; then
         echo "$(date): WARNING: $MODEL returned rate-limit error in JSON, falling back to $FALLBACK_MODEL for task $TASK_ID" >> "$LOG_FILE"
         RESULT_JSON=$(run_claude "$FALLBACK_MODEL") || {{
             echo "$(date): FAILED — fallback model $FALLBACK_MODEL also failed (exit $?)" >> "$LOG_FILE"
+            emit_rate_limit_warning "$ORIGINAL_MODEL"
             werma fail "$TASK_ID"
             exit 1
         }}
@@ -868,6 +881,7 @@ if [ "$IS_ERROR" = "true" ] && is_rate_limit 0 "$RESULT_JSON"; then
         fi
         SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
     else
+        emit_rate_limit_warning "$ORIGINAL_MODEL"
         echo "$(date): FAILED — rate-limit error in JSON, no fallback configured" >> "$LOG_FILE"
         werma fail "$TASK_ID"
         exit 1
@@ -1313,9 +1327,11 @@ mod tests {
         assert!(script.contains("EXEC_START"));
         assert!(script.contains("CLAUDE_START"));
         assert!(script.contains("exec 2>>"));
-        // No more raw sqlite3 or osascript — handled by werma complete/fail
+        // No raw sqlite3 — DB operations handled by werma complete/fail
         assert!(!script.contains("sqlite3"));
-        assert!(!script.contains("osascript"));
+        // osascript is used for rate-limit notifications (emit_rate_limit_warning)
+        assert!(script.contains("emit_rate_limit_warning"));
+        assert!(script.contains("RATE_LIMIT_WARNING"));
     }
 
     #[test]

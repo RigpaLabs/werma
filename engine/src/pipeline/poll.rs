@@ -370,7 +370,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 db.insert_task(&task)?;
 
                 // on_start: move issue to a different status when task is created
-                if let Some(ref on_start) = stage_cfg.on_start
+                if let Some(ref on_start) = resolved.effective_stage_cfg.on_start
                     && let Err(e) = linear.move_issue_by_name(issue_id, &on_start.status)
                 {
                     eprintln!(

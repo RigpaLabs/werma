@@ -378,4 +378,11 @@ pub enum PipelineAction {
         #[arg(short, long)]
         stage: Option<String>,
     },
+    /// Switch the active pipeline for a repo (edits ~/.werma/config.toml)
+    Switch {
+        /// Repo name (e.g. fathom, werma)
+        repo: String,
+        /// Pipeline name (e.g. default, economy)
+        pipeline: String,
+    },
 }
