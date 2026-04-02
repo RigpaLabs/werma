@@ -2,8 +2,8 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use super::log_daemon;
-use super::{GitHubClient, LinearMergeApi};
+use super::{GitHubClient, log_daemon};
+use crate::linear::LinearApi;
 
 /// Real GitHub CLI implementation via `gh pr list`.
 pub struct RealGitHub;
@@ -37,47 +37,21 @@ impl GitHubClient for RealGitHub {
     }
 }
 
-/// Real Linear API implementation delegating to `LinearClient`.
-/// The client is constructed once and reused across calls.
-pub struct RealLinearMerge {
-    client: crate::linear::LinearClient,
-}
-
-impl RealLinearMerge {
-    /// Construct a `RealLinearMerge`, returning an error if `LinearClient` cannot be initialised.
-    pub fn new() -> Result<Self> {
-        Ok(Self {
-            client: crate::linear::LinearClient::new()?,
-        })
-    }
-}
-
-impl LinearMergeApi for RealLinearMerge {
-    fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<serde_json::Value>> {
-        self.client.get_issues_by_status(status_name)
-    }
-
-    fn move_issue_by_name(&self, issue_id: &str, status_name: &str) -> Result<()> {
-        self.client.move_issue_by_name(issue_id, status_name)
-    }
-
-    fn comment(&self, issue_id: &str, body: &str) -> Result<()> {
-        self.client.comment(issue_id, body)
-    }
-}
-
 /// Check for merged PRs on issues in "ready" status.
-/// When a PR is merged, move the issue to Done in Linear.
+/// When a PR is merged, move the issue to Done via the tracker adapter.
 /// Returns `true` if at least one merge was detected (caller should trigger update).
+///
+/// Accepts any `LinearApi` implementation — works with both the Linear client
+/// and the `GitHubIssueClient` adapter, eliminating the now-removed `LinearMergeApi` shim.
 pub fn check_merged_prs(
     werma_dir: &Path,
-    linear: &impl LinearMergeApi,
+    tracker: &dyn LinearApi,
     github: &impl GitHubClient,
 ) -> Result<bool> {
     let log_path = werma_dir.join("logs/daemon.log");
     let mut any_merged = false;
 
-    let ready_issues = match linear.get_issues_by_status("ready") {
+    let ready_issues = match tracker.get_issues_by_status("ready") {
         Ok(issues) => issues,
         Err(_) => return Ok(false),
     };
@@ -99,7 +73,7 @@ pub fn check_merged_prs(
             &format!("merge detected: {identifier} — moving to Done"),
         );
 
-        if let Err(e) = linear.move_issue_by_name(issue_id, "done") {
+        if let Err(e) = tracker.move_issue_by_name(issue_id, "done") {
             log_daemon(
                 &log_path,
                 &format!("failed to move {identifier} to Done: {e}"),
@@ -107,7 +81,7 @@ pub fn check_merged_prs(
             continue;
         }
 
-        linear
+        tracker
             .comment(
                 issue_id,
                 "**PR merged** — issue moved to Done automatically by werma daemon.",
@@ -123,42 +97,11 @@ pub fn check_merged_prs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::fakes::FakeLinearApi;
     use serde_json::json;
 
-    struct FakeLinear {
-        issues: Vec<serde_json::Value>,
-        move_calls: std::cell::RefCell<Vec<(String, String)>>,
-        comment_calls: std::cell::RefCell<Vec<(String, String)>>,
-    }
-
-    impl FakeLinear {
-        fn new(issues: Vec<serde_json::Value>) -> Self {
-            Self {
-                issues,
-                move_calls: std::cell::RefCell::new(vec![]),
-                comment_calls: std::cell::RefCell::new(vec![]),
-            }
-        }
-    }
-
-    impl LinearMergeApi for FakeLinear {
-        fn get_issues_by_status(&self, _status_name: &str) -> Result<Vec<serde_json::Value>> {
-            Ok(self.issues.clone())
-        }
-
-        fn move_issue_by_name(&self, issue_id: &str, status_name: &str) -> Result<()> {
-            self.move_calls
-                .borrow_mut()
-                .push((issue_id.to_string(), status_name.to_string()));
-            Ok(())
-        }
-
-        fn comment(&self, issue_id: &str, body: &str) -> Result<()> {
-            self.comment_calls
-                .borrow_mut()
-                .push((issue_id.to_string(), body.to_string()));
-            Ok(())
-        }
+    fn make_issue(id: &str, identifier: &str) -> serde_json::Value {
+        json!({ "id": id, "identifier": identifier })
     }
 
     struct FakeGitHub {
@@ -176,10 +119,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
 
-        let linear = FakeLinear::new(vec![]);
+        let tracker = FakeLinearApi::new();
         let github = FakeGitHub { merged_prs: vec![] };
 
-        let merged = check_merged_prs(dir.path(), &linear, &github).unwrap();
+        let merged = check_merged_prs(dir.path(), &tracker, &github).unwrap();
         assert!(!merged);
     }
 
@@ -188,15 +131,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
 
-        let linear = FakeLinear::new(vec![json!({
-            "id": "issue-1",
-            "identifier": "RIG-100"
-        })]);
+        let tracker = FakeLinearApi::new();
+        tracker.set_issues_for_status("ready", vec![make_issue("issue-1", "RIG-100")]);
         let github = FakeGitHub { merged_prs: vec![] };
 
-        let merged = check_merged_prs(dir.path(), &linear, &github).unwrap();
+        let merged = check_merged_prs(dir.path(), &tracker, &github).unwrap();
         assert!(!merged);
-        assert!(linear.move_calls.borrow().is_empty());
+        assert!(tracker.move_calls.borrow().is_empty());
     }
 
     #[test]
@@ -204,23 +145,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
 
-        let linear = FakeLinear::new(vec![json!({
-            "id": "issue-1",
-            "identifier": "RIG-100"
-        })]);
+        let tracker = FakeLinearApi::new();
+        tracker.set_issues_for_status("ready", vec![make_issue("issue-1", "RIG-100")]);
         let github = FakeGitHub {
             merged_prs: vec!["RIG-100".to_string()],
         };
 
-        let merged = check_merged_prs(dir.path(), &linear, &github).unwrap();
+        let merged = check_merged_prs(dir.path(), &tracker, &github).unwrap();
         assert!(merged);
 
-        let moves = linear.move_calls.borrow();
+        let moves = tracker.move_calls.borrow();
         assert_eq!(moves.len(), 1);
         assert_eq!(moves[0].0, "issue-1");
         assert_eq!(moves[0].1, "done");
 
-        let comments = linear.comment_calls.borrow();
+        let comments = tracker.comment_calls.borrow();
         assert_eq!(comments.len(), 1);
         assert!(comments[0].1.contains("PR merged"));
     }
@@ -230,17 +169,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
 
-        let linear = FakeLinear::new(vec![json!({
-            "id": "",
-            "identifier": "RIG-100"
-        })]);
+        let tracker = FakeLinearApi::new();
+        tracker.set_issues_for_status("ready", vec![make_issue("", "RIG-100")]);
         let github = FakeGitHub {
             merged_prs: vec!["RIG-100".to_string()],
         };
 
-        let merged = check_merged_prs(dir.path(), &linear, &github).unwrap();
+        let merged = check_merged_prs(dir.path(), &tracker, &github).unwrap();
         assert!(!merged);
-        assert!(linear.move_calls.borrow().is_empty());
+        assert!(tracker.move_calls.borrow().is_empty());
     }
 
     #[test]
@@ -248,64 +185,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
 
-        let linear = FakeLinear::new(vec![
-            json!({"id": "issue-1", "identifier": "RIG-100"}),
-            json!({"id": "issue-2", "identifier": "RIG-101"}),
-            json!({"id": "issue-3", "identifier": "RIG-102"}),
-        ]);
+        let tracker = FakeLinearApi::new();
+        tracker.set_issues_for_status(
+            "ready",
+            vec![
+                make_issue("issue-1", "RIG-100"),
+                make_issue("issue-2", "RIG-101"),
+                make_issue("issue-3", "RIG-102"),
+            ],
+        );
         let github = FakeGitHub {
             merged_prs: vec!["RIG-101".to_string()],
         };
 
-        let merged = check_merged_prs(dir.path(), &linear, &github).unwrap();
+        let merged = check_merged_prs(dir.path(), &tracker, &github).unwrap();
         assert!(merged);
 
-        let moves = linear.move_calls.borrow();
+        let moves = tracker.move_calls.borrow();
         assert_eq!(moves.len(), 1);
         assert_eq!(moves[0].0, "issue-2");
     }
 
-    struct FailLinear;
-
-    impl LinearMergeApi for FailLinear {
-        fn get_issues_by_status(&self, _status_name: &str) -> Result<Vec<serde_json::Value>> {
-            Err(anyhow::anyhow!("no API key"))
-        }
-
-        fn move_issue_by_name(&self, _issue_id: &str, _status_name: &str) -> Result<()> {
-            Ok(())
-        }
-
-        fn comment(&self, _issue_id: &str, _body: &str) -> Result<()> {
-            Ok(())
-        }
-    }
-
     #[test]
-    fn linear_api_failure_returns_ok() {
+    fn tracker_api_failure_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
 
+        let tracker = FakeLinearApi::new();
+        tracker.fail_next_n_status_fetches(1);
         let github = FakeGitHub { merged_prs: vec![] };
-
-        let merged = check_merged_prs(dir.path(), &FailLinear, &github).unwrap();
+        let merged = check_merged_prs(dir.path(), &tracker, &github).unwrap();
         assert!(!merged);
-    }
-
-    struct FailMoveLinear;
-
-    impl LinearMergeApi for FailMoveLinear {
-        fn get_issues_by_status(&self, _status_name: &str) -> Result<Vec<serde_json::Value>> {
-            Ok(vec![json!({"id": "issue-1", "identifier": "RIG-100"})])
-        }
-
-        fn move_issue_by_name(&self, _issue_id: &str, _status_name: &str) -> Result<()> {
-            Err(anyhow::anyhow!("move failed"))
-        }
-
-        fn comment(&self, _issue_id: &str, _body: &str) -> Result<()> {
-            Ok(())
-        }
     }
 
     #[test]
@@ -313,11 +223,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
 
+        let tracker = FakeLinearApi::new();
+        tracker.set_issues_for_status("ready", vec![make_issue("issue-1", "RIG-100")]);
+        tracker.fail_next_n_moves(1);
         let github = FakeGitHub {
             merged_prs: vec!["RIG-100".to_string()],
         };
 
-        let merged = check_merged_prs(dir.path(), &FailMoveLinear, &github).unwrap();
+        let merged = check_merged_prs(dir.path(), &tracker, &github).unwrap();
         // Move failed → not counted as merged
         assert!(!merged);
 
@@ -325,5 +238,27 @@ mod tests {
         let log_content =
             std::fs::read_to_string(dir.path().join("logs/daemon.log")).unwrap_or_default();
         assert!(log_content.contains("failed to move"));
+    }
+
+    /// Verify that GitHub-style identifiers (repo#N format) are passed through correctly.
+    #[test]
+    fn github_identifier_passed_to_find_merged_pr() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        let tracker = FakeLinearApi::new();
+        tracker.set_issues_for_status("ready", vec![make_issue("45", "werma#45")]);
+
+        // FakeGitHub checks for the exact identifier string
+        let github = FakeGitHub {
+            merged_prs: vec!["werma#45".to_string()],
+        };
+
+        let merged = check_merged_prs(dir.path(), &tracker, &github).unwrap();
+        assert!(merged);
+
+        let moves = tracker.move_calls.borrow();
+        assert_eq!(moves[0].0, "45");
+        assert_eq!(moves[0].1, "done");
     }
 }

@@ -11,6 +11,8 @@ mod db;
 #[allow(dead_code)]
 mod github;
 #[allow(dead_code)]
+mod issue_helpers;
+#[allow(dead_code)]
 mod linear;
 mod migrate;
 #[allow(dead_code)]

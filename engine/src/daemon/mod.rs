@@ -48,13 +48,6 @@ pub trait GitHubClient {
     fn find_merged_pr(&self, identifier: &str) -> bool;
 }
 
-/// Trait abstracting Linear API operations used by the merge handler.
-pub trait LinearMergeApi {
-    fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<serde_json::Value>>;
-    fn move_issue_by_name(&self, issue_id: &str, status_name: &str) -> Result<()>;
-    fn comment(&self, issue_id: &str, body: &str) -> Result<()>;
-}
-
 // ─── Logging ─────────────────────────────────────────────────────────────
 
 /// Append a timestamped line to daemon.log.
@@ -127,7 +120,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     let cmd_runner = crate::traits::RealCommandRunner;
     let notifier = crate::traits::RealNotifier;
     // Optional: absent if LINEAR_API_KEY is not configured.
-    let linear_merge = merge::RealLinearMerge::new().ok();
+    // Used for both pipeline polling and merge detection.
     let linear_poll = crate::tracker::linear_client();
     let expected_team_keys = crate::linear::configured_team_keys().unwrap_or_default();
 
@@ -251,8 +244,8 @@ pub fn run(werma_dir: &Path) -> Result<()> {
             }
 
             if last_merge_check.elapsed() >= Duration::from_secs(MERGE_CHECK_INTERVAL_SECS) {
-                let merge_result = linear_merge.as_ref().map_or(Ok(false), |lm| {
-                    merge::check_merged_prs(werma_dir, lm, &github)
+                let merge_result = linear_poll.as_deref().map_or(Ok(false), |lp| {
+                    merge::check_merged_prs(werma_dir, lp, &github)
                 });
                 match merge_result {
                     Ok(true) => {

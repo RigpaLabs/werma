@@ -53,7 +53,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
         }
 
         // Skip manual research issues — human does the research
-        if crate::linear::is_manual_issue(&labels) {
+        if crate::issue_helpers::is_manual_issue(&labels) {
             total_skipped += 1;
             continue;
         }
@@ -65,8 +65,8 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             continue;
         }
 
-        let working_dir = crate::linear::infer_working_dir(title, &labels, &user_cfg);
-        if crate::linear::validate_working_dir(&working_dir).is_none() {
+        let working_dir = crate::issue_helpers::infer_working_dir(title, &labels, &user_cfg);
+        if crate::issue_helpers::validate_working_dir(&working_dir).is_none() {
             eprintln!(
                 "  ! skipping {identifier} [{title}]: working dir '{working_dir}' does not exist"
             );
@@ -203,13 +203,14 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 }
 
                 // Manual issues: skip execution stages (skip_manual=true)
-                if crate::linear::is_manual_issue(&labels) && stage_cfg.skip_manual() {
+                if crate::issue_helpers::is_manual_issue(&labels) && stage_cfg.skip_manual() {
                     total_skipped += 1;
                     continue;
                 }
 
-                let working_dir = crate::linear::infer_working_dir(title, &labels, &user_cfg);
-                if crate::linear::validate_working_dir(&working_dir).is_none() {
+                let working_dir =
+                    crate::issue_helpers::infer_working_dir(title, &labels, &user_cfg);
+                if crate::issue_helpers::validate_working_dir(&working_dir).is_none() {
                     eprintln!(
                         "  ! skipping {identifier} [{title}] stage={stage_name}: working dir '{working_dir}' does not exist"
                     );
@@ -426,7 +427,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 .unwrap_or_default();
 
             // Manual issues: never auto-process via label triggers.
-            if crate::linear::is_manual_issue(&labels) {
+            if crate::issue_helpers::is_manual_issue(&labels) {
                 total_skipped += 1;
                 continue;
             }
@@ -491,8 +492,8 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 }
             }
 
-            let working_dir = crate::linear::infer_working_dir(title, &labels, &user_cfg);
-            if crate::linear::validate_working_dir(&working_dir).is_none() {
+            let working_dir = crate::issue_helpers::infer_working_dir(title, &labels, &user_cfg);
+            if crate::issue_helpers::validate_working_dir(&working_dir).is_none() {
                 eprintln!(
                     "  ! skipping {identifier} [{title}] stage={stage_name}: working dir '{working_dir}' does not exist"
                 );

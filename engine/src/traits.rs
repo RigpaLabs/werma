@@ -184,6 +184,7 @@ pub mod fakes {
         pub sub_issues:
             RefCell<std::collections::HashMap<String, Vec<(String, String, String, String)>>>,
         fail_next_moves: RefCell<u32>,
+        fail_next_status_fetches: RefCell<u32>,
     }
 
     #[allow(dead_code)]
@@ -204,7 +205,13 @@ pub mod fakes {
                 issue_comments: RefCell::new(std::collections::HashMap::new()),
                 sub_issues: RefCell::new(std::collections::HashMap::new()),
                 fail_next_moves: RefCell::new(0),
+                fail_next_status_fetches: RefCell::new(0),
             }
+        }
+
+        /// Configure the next N get_issues_by_status calls to return Err.
+        pub fn fail_next_n_status_fetches(&self, n: u32) {
+            *self.fail_next_status_fetches.borrow_mut() = n;
         }
 
         /// Set sub-issues that will be returned by get_sub_issues for an identifier.
@@ -269,6 +276,14 @@ pub mod fakes {
 
     impl crate::linear::LinearApi for FakeLinearApi {
         fn get_issues_by_status(&self, status_name: &str) -> Result<Vec<serde_json::Value>> {
+            let mut fail_count = self.fail_next_status_fetches.borrow_mut();
+            if *fail_count > 0 {
+                *fail_count -= 1;
+                return Err(anyhow::anyhow!(
+                    "fake status fetch failure: {}",
+                    status_name
+                ));
+            }
             Ok(self
                 .issues_by_status
                 .borrow()
