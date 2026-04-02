@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::models::AgentRuntime;
+use crate::notify::{self, DisplayField};
 
 /// Default number of completed/failed/canceled tasks shown in `werma st`.
 pub const DEFAULT_COMPLETED_LIMIT: usize = 17;
@@ -111,6 +112,42 @@ pub struct UserConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub tracker: TrackerConfig,
+
+    /// Configurable fields for `werma st` output.
+    #[serde(default)]
+    pub status: StatusDisplayConfig,
+
+    /// Configurable fields for macOS/Slack notifications.
+    #[serde(default)]
+    pub notifications: NotificationsDisplayConfig,
+}
+
+/// Display field configuration for `werma st` output.
+///
+/// ```toml
+/// [status]
+/// fields = ["model", "turns"]   # default
+/// ```
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct StatusDisplayConfig {
+    /// Field names to show in parentheses after elapsed time.
+    /// Available: runtime, model, cost, turns, verdict.
+    pub fields: Option<Vec<String>>,
+}
+
+/// Display field configuration for macOS/Slack notifications.
+///
+/// ```toml
+/// [notifications]
+/// fields = ["model"]   # default
+/// ```
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct NotificationsDisplayConfig {
+    /// Field names to append to notification messages.
+    /// Available: runtime, model, cost, turns, verdict.
+    pub fields: Option<Vec<String>>,
 }
 
 impl UserConfig {
@@ -199,6 +236,24 @@ impl UserConfig {
         path.file_name()
             .and_then(|n| n.to_str())
             .map(std::string::ToString::to_string)
+    }
+
+    /// Resolved display fields for `werma st` output.
+    /// Returns configured fields or defaults to `["model", "turns"]`.
+    pub fn status_fields(&self) -> Vec<DisplayField> {
+        match &self.status.fields {
+            Some(names) => notify::parse_field_names(names),
+            None => notify::DEFAULT_STATUS_FIELDS.to_vec(),
+        }
+    }
+
+    /// Resolved display fields for notifications.
+    /// Returns configured fields or defaults to `["model"]`.
+    pub fn notification_fields(&self) -> Vec<DisplayField> {
+        match &self.notifications.fields {
+            Some(names) => notify::parse_field_names(names),
+            None => notify::DEFAULT_NOTIFICATION_FIELDS.to_vec(),
+        }
     }
 
     /// Load config from a specific path; returns `Default` on missing/invalid file.
@@ -553,6 +608,66 @@ mod tests {
             !cfg.is_runtime_allowed("any-repo", AgentRuntime::QwenCode),
             "qwen should be blocked by default"
         );
+    }
+
+    // ─── Status/Notifications display config tests ──────────────────────
+
+    #[test]
+    fn status_fields_default() {
+        let cfg = UserConfig::default();
+        let fields = cfg.status_fields();
+        assert_eq!(fields, vec![DisplayField::Model, DisplayField::Turns]);
+    }
+
+    #[test]
+    fn status_fields_custom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[status]\nfields = [\"runtime\", \"model\", \"turns\"]\n",
+        )
+        .unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        let fields = cfg.status_fields();
+        assert_eq!(
+            fields,
+            vec![
+                DisplayField::Runtime,
+                DisplayField::Model,
+                DisplayField::Turns
+            ]
+        );
+    }
+
+    #[test]
+    fn status_fields_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[status]\nfields = []\n").unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        let fields = cfg.status_fields();
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn notification_fields_default() {
+        let cfg = UserConfig::default();
+        let fields = cfg.notification_fields();
+        assert_eq!(fields, vec![DisplayField::Model]);
+    }
+
+    #[test]
+    fn notification_fields_custom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[notifications]\nfields = [\"cost\", \"model\"]\n").unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        let fields = cfg.notification_fields();
+        assert_eq!(fields, vec![DisplayField::Cost, DisplayField::Model]);
     }
 
     #[test]
