@@ -640,27 +640,46 @@ fn should_skip_due_to_failures(
                 .map(|t| t.status.as_str())
                 .unwrap_or("backlog")
                 .to_string();
-            eprintln!(
-                "  ! {identifier} stage={stage_name}: failure cap reached — \
-                 {failed_count} failed tasks >= limit {max_attempts}, \
-                 escalating to {escalation_status}"
-            );
-            if let Err(e) = linear.move_issue_by_name(issue_id, &escalation_status) {
+
+            // Once-guard: only fire move+comment if the issue is not already in the
+            // escalation status. Without this, every poll cycle re-fires the Linear
+            // API calls after the cap is hit.
+            let already_escalated = linear
+                .get_issue_status(issue_id)
+                .map(|s| {
+                    s.to_lowercase().replace(' ', "_")
+                        == escalation_status.to_lowercase().replace(' ', "_")
+                })
+                .unwrap_or(false);
+
+            if already_escalated {
                 eprintln!(
-                    "  ! failure cap: failed to move {identifier} to {escalation_status}: {e}"
+                    "  ~ {identifier} stage={stage_name}: failure cap already escalated \
+                     to {escalation_status}, skipping"
                 );
-            }
-            if let Err(e) = linear.comment(
-                identifier,
-                &format!(
-                    "**Stage failure cap reached** (stage: {stage_name}, {failed_count} failed tasks, \
-                     limit: {max_attempts}). Tasks are crashing/timing out repeatedly. \
-                     Moving to {escalation_status} — manual intervention required."
-                ),
-            ) {
+            } else {
                 eprintln!(
-                    "  ! failure cap: failed to post comment on {identifier}: {e}"
+                    "  ! {identifier} stage={stage_name}: failure cap reached — \
+                     {failed_count} failed tasks >= limit {max_attempts}, \
+                     escalating to {escalation_status}"
                 );
+                if let Err(e) = linear.move_issue_by_name(issue_id, &escalation_status) {
+                    eprintln!(
+                        "  ! failure cap: failed to move {identifier} to {escalation_status}: {e}"
+                    );
+                }
+                if let Err(e) = linear.comment(
+                    identifier,
+                    &format!(
+                        "**Stage failure cap reached** (stage: {stage_name}, {failed_count} failed tasks, \
+                         limit: {max_attempts}). Tasks are crashing/timing out repeatedly. \
+                         Moving to {escalation_status} — manual intervention required."
+                    ),
+                ) {
+                    eprintln!(
+                        "  ! failure cap: failed to post comment on {identifier}: {e}"
+                    );
+                }
             }
             return Ok(true);
         }
@@ -1323,6 +1342,52 @@ stages:
                 .iter()
                 .any(|(id, body)| id == "RIG-357" && body.contains("failure cap reached")),
             "failure cap should post a comment"
+        );
+    }
+
+    #[test]
+    fn poll_failure_cap_once_guard_skips_move_when_already_escalated() {
+        // RIG-357: once-guard — if the issue is already in the escalation status,
+        // the poller must NOT re-fire move_issue_by_name or comment on every poll cycle.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Insert 3 failed reviewer tasks (at the cap)
+        for i in 0..3 {
+            let mut task = crate::db::make_test_task(&format!("20260401-once-fail{i}"));
+            task.status = crate::models::Status::Failed;
+            task.linear_issue_id = "RIG-360".to_string();
+            task.pipeline_stage = "reviewer".to_string();
+            task.linear_pushed = true;
+            db.insert_task(&task).unwrap();
+        }
+
+        // Issue is already in backlog (escalation already happened once before)
+        linear.set_issue_status("uuid-360", "backlog");
+        let issue = fake_issue_with_state(
+            "uuid-360",
+            "RIG-360",
+            "Already escalated issue",
+            &["Feature", "repo:werma"],
+            "backlog",
+        );
+        linear.set_issues_for_status("review", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // No move should fire — issue is already in backlog
+        let moves = linear.move_calls.borrow();
+        assert!(
+            moves.is_empty(),
+            "once-guard: should NOT move issue already in escalation status, got: {moves:?}"
+        );
+
+        // No comment should fire — already commented once before
+        let comments = linear.comment_calls.borrow();
+        assert!(
+            !comments.iter().any(|(id, _)| id == "RIG-360"),
+            "once-guard: should NOT re-post comment when already escalated, got: {comments:?}"
         );
     }
 
