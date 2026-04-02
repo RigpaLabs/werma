@@ -16,8 +16,17 @@ pub enum AgentRuntime {
 }
 
 impl AgentRuntime {
+    /// All known runtime variants.
+    pub const ALL: &[AgentRuntime] = &[
+        Self::ClaudeCode,
+        Self::Codex,
+        Self::GeminiCli,
+        Self::QwenCode,
+    ];
+
     /// Whether this runtime is trusted for unsupervised execution.
-    /// Trusted runtimes can run on any repo without an explicit allowlist entry.
+    /// Trusted runtimes can run on any repo without an explicit allowlist entry
+    /// (used by `UserConfig::is_runtime_allowed` as the default allowlist).
     /// Untrusted runtimes require explicit `repo_runtimes` configuration.
     pub fn is_trusted(self) -> bool {
         matches!(self, Self::ClaudeCode | Self::Codex)
