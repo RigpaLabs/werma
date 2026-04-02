@@ -418,7 +418,10 @@ mod tests {
         std::fs::write(&path, "[repo_pipelines]\nfathom = \"economy\"\n").unwrap();
 
         let cfg = UserConfig::load_from(&path);
-        assert_eq!(cfg.active_pipeline("fathom"), cfg.pipeline_for_repo("fathom"));
+        assert_eq!(
+            cfg.active_pipeline("fathom"),
+            cfg.pipeline_for_repo("fathom")
+        );
         assert_eq!(cfg.active_pipeline("werma"), "default");
     }
 
