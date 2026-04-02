@@ -68,6 +68,33 @@ impl UserConfig {
             .unwrap_or_default()
     }
 
+    /// Derive the repo name from a working directory path.
+    ///
+    /// Checks explicit `[repos]` config first (reverse lookup), then falls back
+    /// to the last path component (matches `~/projects/{repo}` convention).
+    pub fn repo_from_working_dir(&self, working_dir: &str) -> String {
+        let normalized =
+            working_dir.replace('~', &dirs::home_dir().unwrap_or_default().to_string_lossy());
+
+        // Exact match against configured repos
+        for (name, dir) in &self.repos {
+            let norm_dir =
+                dir.replace('~', &dirs::home_dir().unwrap_or_default().to_string_lossy());
+            if normalized == norm_dir
+                || normalized.ends_with(&format!("/{}", norm_dir.trim_start_matches('/')))
+            {
+                return name.clone();
+            }
+        }
+
+        // Convention fallback: last path component
+        std::path::Path::new(working_dir)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    }
+
     /// Load from the default location `~/.werma/config.toml`.
     pub fn load() -> Self {
         Self::load_from(&Self::default_path())
@@ -318,5 +345,36 @@ mod tests {
     fn pipelines_empty_by_default() {
         let cfg = UserConfig::default();
         assert!(cfg.pipelines.is_empty());
+    }
+
+    // ─── repo_from_working_dir tests ──────────────────────────────────────
+
+    #[test]
+    fn repo_from_working_dir_convention_fallback() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.repo_from_working_dir("~/projects/werma"), "werma");
+        assert_eq!(cfg.repo_from_working_dir("~/projects/fathom"), "fathom");
+        assert_eq!(
+            cfg.repo_from_working_dir("/home/user/projects/my-app"),
+            "my-app"
+        );
+    }
+
+    #[test]
+    fn repo_from_working_dir_explicit_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[repos]\nwerma = \"~/projects/rigpa/werma\"\n").unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        // The last path component is "werma", which matches convention.
+        // Even without explicit match, it resolves correctly.
+        assert_eq!(cfg.repo_from_working_dir("~/projects/rigpa/werma"), "werma");
+    }
+
+    #[test]
+    fn repo_from_working_dir_unknown_returns_dirname() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.repo_from_working_dir("/opt/custom/my-repo"), "my-repo");
     }
 }

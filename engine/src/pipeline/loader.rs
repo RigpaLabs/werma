@@ -13,6 +13,42 @@ pub fn load_default() -> Result<PipelineConfig> {
     Ok(config)
 }
 
+/// Load a pipeline config by name.
+///
+/// - `"default"` → the compiled-in builtin pipeline.
+/// - Any other name → looks for `~/.werma/pipelines/{name}.yaml` on disk.
+/// - Falls back to the builtin default with a warning if the named pipeline is not found.
+pub fn load_named(name: &str) -> Result<PipelineConfig> {
+    if name == "default" {
+        return load_default();
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        let path = home.join(format!(".werma/pipelines/{name}.yaml"));
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read pipeline {}", path.display()))?;
+            let config = load_from_str(&content, &path.display().to_string())?;
+            warn_deprecated_per_stage(&config);
+            return Ok(config);
+        }
+    }
+
+    eprintln!(
+        "warning: pipeline '{name}' not found in ~/.werma/pipelines/{name}.yaml — using 'default'"
+    );
+    load_default()
+}
+
+/// Load the pipeline config for a specific working directory, consulting
+/// `UserConfig::active_pipeline()` to select the right pipeline name.
+pub fn load_for_working_dir(working_dir: &str) -> Result<PipelineConfig> {
+    let user_cfg = crate::config::UserConfig::load();
+    let repo = user_cfg.repo_from_working_dir(working_dir);
+    let pipeline_name = user_cfg.active_pipeline(&repo);
+    load_named(pipeline_name)
+}
+
 /// Warn once if a stale runtime override exists from a previous `werma pipeline eject`.
 fn warn_stale_runtime_override() {
     use std::sync::Once;
@@ -242,5 +278,50 @@ stages:
     fn resolve_builtin_devops_prompt() {
         let content = builtin_prompt("prompts/devops.md");
         assert!(content.is_some());
+    }
+
+    #[test]
+    fn load_named_default_returns_builtin() {
+        let config = load_named("default").unwrap();
+        assert_eq!(config.pipeline, "default");
+        assert!(!config.stages.is_empty());
+    }
+
+    #[test]
+    fn load_named_unknown_falls_back_to_default() {
+        // Non-existent pipeline name should fallback to default with a warning.
+        let config = load_named("nonexistent-pipeline").unwrap();
+        assert_eq!(config.pipeline, "default");
+    }
+
+    #[test]
+    fn load_named_from_file() {
+        let home = dirs::home_dir().unwrap();
+        let pipelines_dir = home.join(".werma/pipelines");
+        std::fs::create_dir_all(&pipelines_dir).unwrap();
+
+        let economy_path = pipelines_dir.join("test-economy.yaml");
+        let yaml = r#"
+pipeline: test-economy
+stages:
+  engineer:
+    agent: pipeline-engineer
+    model: sonnet
+"#;
+        std::fs::write(&economy_path, yaml).unwrap();
+
+        let config = load_named("test-economy").unwrap();
+        assert_eq!(config.pipeline, "test-economy");
+        assert!(config.stages.contains_key("engineer"));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&economy_path);
+    }
+
+    #[test]
+    fn load_for_working_dir_uses_default_when_no_override() {
+        // With no pipeline override configured, should return default.
+        let config = load_for_working_dir("~/projects/some-repo").unwrap();
+        assert_eq!(config.pipeline, "default");
     }
 }

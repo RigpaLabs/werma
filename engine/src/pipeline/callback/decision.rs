@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use super::super::config::StageConfig;
 use super::super::helpers::truncate_lines;
-use super::super::loader::load_default;
+use super::super::loader::load_for_working_dir;
 use super::super::pr::{get_pr_review_verdict, has_open_pr_for_issue, pr_title_from_url};
 use super::super::verdict::{
     extract_review_body, is_max_turns_exit, parse_comments, parse_estimate, parse_pr_url,
@@ -58,7 +58,7 @@ pub fn decide_callback(
     working_dir: &str,
     cmd: &dyn CommandRunner,
 ) -> Result<CallbackDecision> {
-    let config = load_default()?;
+    let config = load_for_working_dir(working_dir)?;
     let mut effects: Vec<Effect> = Vec::new();
     let mut internal = InternalChanges {
         spawn_task: None,

@@ -539,7 +539,8 @@ fn resolve_fallback_model(task: &Task) -> Option<String> {
     if task.pipeline_stage.is_empty() {
         return None;
     }
-    let config = crate::pipeline::loader::load_default().ok()?;
+    // RIG-367: Use repo-specific pipeline config to resolve fallback model.
+    let config = crate::pipeline::loader::load_for_working_dir(&task.working_dir).ok()?;
     let stage_cfg = config.stage(&task.pipeline_stage)?;
     stage_cfg
         .fallback

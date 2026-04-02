@@ -42,6 +42,8 @@ pub fn cmd_pipeline_validate() -> Result<()> {
 pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<()> {
     let db = crate::open_db()?;
     let linear_client = linear::LinearClient::new()?;
+    // Start with the default pipeline for stage validation; per-issue tasks
+    // may use a repo-specific pipeline below (RIG-367).
     let config = pipeline::loader::load_default()?;
 
     // Detect if a stage name was passed as a positional arg (e.g. `werma pipeline run RIG-178 analyst`).
@@ -119,9 +121,13 @@ pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<(
         }
         let estimate = 0; // Will be set by analyst if applicable
 
+        // RIG-367: Use repo-specific pipeline config for task creation.
+        let repo_config =
+            pipeline::loader::load_for_working_dir(&working_dir).unwrap_or_else(|_| config.clone());
+
         let task_id = pipeline::create_initial_stage_task(
             &db,
-            &config,
+            &repo_config,
             &effective_stage,
             &ident,
             &title,
