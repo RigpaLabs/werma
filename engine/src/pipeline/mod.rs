@@ -237,10 +237,17 @@ pub fn status(db: &Db, linear: Option<&dyn LinearApi>) -> Result<()> {
 // ─── CLI commands ─────────────────────────────────────────────────────────────
 
 /// `werma pipeline show [--stage <name>] [--pipeline <name>]` — pretty-print pipeline config.
+///
+/// When `--pipeline` is not given, resolves via `load_for_working_dir` so that
+/// `werma pipeline switch` overrides are respected (RIG-367).
 pub fn cmd_show(stage_filter: Option<&str>, pipeline_name: Option<&str>) -> Result<()> {
-    let config = match pipeline_name {
-        Some(name) => loader::load_named(name)?,
-        None => loader::load_default()?,
+    let config = if let Some(name) = pipeline_name {
+        loader::load_named(name)?
+    } else {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        loader::load_for_working_dir(&cwd)?
     };
 
     println!("\nPipeline: {} — {}", config.pipeline, config.description);
@@ -254,6 +261,22 @@ pub fn cmd_show(stage_filter: Option<&str>, pipeline_name: Option<&str>) -> Resu
             println!("  {k}: {preview}{ellipsis}");
         }
     }
+
+    // Collect untrusted runtimes for post-display warning.
+    let untrusted_stages: Vec<_> = config
+        .stages
+        .iter()
+        .filter_map(|(name, stage)| {
+            let rt = stage
+                .runtime
+                .unwrap_or(crate::models::AgentRuntime::ClaudeCode);
+            if rt.is_trusted() {
+                None
+            } else {
+                Some((name.clone(), rt))
+            }
+        })
+        .collect();
 
     println!("\nStages:");
     for (name, stage) in &config.stages {
@@ -298,8 +321,17 @@ pub fn cmd_show(stage_filter: Option<&str>, pipeline_name: Option<&str>) -> Resu
         if on_start_str != "(none)" {
             println!("    on_start:  {on_start_str}");
         }
+        let runtime = stage
+            .runtime
+            .unwrap_or(crate::models::AgentRuntime::ClaudeCode);
+        let runtime_warning = if !runtime.is_trusted() {
+            " ⚠ requires [repo_runtimes] allowlist"
+        } else {
+            ""
+        };
         println!("    agent:     {}", stage.agent);
         println!("    model:     {}", stage.model);
+        println!("    runtime:   {runtime}{runtime_warning}");
         println!("    manual:    {manual_str}");
         println!("    prompt:    {prompt_str}");
 
@@ -315,6 +347,28 @@ pub fn cmd_show(stage_filter: Option<&str>, pipeline_name: Option<&str>) -> Resu
             }
         }
     }
+
+    if !untrusted_stages.is_empty() {
+        println!("\n⚠ This pipeline uses untrusted runtimes that require explicit allowlisting.");
+        println!("  Add to ~/.werma/config.toml:");
+        println!("  [repo_runtimes]");
+        let runtimes: std::collections::BTreeSet<_> = untrusted_stages
+            .iter()
+            .map(|(_, rt)| rt.to_string())
+            .chain(std::iter::once("claude-code".to_string()))
+            .collect();
+        let runtimes_str: Vec<_> = runtimes.iter().map(|r| format!("\"{r}\"")).collect();
+        println!("  your-repo = [{}]", runtimes_str.join(", "));
+        println!(
+            "  Without this, stages {} will be silently skipped.",
+            untrusted_stages
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
     println!();
     Ok(())
 }
