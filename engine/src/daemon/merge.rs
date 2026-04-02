@@ -206,70 +206,15 @@ mod tests {
         assert_eq!(moves[0].0, "issue-2");
     }
 
-    /// Tracker where get_issues_by_status always fails (e.g. no API key).
-    struct FailTracker;
-
-    impl LinearApi for FailTracker {
-        fn get_issues_by_status(&self, _: &str) -> Result<Vec<serde_json::Value>> {
-            Err(anyhow::anyhow!("no API key"))
-        }
-        fn get_issues_by_label(&self, _: &str) -> Result<Vec<serde_json::Value>> {
-            Ok(vec![])
-        }
-        fn get_issue(&self, _: &str) -> Result<(String, String)> {
-            Ok((String::new(), String::new()))
-        }
-        fn get_issue_by_identifier(
-            &self,
-            _: &str,
-        ) -> Result<(String, String, String, String, Vec<String>)> {
-            Ok((
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-                vec![],
-            ))
-        }
-        fn move_issue_by_name(&self, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
-        fn comment(&self, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
-        fn attach_url(&self, _: &str, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
-        fn update_estimate(&self, _: &str, _: i32) -> Result<()> {
-            Ok(())
-        }
-        fn remove_label(&self, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
-        fn add_label(&self, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
-        fn get_issue_status(&self, _: &str) -> Result<String> {
-            Ok(String::new())
-        }
-        fn get_issue_state_and_team(&self, _: &str) -> Result<(String, String)> {
-            Ok((String::new(), String::new()))
-        }
-        fn list_comments(&self, _: &str, _: Option<&str>) -> Result<Vec<(String, String, String)>> {
-            Ok(vec![])
-        }
-        fn get_sub_issues(&self, _: &str) -> Result<Vec<(String, String, String, String)>> {
-            Ok(vec![])
-        }
-    }
-
     #[test]
     fn tracker_api_failure_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
 
+        let tracker = FakeLinearApi::new();
+        tracker.fail_next_n_status_fetches(1);
         let github = FakeGitHub { merged_prs: vec![] };
-        let merged = check_merged_prs(dir.path(), &FailTracker, &github).unwrap();
+        let merged = check_merged_prs(dir.path(), &tracker, &github).unwrap();
         assert!(!merged);
     }
 
