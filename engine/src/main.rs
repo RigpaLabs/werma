@@ -309,6 +309,9 @@ fn main() -> anyhow::Result<()> {
                 cli::PipelineAction::Run { issues, stage } => {
                     commands::pipeline_cmd::cmd_pipeline_run(&issues, stage.as_deref())?;
                 }
+                cli::PipelineAction::Switch { repo, pipeline } => {
+                    commands::pipeline_cmd::cmd_pipeline_switch(&repo, &pipeline)?;
+                }
             }
         }
 

@@ -20,6 +20,11 @@ pub struct UserConfig {
     /// Repo label → local directory mapping.
     /// Example: `werma = "~/projects/werma"`
     pub repos: HashMap<String, String>,
+
+    /// Repo label → active pipeline name mapping.
+    /// Example: `fathom = "economy"` — use the economy pipeline for fathom issues.
+    /// Defaults to "default" for any repo not listed here.
+    pub pipelines: HashMap<String, String>,
 }
 
 impl UserConfig {
@@ -44,6 +49,15 @@ impl UserConfig {
     /// Return all explicitly configured repo mappings.
     pub fn all_repos(&self) -> HashMap<String, String> {
         self.repos.clone()
+    }
+
+    /// Return the active pipeline name for a repo.
+    /// Falls back to "default" if no override is configured.
+    pub fn active_pipeline(&self, repo: &str) -> &str {
+        self.pipelines
+            .get(repo)
+            .map(String::as_str)
+            .unwrap_or("default")
     }
 
     /// Load config from a specific path; returns `Default` on missing/invalid file.
@@ -278,5 +292,31 @@ mod tests {
         assert!(cfg.repos.is_empty());
         let repos = cfg.all_repos();
         assert!(repos.is_empty());
+    }
+
+    // ─── Pipeline config tests ─────────────────────────────────────────────
+
+    #[test]
+    fn active_pipeline_defaults_to_default() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.active_pipeline("fathom"), "default");
+        assert_eq!(cfg.active_pipeline("werma"), "default");
+    }
+
+    #[test]
+    fn active_pipeline_returns_configured_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[pipelines]\nfathom = \"economy\"\n").unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        assert_eq!(cfg.active_pipeline("fathom"), "economy");
+        assert_eq!(cfg.active_pipeline("werma"), "default"); // not overridden
+    }
+
+    #[test]
+    fn pipelines_empty_by_default() {
+        let cfg = UserConfig::default();
+        assert!(cfg.pipelines.is_empty());
     }
 }
