@@ -164,18 +164,18 @@ fn remove_stale_worktree(working_dir: &Path, worktree_path: &Path) -> Result<()>
         }
     }
 
-    // Fallback: prune git's worktree list and remove directory manually
-    let _ = Command::new("git")
-        .args(["worktree", "prune"])
-        .current_dir(working_dir)
-        .output();
-
+    // Fallback: remove directory first, then prune git's worktree list
     std::fs::remove_dir_all(worktree_path).with_context(|| {
         format!(
             "removing stale worktree directory {}",
             worktree_path.display()
         )
     })?;
+
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(working_dir)
+        .output();
 
     Ok(())
 }
