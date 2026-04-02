@@ -9,6 +9,8 @@ mod dashboard;
 #[allow(dead_code)]
 mod db;
 #[allow(dead_code)]
+mod github;
+#[allow(dead_code)]
 mod linear;
 mod migrate;
 #[allow(dead_code)]
