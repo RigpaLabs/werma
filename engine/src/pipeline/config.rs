@@ -590,7 +590,7 @@ stages:
 
     #[test]
     fn effective_model_boundary_at_threshold() {
-        // Custom config with threshold=3: SP 3 → light, SP 4 → base
+        // Custom config with threshold=3: SP 3 → light, SP 5 → base
         let yaml = r#"
 pipeline: test
 stages:
@@ -603,7 +603,7 @@ stages:
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
         let eng = config.stage("eng").unwrap();
         assert_eq!(eng.effective_model(3, 0), "haiku", "at threshold → light");
-        assert_eq!(eng.effective_model(4, 0), "opus", "above threshold → base");
+        assert_eq!(eng.effective_model(5, 0), "opus", "above threshold → base");
     }
 
     #[test]
