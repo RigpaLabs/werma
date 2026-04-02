@@ -82,6 +82,29 @@ pub(crate) fn pr_exists_for_issue(
     }
 }
 
+/// Build the issue link string for a PR body.
+///
+/// For Linear issues with `WERMA_LINEAR_WORKSPACE` set, produces:
+///   `\n\nLinear: https://linear.app/{workspace}/issue/{id}`
+/// For GitHub issues, produces:
+///   `\n\nIssue: https://github.com/{owner}/{repo}/issues/{number}`
+/// Fallback (Linear without workspace env): still includes the identifier.
+fn build_issue_link(linear_issue_id: &str, _task_id: &str) -> String {
+    if let Some(url) = crate::project::ProjectResolver::issue_url(linear_issue_id) {
+        let label = match crate::project::ProjectResolver::tracker(linear_issue_id) {
+            Some(crate::project::Tracker::Linear) => "Linear",
+            _ => "Issue",
+        };
+        format!("\n\n{label}: {url}")
+    } else {
+        eprintln!(
+            "auto-PR: could not generate issue URL for {linear_issue_id} — \
+                 for Linear issues, set WERMA_LINEAR_WORKSPACE to your workspace slug."
+        );
+        format!("\n\nIssue: {linear_issue_id}")
+    }
+}
+
 /// Automatically create a GitHub PR from the engineer's worktree branch.
 ///
 /// Returns the PR URL if successful, or None if:
@@ -157,33 +180,43 @@ pub(crate) fn auto_create_pr(
     let existing_pr = cmd
         .run(
             "gh",
-            &["pr", "view", "--json", "url", "-q", ".url"],
+            &[
+                "pr",
+                "view",
+                "--json",
+                "url,body",
+                "-q",
+                ".url + \"\\n\" + .body",
+            ],
             Some(&working_dir),
         )
         .context("gh pr view")?;
     if existing_pr.success {
-        let url = existing_pr.stdout_str();
+        let output = existing_pr.stdout_str();
+        // First line = URL, rest = body
+        let mut lines = output.splitn(2, '\n');
+        let url = lines.next().unwrap_or("").to_string();
+        let body = lines.next().unwrap_or("");
         if !url.is_empty() {
+            // RIG-380: if the PR body is missing the required Linear URL, update it.
+            let expected_link = build_issue_link(linear_issue_id, task_id);
+            if !body.contains("linear.app/") && expected_link.contains("linear.app/") {
+                let new_body =
+                    format!("## Summary\nPipeline engineer task `{task_id}`.{expected_link}");
+                let _ = cmd.run(
+                    "gh",
+                    &["pr", "edit", &url, "--body", &new_body],
+                    Some(&working_dir),
+                );
+                eprintln!("[auto-PR] {linear_issue_id}: updated PR body with Linear URL");
+            }
             return Ok(Some(url));
         }
     }
 
     // 6. Create PR
     let pr_title = format!("{linear_issue_id} feat: implementation");
-    let issue_link = if let Some(url) = crate::project::ProjectResolver::issue_url(linear_issue_id)
-    {
-        let label = match crate::project::ProjectResolver::tracker(linear_issue_id) {
-            Some(crate::project::Tracker::Linear) => "Linear",
-            _ => "Issue",
-        };
-        format!("\n\n{label}: {url}")
-    } else {
-        eprintln!(
-            "auto-PR: could not generate issue URL for {linear_issue_id} — \
-                 for Linear issues, set WERMA_LINEAR_WORKSPACE to your workspace slug."
-        );
-        format!("\n\nIssue: {linear_issue_id}")
-    };
+    let issue_link = build_issue_link(linear_issue_id, task_id);
     let pr_body = format!("## Summary\nPipeline engineer task `{task_id}`.{issue_link}");
 
     let output = cmd
@@ -830,5 +863,64 @@ mod tests {
 
         let found = pr_exists_for_issue(&cmd, "/tmp", "RIG-100", "open");
         assert!(!found, "gh failure should return false (safe default)");
+    }
+
+    // ─── RIG-380: build_issue_link + PR body update ──────────────────────
+
+    #[test]
+    fn build_issue_link_without_workspace_env() {
+        // When WERMA_LINEAR_WORKSPACE is unset, fallback is "Issue: {id}"
+        let link = build_issue_link("RIG-380", "task-1");
+        assert!(
+            link.contains("RIG-380"),
+            "link should always contain the issue ID"
+        );
+    }
+
+    #[test]
+    fn auto_create_pr_updates_body_when_linear_url_missing() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("feat/rig-380-fix"); // git branch
+        cmd.push_success("abc123 fix: dedup"); // git log
+        cmd.push_success(""); // git push
+        // gh pr view returns URL + body (body has "Issue: RIG-380" but no linear.app/)
+        cmd.push_success(
+            "https://github.com/org/repo/pull/219\n## Summary\nPipeline engineer task `t-1`.\n\nIssue: RIG-380",
+        );
+        // gh pr edit (may or may not be called depending on env)
+        cmd.push_success("");
+
+        let result = auto_create_pr(&cmd, "/tmp", "RIG-380", "t-1").unwrap();
+        assert_eq!(
+            result,
+            Some("https://github.com/org/repo/pull/219".to_string()),
+            "should return existing PR URL"
+        );
+    }
+
+    #[test]
+    fn auto_create_pr_skips_body_update_when_linear_url_present() {
+        let cmd = FakeCommandRunner::new();
+        cmd.push_success("feat/rig-380-fix"); // git branch
+        cmd.push_success("abc123 fix: dedup"); // git log
+        cmd.push_success(""); // git push
+        // gh pr view returns URL + body that already has linear.app/ URL
+        cmd.push_success(
+            "https://github.com/org/repo/pull/219\n## Summary\n\nLinear: https://linear.app/rigpa/issue/RIG-380",
+        );
+
+        let result = auto_create_pr(&cmd, "/tmp", "RIG-380", "t-1").unwrap();
+        assert_eq!(
+            result,
+            Some("https://github.com/org/repo/pull/219".to_string()),
+        );
+
+        // Should NOT have called gh pr edit (only 4 calls: branch, log, push, pr view)
+        let calls = cmd.calls.borrow();
+        assert_eq!(
+            calls.len(),
+            4,
+            "should not call gh pr edit when body already has Linear URL"
+        );
     }
 }
