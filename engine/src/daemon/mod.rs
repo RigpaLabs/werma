@@ -25,6 +25,10 @@ const ZOMBIE_CHECK_INTERVAL_SECS: u64 = 30;
 const CANCEL_CHECK_INTERVAL_SECS: u64 = 60;
 const CLEANLINESS_CHECK_INTERVAL_SECS: u64 = 30;
 const CLEANLINESS_COOLDOWN_SECS: u64 = 300;
+/// How long (in seconds) to suppress duplicate notifications for the same task.
+/// Prevents ghost duplicate macOS/Slack alerts when DB writes fail transiently
+/// and the zombie/cancel check re-fires on the next poll.
+const NOTIFICATION_COOLDOWN_SECS: u64 = 300;
 
 // ─── Traits for external dependencies ────────────────────────────────────
 
@@ -108,6 +112,11 @@ pub fn run(werma_dir: &Path) -> Result<()> {
 
     let mut cleanliness_notified: std::collections::HashMap<PathBuf, Instant> =
         std::collections::HashMap::new();
+    // Per-task notification deduplication: maps task_id → last notification Instant.
+    // Shared across zombie and cancel_check to prevent duplicate alerts when DB writes
+    // fail transiently and the same task is re-evaluated on the next poll tick.
+    let mut notified_tasks: std::collections::HashMap<String, Instant> =
+        std::collections::HashMap::new();
     let mut last_zombie_check = Instant::now();
     let mut last_cancel_check = Instant::now() - Duration::from_secs(CANCEL_CHECK_INTERVAL_SECS);
     let mut last_cleanliness_check =
@@ -154,7 +163,14 @@ pub fn run(werma_dir: &Path) -> Result<()> {
             }
 
             if last_zombie_check.elapsed() >= Duration::from_secs(ZOMBIE_CHECK_INTERVAL_SECS) {
-                if let Err(e) = zombie::check_zombie_tasks(&db, werma_dir, &tmux, &notifier) {
+                if let Err(e) = zombie::check_zombie_tasks(
+                    &db,
+                    werma_dir,
+                    &tmux,
+                    &notifier,
+                    &mut notified_tasks,
+                    NOTIFICATION_COOLDOWN_SECS,
+                ) {
                     log_daemon(&log_path, &format!("zombie check error: {e}"));
                 }
                 last_zombie_check = Instant::now();
@@ -168,6 +184,8 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                         lp,
                         &notifier,
                         &expected_team_keys,
+                        &mut notified_tasks,
+                        NOTIFICATION_COOLDOWN_SECS,
                     ) {
                         log_daemon(&log_path, &format!("cancel check error: {e}"));
                     }
@@ -552,7 +570,8 @@ mod tests {
         let tmux = FakeTmux::new(0);
         let notifier = FakeNotifier::new();
 
-        zombie::check_zombie_tasks(&db, werma_dir.path(), &tmux, &notifier).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        zombie::check_zombie_tasks(&db, werma_dir.path(), &tmux, &notifier, &mut nt, 300).unwrap();
 
         let updated = db.task("20260326-z01").unwrap().unwrap();
         assert_eq!(updated.status, Status::Failed);
@@ -574,7 +593,16 @@ mod tests {
 
         let tmux = FakeTmux::new(1).with_alive(vec!["werma-20260326-z02".to_string()]);
 
-        zombie::check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        zombie::check_zombie_tasks(
+            &db,
+            werma_dir.path(),
+            &tmux,
+            &FakeNotifier::new(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
 
         let updated = db.task("20260326-z02").unwrap().unwrap();
         assert_eq!(updated.status, Status::Running);
@@ -608,7 +636,8 @@ mod tests {
         // Zombie check with empty db succeeds
         let tmux = FakeTmux::new(0);
         let notifier = FakeNotifier::new();
-        zombie::check_zombie_tasks(&db, werma_dir.path(), &tmux, &notifier).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        zombie::check_zombie_tasks(&db, werma_dir.path(), &tmux, &notifier, &mut nt, 300).unwrap();
 
         // Then pipeline processing also succeeds independently
         pipeline::process_completed_tasks(
@@ -656,7 +685,9 @@ mod tests {
         assert!(result.is_ok());
 
         // 3. Zombie check (no running tasks — no-op)
-        let result = zombie::check_zombie_tasks(&db, werma_dir.path(), &tmux, &notifier);
+        let mut nt = std::collections::HashMap::new();
+        let result =
+            zombie::check_zombie_tasks(&db, werma_dir.path(), &tmux, &notifier, &mut nt, 300);
         assert!(result.is_ok());
 
         // 4. Queue launch (no pending tasks — returns false)
@@ -691,7 +722,16 @@ mod tests {
         db.insert_task(&completed).unwrap();
 
         let tmux = FakeTmux::new(0);
-        zombie::check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        zombie::check_zombie_tasks(
+            &db,
+            werma_dir.path(),
+            &tmux,
+            &FakeNotifier::new(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
 
         assert_eq!(
             db.task("20260326-z03").unwrap().unwrap().status,

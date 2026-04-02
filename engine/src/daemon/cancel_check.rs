@@ -23,12 +23,18 @@ const STUCK_THRESHOLD_SECS: i64 = 7200; // 2 hours
 ///
 /// `expected_team_keys`: all configured team keys. If the issue's team is not in this set,
 /// the task is canceled (moved to an unmanaged team).
+///
+/// `notified_tasks` / `notification_cooldown_secs`: per-task notification deduplication.
+/// Notifications within `notification_cooldown_secs` of the last notification for a given
+/// task are suppressed to prevent ghost duplicate alerts across consecutive daemon polls.
 pub fn check_canceled_and_stuck(
     db: &dyn TaskRepository,
     werma_dir: &Path,
     linear: &dyn LinearApi,
     notifier: &dyn Notifier,
     expected_team_keys: &[String],
+    notified_tasks: &mut std::collections::HashMap<String, std::time::Instant>,
+    notification_cooldown_secs: u64,
 ) -> Result<()> {
     let log_path = werma_dir.join("logs/daemon.log");
 
@@ -80,6 +86,8 @@ pub fn check_canceled_and_stuck(
                 task,
                 &format!("Linear issue {} was Canceled", task.linear_issue_id),
                 notifier,
+                notified_tasks,
+                notification_cooldown_secs,
             );
             continue;
         }
@@ -100,6 +108,8 @@ pub fn check_canceled_and_stuck(
                     expected_team_keys.join(", ")
                 ),
                 notifier,
+                notified_tasks,
+                notification_cooldown_secs,
             );
             continue;
         }
@@ -120,18 +130,26 @@ pub fn check_canceled_and_stuck(
                         );
                         log_daemon(&log_path, &format!("STUCK: {msg}"));
 
-                        let label = crate::notify::format_notify_label(
-                            &task.id,
-                            &task.task_type,
-                            &task.linear_issue_id,
-                        );
-                        notifier.notify_macos("werma: stuck task", &msg, "Basso");
-                        notifier.notify_slack(
-                            "#werma-alerts",
-                            &format!(
-                                ":hourglass: *{label}* — running for {hours:.1}h, may be stuck"
-                            ),
-                        );
+                        let within_cooldown = notified_tasks.get(&task.id).is_some_and(|last| {
+                            last.elapsed()
+                                < std::time::Duration::from_secs(notification_cooldown_secs)
+                        });
+
+                        if !within_cooldown {
+                            let label = crate::notify::format_notify_label(
+                                &task.id,
+                                &task.task_type,
+                                &task.linear_issue_id,
+                            );
+                            notifier.notify_macos("werma: stuck task", &msg, "Basso");
+                            notifier.notify_slack(
+                                "#werma-alerts",
+                                &format!(
+                                    ":hourglass: *{label}* — running for {hours:.1}h, may be stuck"
+                                ),
+                            );
+                            notified_tasks.insert(task.id.clone(), std::time::Instant::now());
+                        }
 
                         // Kill the tmux session and mark as failed.
                         let session_name = format!("werma-{}", task.id);
@@ -169,12 +187,17 @@ pub fn check_canceled_and_stuck(
 }
 
 /// Cancel a task: kill tmux session (if running), set status to Canceled, notify.
+///
+/// Notifications are suppressed if the task was already notified within
+/// `notification_cooldown_secs` to prevent duplicate alerts across polls.
 fn cancel_task(
     db: &dyn TaskRepository,
     log_path: &Path,
     task: &crate::models::Task,
     reason: &str,
     notifier: &dyn Notifier,
+    notified_tasks: &mut std::collections::HashMap<String, std::time::Instant>,
+    notification_cooldown_secs: u64,
 ) {
     log_daemon(log_path, &format!("CANCEL: {} — {reason}", task.id));
 
@@ -206,17 +229,24 @@ fn cancel_task(
         );
     }
 
-    let label =
-        crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);
-    notifier.notify_macos(
-        "werma: task canceled",
-        &format!("{label} — {reason}"),
-        "Basso",
-    );
-    notifier.notify_slack(
-        "#werma-alerts",
-        &format!(":no_entry_sign: *{label}* — {reason}"),
-    );
+    let within_cooldown = notified_tasks.get(&task.id).is_some_and(|last| {
+        last.elapsed() < std::time::Duration::from_secs(notification_cooldown_secs)
+    });
+
+    if !within_cooldown {
+        let label =
+            crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);
+        notifier.notify_macos(
+            "werma: task canceled",
+            &format!("{label} — {reason}"),
+            "Basso",
+        );
+        notifier.notify_slack(
+            "#werma-alerts",
+            &format!(":no_entry_sign: *{label}* — {reason}"),
+        );
+        notified_tasks.insert(task.id.clone(), std::time::Instant::now());
+    }
 }
 
 #[cfg(test)]
@@ -279,12 +309,15 @@ mod tests {
         let linear = FakeLinearApi::new();
         linear.set_issue_status("RIG-270", "canceled");
 
+        let mut nt = std::collections::HashMap::new();
         check_canceled_and_stuck(
             &db,
             werma_dir.path(),
             &linear,
             &FakeNotifier::new(),
             &rig_keys(),
+            &mut nt,
+            300,
         )
         .unwrap();
 
@@ -306,12 +339,15 @@ mod tests {
         // Issue moved to UNKNOWN team — not in expected_team_keys.
         linear.set_issue_state_and_team("RIG-270", "started", "UNKNOWN");
 
+        let mut nt = std::collections::HashMap::new();
         check_canceled_and_stuck(
             &db,
             werma_dir.path(),
             &linear,
             &FakeNotifier::new(),
             &rig_keys(),
+            &mut nt,
+            300,
         )
         .unwrap();
 
@@ -334,12 +370,15 @@ mod tests {
         linear.set_issue_state_and_team("RIG-270", "started", "FAT");
 
         let multi_keys = vec!["RIG".to_string(), "FAT".to_string()];
+        let mut nt = std::collections::HashMap::new();
         check_canceled_and_stuck(
             &db,
             werma_dir.path(),
             &linear,
             &FakeNotifier::new(),
             &multi_keys,
+            &mut nt,
+            300,
         )
         .unwrap();
 
@@ -360,12 +399,15 @@ mod tests {
         let linear = FakeLinearApi::new();
         linear.set_issue_status("RIG-271", "canceled");
 
+        let mut nt = std::collections::HashMap::new();
         check_canceled_and_stuck(
             &db,
             werma_dir.path(),
             &linear,
             &FakeNotifier::new(),
             &rig_keys(),
+            &mut nt,
+            300,
         )
         .unwrap();
 
@@ -386,12 +428,15 @@ mod tests {
         let linear = FakeLinearApi::new();
         linear.set_issue_status("RIG-272", "canceled");
 
+        let mut nt = std::collections::HashMap::new();
         check_canceled_and_stuck(
             &db,
             werma_dir.path(),
             &linear,
             &FakeNotifier::new(),
             &rig_keys(),
+            &mut nt,
+            300,
         )
         .unwrap();
 
@@ -407,12 +452,15 @@ mod tests {
 
         let linear = FakeLinearApi::new();
 
+        let mut nt = std::collections::HashMap::new();
         check_canceled_and_stuck(
             &db,
             werma_dir.path(),
             &linear,
             &FakeNotifier::new(),
             &rig_keys(),
+            &mut nt,
+            300,
         )
         .unwrap();
     }
@@ -430,12 +478,15 @@ mod tests {
         // Issue is still in progress, same team
         linear.set_issue_status("RIG-273", "in_progress");
 
+        let mut nt = std::collections::HashMap::new();
         check_canceled_and_stuck(
             &db,
             werma_dir.path(),
             &linear,
             &FakeNotifier::new(),
             &rig_keys(),
+            &mut nt,
+            300,
         )
         .unwrap();
 
@@ -458,12 +509,15 @@ mod tests {
         let linear = FakeLinearApi::new();
         linear.set_issue_status("RIG-275", "canceled");
 
+        let mut nt = std::collections::HashMap::new();
         check_canceled_and_stuck(
             &db,
             werma_dir.path(),
             &linear,
             &FakeNotifier::new(),
             &rig_keys(),
+            &mut nt,
+            300,
         )
         .unwrap();
 
@@ -488,7 +542,17 @@ mod tests {
 
         let notifier = FakeNotifier::new();
 
-        check_canceled_and_stuck(&db, werma_dir.path(), &linear, &notifier, &rig_keys()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        check_canceled_and_stuck(
+            &db,
+            werma_dir.path(),
+            &linear,
+            &notifier,
+            &rig_keys(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
 
         assert_eq!(notifier.macos_calls.borrow().len(), 1);
         assert_eq!(notifier.slack_calls.borrow().len(), 1);
@@ -512,12 +576,15 @@ mod tests {
         let linear = FakeLinearApi::new();
         linear.set_issue_status("RIG-350", "canceled");
 
+        let mut nt = std::collections::HashMap::new();
         check_canceled_and_stuck(
             &repo,
             werma_dir.path(),
             &linear,
             &FakeNotifier::new(),
             &rig_keys(),
+            &mut nt,
+            300,
         )
         .unwrap();
 
@@ -538,12 +605,15 @@ mod tests {
         let linear = FakeLinearApi::new();
         linear.set_issue_status("RIG-351", "in_progress");
 
+        let mut nt = std::collections::HashMap::new();
         check_canceled_and_stuck(
             &repo,
             werma_dir.path(),
             &linear,
             &FakeNotifier::new(),
             &rig_keys(),
+            &mut nt,
+            300,
         )
         .unwrap();
 
@@ -563,16 +633,97 @@ mod tests {
         let linear = FakeLinearApi::new();
         linear.set_issue_status("RIG-352", "canceled");
 
+        let mut nt = std::collections::HashMap::new();
         check_canceled_and_stuck(
             &repo,
             werma_dir.path(),
             &linear,
             &FakeNotifier::new(),
             &rig_keys(),
+            &mut nt,
+            300,
         )
         .unwrap();
 
         let updated = repo.task("20260325-003").unwrap().unwrap();
         assert_eq!(updated.status, Status::Canceled);
+    }
+
+    // ─── Dedup / cooldown tests ───────────────────────────────────────────
+
+    #[test]
+    fn cancel_notification_suppressed_within_cooldown() {
+        let db = Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_pipeline_task("20260380-cc1", "RIG-380", Status::Running);
+        db.insert_task(&task).unwrap();
+
+        let linear = FakeLinearApi::new();
+        linear.set_issue_status("RIG-380", "canceled");
+
+        let notifier = FakeNotifier::new();
+
+        // Pre-populate cooldown map — simulates a notification fired just now
+        let mut nt = std::collections::HashMap::new();
+        nt.insert("20260380-cc1".to_string(), std::time::Instant::now());
+
+        check_canceled_and_stuck(
+            &db,
+            werma_dir.path(),
+            &linear,
+            &notifier,
+            &rig_keys(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
+
+        // DB work still happened
+        let updated = db.task("20260380-cc1").unwrap().unwrap();
+        assert_eq!(updated.status, Status::Canceled);
+
+        // Notification suppressed — duplicate prevented
+        assert!(
+            notifier.macos_calls.borrow().is_empty(),
+            "cancel notification must be suppressed within cooldown"
+        );
+    }
+
+    #[test]
+    fn cancel_notification_fires_after_cooldown() {
+        let db = Db::open_in_memory().unwrap();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_pipeline_task("20260380-cc2", "RIG-380", Status::Running);
+        db.insert_task(&task).unwrap();
+
+        let linear = FakeLinearApi::new();
+        linear.set_issue_status("RIG-380", "canceled");
+
+        let notifier = FakeNotifier::new();
+
+        // Pre-populate map but use cooldown_secs=0 → always fires
+        let mut nt = std::collections::HashMap::new();
+        nt.insert("20260380-cc2".to_string(), std::time::Instant::now());
+
+        check_canceled_and_stuck(
+            &db,
+            werma_dir.path(),
+            &linear,
+            &notifier,
+            &rig_keys(),
+            &mut nt,
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(
+            notifier.macos_calls.borrow().len(),
+            1,
+            "notification must fire when cooldown is 0"
+        );
     }
 }

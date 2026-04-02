@@ -14,11 +14,17 @@ use super::log_daemon;
 ///
 /// Case 2 catches the bug where claude exits silently but tmux keeps the session
 /// alive (e.g., due to `remain-on-exit` or process tree issues).
+///
+/// `notified_tasks` tracks task IDs that were recently notified, keyed to the time
+/// of last notification. Notifications within `notification_cooldown_secs` are suppressed
+/// to prevent duplicate macOS/Slack alerts for the same task across consecutive polls.
 pub fn check_zombie_tasks(
     db: &dyn TaskRepository,
     werma_dir: &Path,
     tmux: &impl TmuxSession,
     notifier: &dyn Notifier,
+    notified_tasks: &mut std::collections::HashMap<String, std::time::Instant>,
+    notification_cooldown_secs: u64,
 ) -> Result<()> {
     let log_path = werma_dir.join("logs/daemon.log");
     let running = db.list_tasks(Some(crate::models::Status::Running))?;
@@ -34,6 +40,8 @@ pub fn check_zombie_tasks(
                 task,
                 "tmux session died unexpectedly",
                 notifier,
+                notified_tasks,
+                notification_cooldown_secs,
             );
             continue;
         }
@@ -91,6 +99,8 @@ pub fn check_zombie_tasks(
                 task,
                 &format!("process died in live tmux session{diag}"),
                 notifier,
+                notified_tasks,
+                notification_cooldown_secs,
             );
         }
     }
@@ -99,12 +109,17 @@ pub fn check_zombie_tasks(
 }
 
 /// Mark a task as zombie (failed) and send notifications.
+///
+/// Notifications are suppressed if the task was already notified within
+/// `notification_cooldown_secs` to prevent duplicate alerts across polls.
 fn mark_zombie(
     db: &dyn TaskRepository,
     log_path: &Path,
     task: &crate::models::Task,
     reason: &str,
     notifier: &dyn Notifier,
+    notified_tasks: &mut std::collections::HashMap<String, std::time::Instant>,
+    notification_cooldown_secs: u64,
 ) {
     log_daemon(
         log_path,
@@ -125,14 +140,21 @@ fn mark_zombie(
         );
     }
 
-    let label =
-        crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);
-    notifier.notify_macos(
-        "werma: zombie task detected",
-        &format!("{label} — {reason}"),
-        "Basso",
-    );
-    notifier.notify_slack("#werma-alerts", &format!(":zombie: *{label}* — {reason}"));
+    let within_cooldown = notified_tasks.get(&task.id).is_some_and(|last| {
+        last.elapsed() < std::time::Duration::from_secs(notification_cooldown_secs)
+    });
+
+    if !within_cooldown {
+        let label =
+            crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);
+        notifier.notify_macos(
+            "werma: zombie task detected",
+            &format!("{label} — {reason}"),
+            "Basso",
+        );
+        notifier.notify_slack("#werma-alerts", &format!(":zombie: *{label}* — {reason}"));
+        notified_tasks.insert(task.id.clone(), std::time::Instant::now());
+    }
 }
 
 /// Check worktree for recent file modifications and warn if idle >5 min.
@@ -290,7 +312,16 @@ mod tests {
         // No alive sessions — zombie detected
         let tmux = FakeTmux::new(vec![]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        check_zombie_tasks(
+            &db,
+            werma_dir.path(),
+            &tmux,
+            &FakeNotifier::new(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
 
         let updated = db.task("20260313-999").unwrap().unwrap();
         assert_eq!(updated.status, Status::Failed);
@@ -336,7 +367,16 @@ mod tests {
 
         let tmux = FakeTmux::new(vec![]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        check_zombie_tasks(
+            &db,
+            werma_dir.path(),
+            &tmux,
+            &FakeNotifier::new(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
 
         let updated = db.task("20260313-998").unwrap().unwrap();
         assert_eq!(updated.status, Status::Completed);
@@ -354,7 +394,16 @@ mod tests {
         // Session is alive with process running — should not be marked as zombie
         let tmux = FakeTmux::new(vec!["werma-20260313-997".to_string()]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        check_zombie_tasks(
+            &db,
+            werma_dir.path(),
+            &tmux,
+            &FakeNotifier::new(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
 
         let updated = db.task("20260313-997").unwrap().unwrap();
         assert_eq!(updated.status, Status::Running);
@@ -373,7 +422,16 @@ mod tests {
         // Session exists but process inside is dead (the core bug scenario)
         let tmux = FakeTmux::new(vec![]).with_dead_process(vec!["werma-20260313-995".to_string()]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        check_zombie_tasks(
+            &db,
+            werma_dir.path(),
+            &tmux,
+            &FakeNotifier::new(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
 
         let updated = db.task("20260313-995").unwrap().unwrap();
         assert_eq!(updated.status, Status::Failed);
@@ -393,7 +451,16 @@ mod tests {
 
         let tmux = FakeTmux::new(vec!["werma-20260313-001".to_string()]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        check_zombie_tasks(
+            &db,
+            werma_dir.path(),
+            &tmux,
+            &FakeNotifier::new(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
 
         // 001 should still be running
         let t1 = db.task("20260313-001").unwrap().unwrap();
@@ -413,7 +480,16 @@ mod tests {
 
         let tmux = FakeTmux::new(vec![]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        check_zombie_tasks(
+            &db,
+            werma_dir.path(),
+            &tmux,
+            &FakeNotifier::new(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -427,7 +503,16 @@ mod tests {
 
         let tmux = FakeTmux::new(vec![]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        check_zombie_tasks(
+            &db,
+            werma_dir.path(),
+            &tmux,
+            &FakeNotifier::new(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
 
         let updated = db.task("20260313-996").unwrap().unwrap();
         let finished = updated.finished_at.unwrap();
@@ -453,7 +538,16 @@ mod tests {
         let tmux = FakeTmux::new(vec!["werma-20260313-010".to_string()])
             .with_dead_process(vec!["werma-20260313-011".to_string()]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        check_zombie_tasks(
+            &db,
+            werma_dir.path(),
+            &tmux,
+            &FakeNotifier::new(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
 
         assert_eq!(
             db.task("20260313-010").unwrap().unwrap().status,
@@ -480,7 +574,16 @@ mod tests {
 
         let tmux = FakeTmux::new(vec![]).with_dead_process(vec!["werma-20260313-994".to_string()]);
 
-        check_zombie_tasks(&db, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        check_zombie_tasks(
+            &db,
+            werma_dir.path(),
+            &tmux,
+            &FakeNotifier::new(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
 
         // Check that a diagnostic entry was written to the task log
         let task_log = werma_dir.path().join("logs/20260313-994.log");
@@ -502,7 +605,16 @@ mod tests {
         repo.insert_task(&task).unwrap();
 
         let tmux = FakeTmux::new(vec![]);
-        check_zombie_tasks(&repo, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        check_zombie_tasks(
+            &repo,
+            werma_dir.path(),
+            &tmux,
+            &FakeNotifier::new(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
 
         let updated = repo.task("20260325-001").unwrap().unwrap();
         assert_eq!(updated.status, Status::Failed);
@@ -519,7 +631,16 @@ mod tests {
         repo.insert_task(&task).unwrap();
 
         let tmux = FakeTmux::new(vec!["werma-20260325-002".to_string()]);
-        check_zombie_tasks(&repo, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        check_zombie_tasks(
+            &repo,
+            werma_dir.path(),
+            &tmux,
+            &FakeNotifier::new(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
 
         let updated = repo.task("20260325-002").unwrap().unwrap();
         assert_eq!(updated.status, Status::Running);
@@ -537,7 +658,16 @@ mod tests {
         repo.insert_task(&dead).unwrap();
 
         let tmux = FakeTmux::new(vec!["werma-20260325-010".to_string()]);
-        check_zombie_tasks(&repo, werma_dir.path(), &tmux, &FakeNotifier::new()).unwrap();
+        let mut nt = std::collections::HashMap::new();
+        check_zombie_tasks(
+            &repo,
+            werma_dir.path(),
+            &tmux,
+            &FakeNotifier::new(),
+            &mut nt,
+            300,
+        )
+        .unwrap();
 
         assert_eq!(
             repo.task("20260325-010").unwrap().unwrap().status,
@@ -546,6 +676,93 @@ mod tests {
         assert_eq!(
             repo.task("20260325-011").unwrap().unwrap().status,
             Status::Failed
+        );
+    }
+
+    // ─── Dedup / cooldown tests ───────────────────────────────────────────
+
+    #[test]
+    fn notification_suppressed_within_cooldown() {
+        // Pre-populate notified_tasks with the task ID to simulate a recent notification.
+        // The DB work (mark as Failed) must still happen, but the notification must be skipped.
+        let repo = FakeTaskRepo::new();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_running_task("20260380-dup1");
+        repo.insert_task(&task).unwrap();
+
+        let tmux = FakeTmux::new(vec![]); // session gone → zombie
+        let notifier = FakeNotifier::new();
+
+        let mut nt = std::collections::HashMap::new();
+        // Simulate: this task was notified just now (within 300s cooldown)
+        nt.insert("20260380-dup1".to_string(), std::time::Instant::now());
+
+        check_zombie_tasks(&repo, werma_dir.path(), &tmux, &notifier, &mut nt, 300).unwrap();
+
+        // DB work still happened
+        let updated = repo.task("20260380-dup1").unwrap().unwrap();
+        assert_eq!(updated.status, Status::Failed);
+
+        // Notification suppressed — duplicate prevented
+        assert!(
+            notifier.macos_calls.borrow().is_empty(),
+            "notification must be suppressed within cooldown"
+        );
+    }
+
+    #[test]
+    fn notification_fires_after_cooldown_expires() {
+        // cooldown_secs = 0 means any elapsed duration satisfies the condition.
+        let repo = FakeTaskRepo::new();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_running_task("20260380-dup2");
+        repo.insert_task(&task).unwrap();
+
+        let tmux = FakeTmux::new(vec![]);
+        let notifier = FakeNotifier::new();
+
+        let mut nt = std::collections::HashMap::new();
+        // Simulate prior notification, but with 0-second cooldown → always fires again
+        nt.insert("20260380-dup2".to_string(), std::time::Instant::now());
+
+        check_zombie_tasks(&repo, werma_dir.path(), &tmux, &notifier, &mut nt, 0).unwrap();
+
+        assert_eq!(
+            notifier.macos_calls.borrow().len(),
+            1,
+            "notification must fire when cooldown is 0"
+        );
+    }
+
+    #[test]
+    fn first_notification_always_fires() {
+        // Empty notified_tasks → no cooldown history → notification must fire.
+        let repo = FakeTaskRepo::new();
+        let werma_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
+
+        let task = make_running_task("20260380-dup3");
+        repo.insert_task(&task).unwrap();
+
+        let tmux = FakeTmux::new(vec![]);
+        let notifier = FakeNotifier::new();
+
+        let mut nt = std::collections::HashMap::new();
+        check_zombie_tasks(&repo, werma_dir.path(), &tmux, &notifier, &mut nt, 300).unwrap();
+
+        assert_eq!(
+            notifier.macos_calls.borrow().len(),
+            1,
+            "first notification must always fire"
+        );
+        // Map should be updated with the task ID
+        assert!(
+            nt.contains_key("20260380-dup3"),
+            "notified_tasks must be updated after notification"
         );
     }
 }
