@@ -20,6 +20,7 @@ mod notify;
 mod pipeline;
 mod project;
 mod runner;
+mod tracker;
 mod traits;
 mod ui;
 mod update;

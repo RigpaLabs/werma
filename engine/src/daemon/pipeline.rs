@@ -4,8 +4,10 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::db::Db;
+use crate::linear::LinearApi;
+use crate::models::Status;
+use crate::pipeline;
 use crate::traits::{CommandRunner, Notifier};
-use crate::{linear, pipeline};
 
 use super::log_daemon;
 
@@ -14,12 +16,16 @@ const MAX_CALLBACK_ATTEMPTS: i32 = 5;
 
 /// Process completed tasks that have Linear integration but haven't been pushed yet.
 /// Pipeline tasks get routed through `pipeline::callback()` to advance the issue state.
-/// Non-pipeline tasks get a comment + move-to-Done via `linear.push()`.
+/// Non-pipeline tasks get a comment + move-to-Done via `linear`.
+///
+/// `linear` is `None` when `LINEAR_API_KEY` is not configured. In that case, research
+/// completion and non-pipeline push operations are silently skipped.
 pub fn process_completed_tasks(
     db: &Db,
     werma_dir: &Path,
     cmd_runner: &dyn CommandRunner,
     _notifier: &dyn Notifier,
+    linear: Option<&dyn LinearApi>,
 ) -> Result<()> {
     let log_path = werma_dir.join("logs/daemon.log");
     let tasks = db.unpushed_linear_tasks()?;
@@ -27,18 +33,6 @@ pub fn process_completed_tasks(
     if tasks.is_empty() {
         return Ok(());
     }
-
-    // Create shared instances for all tasks in this batch.
-    let linear_client = match linear::LinearClient::new() {
-        Ok(c) => Some(c),
-        Err(e) => {
-            log_daemon(
-                &log_path,
-                &format!("LinearClient init failed (will skip pipeline callbacks): {e}"),
-            );
-            None
-        }
-    };
 
     let now = chrono::Local::now().naive_local();
 
@@ -180,14 +174,14 @@ pub fn process_completed_tasks(
                 }
             }
         } else if task.task_type == "research" {
-            let Some(ref linear_client) = linear_client else {
+            let Some(client) = linear else {
                 continue;
             };
             // Research task: post summary comment and create curator follow-up.
             let output_file = werma_dir.join(format!("logs/{}-output.md", task.id));
             let output = std::fs::read_to_string(&output_file).unwrap_or_default();
 
-            match pipeline::handle_research_completion(db, task, &output, linear_client) {
+            match pipeline::handle_research_completion(db, task, &output, client) {
                 Ok(()) => {
                     db.set_linear_pushed(&task.id, true)?;
                     log_daemon(
@@ -207,7 +201,16 @@ pub fn process_completed_tasks(
             }
         } else {
             // Non-pipeline task with linear_issue_id: push comment + move to Done.
-            match linear::LinearClient::new().and_then(|client| client.push(db, &task.id)) {
+            // Only act when a linear client is available and the identifier is a Linear issue.
+            let Some(client) = linear else {
+                continue;
+            };
+            if crate::project::ProjectResolver::tracker(&task.linear_issue_id)
+                != Some(crate::project::Tracker::Linear)
+            {
+                continue;
+            }
+            match push_via_linear(db, task, client) {
                 Ok(()) => {
                     db.set_linear_pushed(&task.id, true)?;
                     log_daemon(
@@ -225,6 +228,46 @@ pub fn process_completed_tasks(
         }
     }
 
+    Ok(())
+}
+
+/// Push a task result to Linear using the `LinearApi` trait.
+///
+/// Posts a status comment and, for completed tasks, moves the issue to Done.
+/// Mirrors the logic previously in `LinearClient::push()`, but works with any
+/// `&dyn LinearApi` so the caller doesn't need a concrete `LinearClient`.
+fn push_via_linear(
+    db: &Db,
+    task: &crate::models::Task,
+    linear: &dyn LinearApi,
+) -> anyhow::Result<()> {
+    // Read output file if exists (first 100 lines)
+    let output_preview = if !task.output_path.is_empty() {
+        let path = std::path::Path::new(&task.output_path);
+        if path.exists() {
+            let content = std::fs::read_to_string(path)?;
+            let lines: Vec<&str> = content.lines().take(100).collect();
+            lines.join("\n")
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    let status_str = task.status.to_string();
+    let mut comment = format!("**Werma task `{}`** — status: **{status_str}**\n", task.id);
+    if !output_preview.is_empty() {
+        comment.push_str(&format!(
+            "\n<details><summary>Output preview</summary>\n\n```\n{output_preview}\n```\n</details>"
+        ));
+    }
+
+    linear.comment(&task.linear_issue_id, &comment)?;
+    if task.status == Status::Completed {
+        linear.move_issue_by_name(&task.linear_issue_id, "done")?;
+    }
+    db.set_linear_pushed(&task.id, true)?;
     Ok(())
 }
 
@@ -366,6 +409,7 @@ mod tests {
             dir.path(),
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
+            None,
         )
         .unwrap();
     }
@@ -404,6 +448,7 @@ mod tests {
             dir.path(),
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
+            None,
         )
         .unwrap();
 
@@ -434,6 +479,7 @@ mod tests {
             dir.path(),
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
+            None,
         );
 
         let log_content =
@@ -602,6 +648,7 @@ mod tests {
             dir.path(),
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
+            None,
         )
         .unwrap();
 
@@ -670,6 +717,7 @@ mod tests {
             dir.path(),
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
+            None,
         );
         assert!(result.is_ok());
     }
@@ -722,6 +770,7 @@ mod tests {
             dir.path(),
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
+            None,
         );
 
         let log_content =
@@ -750,6 +799,7 @@ mod tests {
             dir.path(),
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
+            None,
         );
 
         let log_content =
@@ -776,6 +826,7 @@ mod tests {
             dir.path(),
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
+            None,
         );
 
         let log_content =
@@ -811,6 +862,7 @@ mod tests {
             dir.path(),
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
+            None,
         )
         .unwrap();
 

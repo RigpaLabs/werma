@@ -15,6 +15,74 @@ const DEFAULT_REPO_BASE: &str = "~/projects";
 // Default allowed runtimes are derived from `AgentRuntime::is_trusted()` — no
 // separate constant needed.  See `is_runtime_allowed()` and `allowed_runtimes_for_repo()`.
 
+/// GitHub owner + repo pair for per-repo tracker override.
+///
+/// ```toml
+/// [tracker.github]
+/// my-oss-project = { owner = "arleyar", repo = "my-oss-project" }
+/// ```
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct GitHubTrackerEntry {
+    pub owner: String,
+    pub repo: String,
+}
+
+/// Tracker selection config.
+///
+/// ```toml
+/// [tracker]
+/// default = "linear"          # "linear" or "github"
+///
+/// [tracker.github]
+/// my-oss-project = { owner = "arleyar", repo = "my-oss-project" }
+/// ```
+///
+/// Repos not listed under `[tracker.github]` fall back to `default`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct TrackerConfig {
+    /// Default tracker for repos not explicitly mapped. Defaults to `"linear"`.
+    #[serde(default = "default_tracker")]
+    pub default: String,
+
+    /// Repo label → GitHub owner/repo pair.
+    pub github: HashMap<String, GitHubTrackerEntry>,
+}
+
+fn default_tracker() -> String {
+    "linear".to_string()
+}
+
+impl TrackerConfig {
+    /// Which tracker handles the given repo label.
+    ///
+    /// Returns `"github"` when the repo is listed under `[tracker.github]`,
+    /// otherwise falls back to `self.default` (usually `"linear"`).
+    ///
+    /// Called by future GitHub Issues integration (RIG-324b) — not yet wired to runtime.
+    #[allow(dead_code)]
+    pub fn tracker_for_repo(&self, repo: &str) -> &str {
+        if self.github.contains_key(repo) {
+            "github"
+        } else {
+            &self.default
+        }
+    }
+
+    /// Look up the GitHub owner/repo pair for a given repo label.
+    ///
+    /// Returns `None` when no explicit GitHub mapping is configured for this repo.
+    ///
+    /// Called by future GitHub Issues integration (RIG-324b) — not yet wired to runtime.
+    #[allow(dead_code)]
+    pub fn github_entry(&self, repo: &str) -> Option<&GitHubTrackerEntry> {
+        self.github.get(repo)
+    }
+}
+
 /// User-level configuration loaded from `~/.werma/config.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
@@ -37,6 +105,12 @@ pub struct UserConfig {
     /// Repos not listed here allow only trusted runtimes (see `AgentRuntime::is_trusted`).
     #[serde(default)]
     pub repo_runtimes: HashMap<String, Vec<String>>,
+
+    /// Per-repo tracker selection (Linear vs GitHub Issues).
+    /// Read by future GitHub Issues runtime (RIG-324b) — parsed from config but not yet dispatched.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub tracker: TrackerConfig,
 }
 
 impl UserConfig {
