@@ -55,9 +55,18 @@ Or clone and build:
 
 ```bash
 git clone https://github.com/RigpaLabs/werma
+cd werma
+make build-release
+# Binary at engine/target/release/werma (codesigned automatically on macOS)
+```
+
+Or manually:
+
+```bash
 cd werma/engine
 cargo build --release
-# Binary at target/release/werma
+# macOS: codesign to prevent Gatekeeper from killing the binary (exit 137)
+codesign --force --sign - target/release/werma
 ```
 
 ### Requirements
