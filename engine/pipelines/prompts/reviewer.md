@@ -9,13 +9,9 @@ The issue context is provided above in the ---ISSUE--- block.
 
 {previous_review}
 
-## FIRST: Invoke the Code Review skill
-Before starting the review, invoke the `/code-review` skill using the Skill tool (skill: "code-review:code-review"). This loads the full review checklist and standards you MUST follow.
-
-## Review Protocol
-1. Invoke `/code-review` skill (Skill tool, skill: "code-review:code-review")
+{reviewer_skill_section}
 2. Run `git diff main...HEAD` to see the actual code diff
-3. For each file modified in the diff — read the **full file** using the Read tool to understand context, existing patterns, and surrounding code
+3. For each file modified in the diff — read the **full file** using the Read tool to understand context, existing patterns, and surrounding code. **For files larger than 500 lines, read only the sections relevant to the diff** (use `offset`/`limit` parameters) rather than the full file, to avoid context overload.
 4. Review the changes for correctness, security, missing tests, and style — with full file context
 5. Classify issues as **blocker** or **nit**
 6. Decision criteria:

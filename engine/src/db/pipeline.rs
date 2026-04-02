@@ -305,6 +305,31 @@ impl super::Db {
         Ok(count)
     }
 
+    /// Get the `finished_at` timestamp of the most recently failed task for an issue+stage.
+    /// Returns `None` if no failed tasks exist or if `finished_at` is NULL.
+    /// Used by the poller to impose a cooldown between rapid failure retries (RIG-357).
+    pub fn last_failed_task_time_for_issue_stage(
+        &self,
+        issue_id: &str,
+        stage: &str,
+    ) -> Result<Option<String>> {
+        let result: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT finished_at FROM tasks
+                 WHERE linear_issue_id = ?1
+                   AND pipeline_stage = ?2
+                   AND status = 'failed'
+                   AND finished_at IS NOT NULL
+                 ORDER BY finished_at DESC
+                 LIMIT 1",
+                params![issue_id, stage],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(result)
+    }
+
     // --- PR Reviewed ---
 
     pub fn is_pr_reviewed(&self, pr_key: &str) -> Result<bool> {
@@ -1042,5 +1067,87 @@ mod tests {
         db.set_task_status("20260325-003", Status::Running).unwrap();
 
         assert!(!db.has_running_pipeline_task_for_issue("RIG-296").unwrap());
+    }
+
+    // ─── RIG-357: last_failed_task_time_for_issue_stage ─────────────────
+
+    #[test]
+    fn last_failed_task_time_none_when_no_tasks() {
+        let db = Db::open_in_memory().unwrap();
+        let result = db
+            .last_failed_task_time_for_issue_stage("RIG-357", "reviewer")
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn last_failed_task_time_returns_most_recent() {
+        let db = Db::open_in_memory().unwrap();
+
+        // Two failed tasks with different finished_at
+        let mut t1 = make_test_task("20260401-001");
+        t1.linear_issue_id = "RIG-357".to_string();
+        t1.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&t1).unwrap();
+        db.set_task_status("20260401-001", Status::Failed).unwrap();
+        db.update_task_field("20260401-001", "finished_at", "2026-04-01T10:00:00")
+            .unwrap();
+
+        let mut t2 = make_test_task("20260401-002");
+        t2.linear_issue_id = "RIG-357".to_string();
+        t2.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&t2).unwrap();
+        db.set_task_status("20260401-002", Status::Failed).unwrap();
+        db.update_task_field("20260401-002", "finished_at", "2026-04-01T11:00:00")
+            .unwrap();
+
+        let result = db
+            .last_failed_task_time_for_issue_stage("RIG-357", "reviewer")
+            .unwrap();
+        assert_eq!(result, Some("2026-04-01T11:00:00".to_string()));
+    }
+
+    #[test]
+    fn last_failed_task_time_ignores_completed_tasks() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut t1 = make_test_task("20260401-003");
+        t1.linear_issue_id = "RIG-357".to_string();
+        t1.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&t1).unwrap();
+        db.set_task_status("20260401-003", Status::Completed)
+            .unwrap();
+        db.update_task_field("20260401-003", "finished_at", "2026-04-01T10:00:00")
+            .unwrap();
+
+        let result = db
+            .last_failed_task_time_for_issue_stage("RIG-357", "reviewer")
+            .unwrap();
+        assert!(result.is_none(), "completed tasks should not be returned");
+    }
+
+    #[test]
+    fn last_failed_task_time_filters_by_stage() {
+        let db = Db::open_in_memory().unwrap();
+
+        let mut t1 = make_test_task("20260401-004");
+        t1.linear_issue_id = "RIG-357".to_string();
+        t1.pipeline_stage = "engineer".to_string();
+        db.insert_task(&t1).unwrap();
+        db.set_task_status("20260401-004", Status::Failed).unwrap();
+        db.update_task_field("20260401-004", "finished_at", "2026-04-01T10:00:00")
+            .unwrap();
+
+        // Different stage → should not match
+        let result = db
+            .last_failed_task_time_for_issue_stage("RIG-357", "reviewer")
+            .unwrap();
+        assert!(result.is_none());
+
+        // Same stage → should match
+        let result = db
+            .last_failed_task_time_for_issue_stage("RIG-357", "engineer")
+            .unwrap();
+        assert_eq!(result, Some("2026-04-01T10:00:00".to_string()));
     }
 }
