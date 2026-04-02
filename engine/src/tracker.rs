@@ -31,14 +31,21 @@ pub fn linear_for_identifier(identifier: &str) -> Option<Box<dyn LinearApi>> {
 
 /// Return a Linear client unconditionally (identifier-type-agnostic).
 ///
+/// Use when you need actionable error messages (e.g. CLI commands).
+/// Returns a descriptive error when `LINEAR_API_KEY` is not configured.
+pub fn try_linear_client() -> anyhow::Result<Box<dyn LinearApi>> {
+    let client = LinearClient::new()?;
+    Ok(Box::new(client) as Box<dyn LinearApi>)
+}
+
+/// Return a Linear client unconditionally (identifier-type-agnostic).
+///
 /// Use at daemon startup where you want a single shared client for all Linear
 /// operations in the tick (effects processing, cancel-check, etc.).
 ///
 /// Returns `None` when `LINEAR_API_KEY` is not configured.
 pub fn linear_client() -> Option<Box<dyn LinearApi>> {
-    LinearClient::new()
-        .ok()
-        .map(|c| Box::new(c) as Box<dyn LinearApi>)
+    try_linear_client().ok()
 }
 
 #[cfg(test)]

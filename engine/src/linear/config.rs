@@ -127,7 +127,9 @@ pub fn configured_team_keys() -> Result<Vec<String>> {
 /// Return `true` if `identifier` is a Linear-style identifier (e.g. `RIG-123`).
 ///
 /// Returns `false` for GitHub identifiers (`owner/repo#45`), UUIDs, or anything else.
-/// Use this to guard Linear API calls before attempting to route to Linear.
+///
+/// Prefer [`crate::tracker::linear_for_identifier`] to get a ready-to-use client
+/// rather than calling this guard manually.
 pub fn is_linear_identifier(identifier: &str) -> bool {
     matches!(
         crate::project::ProjectResolver::tracker(identifier),
