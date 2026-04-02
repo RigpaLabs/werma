@@ -140,6 +140,18 @@ fn fake_issue_with_state(
     labels: &[&str],
     state_type: &str,
 ) -> serde_json::Value {
+    fake_issue_full(id, identifier, title, labels, state_type, 3)
+}
+
+/// Helper with explicit state type and estimate (story points).
+fn fake_issue_full(
+    id: &str,
+    identifier: &str,
+    title: &str,
+    labels: &[&str],
+    state_type: &str,
+    estimate: i32,
+) -> serde_json::Value {
     let label_nodes: Vec<serde_json::Value> = labels.iter().map(|l| json!({"name": l})).collect();
 
     json!({
@@ -148,7 +160,7 @@ fn fake_issue_with_state(
         "title": title,
         "description": "test description",
         "priority": 2,
-        "estimate": 3,
+        "estimate": estimate,
         "state": {"type": state_type},
         "labels": {"nodes": label_nodes}
     })
@@ -1558,5 +1570,191 @@ fn outbox_full_cycle_callback_to_processor() {
     assert!(
         remaining.is_empty(),
         "no effects should remain pending after processor run, got: {remaining:?}"
+    );
+}
+
+// ─── RIG-373: light_model routing tests ─────────────────────────────────────
+
+// Integration test: poll creates engineer task with sonnet for low-SP issue (≤3).
+#[test]
+fn poll_engineer_low_sp_gets_sonnet() {
+    ensure_working_dir();
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+
+    // 2 SP issue → should get light_model (sonnet) since threshold=3
+    let issue = fake_issue_full(
+        "uuid-373a",
+        "RIG-373A",
+        "Small task",
+        &["Feature", "repo:werma"],
+        "started",
+        2,
+    );
+    linear.set_issues_for_status("in_progress", vec![issue]);
+
+    poll(&db, &linear, &cmd).unwrap();
+
+    let tasks = db
+        .tasks_by_linear_issue("RIG-373A", Some("engineer"), false)
+        .unwrap();
+    assert_eq!(tasks.len(), 1, "engineer task should be created");
+    assert_eq!(
+        tasks[0].model, "sonnet",
+        "2 SP issue should get light_model (sonnet), got: {}",
+        tasks[0].model
+    );
+}
+
+// Integration test: poll creates engineer task with opus for high-SP issue (5+).
+#[test]
+fn poll_engineer_high_sp_gets_opus() {
+    ensure_working_dir();
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+
+    // 5 SP issue → should get base model (opus) since above threshold
+    let issue = fake_issue_full(
+        "uuid-373b",
+        "RIG-373B",
+        "Complex task",
+        &["Feature", "repo:werma"],
+        "started",
+        5,
+    );
+    linear.set_issues_for_status("in_progress", vec![issue]);
+
+    poll(&db, &linear, &cmd).unwrap();
+
+    let tasks = db
+        .tasks_by_linear_issue("RIG-373B", Some("engineer"), false)
+        .unwrap();
+    assert_eq!(tasks.len(), 1, "engineer task should be created");
+    assert_eq!(
+        tasks[0].model, "opus",
+        "5 SP issue should get base model (opus), got: {}",
+        tasks[0].model
+    );
+}
+
+// Integration test: poll creates engineer task with opus for unset estimate (0).
+#[test]
+fn poll_engineer_zero_estimate_gets_opus() {
+    ensure_working_dir();
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+
+    // 0 SP (unset) → should get base model (opus)
+    let issue = fake_issue_full(
+        "uuid-373c",
+        "RIG-373C",
+        "Unestimated task",
+        &["Feature", "repo:werma"],
+        "started",
+        0,
+    );
+    linear.set_issues_for_status("in_progress", vec![issue]);
+
+    poll(&db, &linear, &cmd).unwrap();
+
+    let tasks = db
+        .tasks_by_linear_issue("RIG-373C", Some("engineer"), false)
+        .unwrap();
+    assert_eq!(tasks.len(), 1, "engineer task should be created");
+    assert_eq!(
+        tasks[0].model, "opus",
+        "0 SP (unset) issue should get base model (opus), got: {}",
+        tasks[0].model
+    );
+}
+
+// Integration test: poll creates engineer task with sonnet at exact threshold (3 SP).
+#[test]
+fn poll_engineer_at_threshold_gets_sonnet() {
+    ensure_working_dir();
+    let db = Db::open_in_memory().unwrap();
+    let linear = FakeLinearApi::new();
+    let cmd = FakeCommandRunner::new();
+
+    // 3 SP issue → at threshold, should get light_model (sonnet)
+    let issue = fake_issue_full(
+        "uuid-373d",
+        "RIG-373D",
+        "Threshold task",
+        &["Feature", "repo:werma"],
+        "started",
+        3,
+    );
+    linear.set_issues_for_status("in_progress", vec![issue]);
+
+    poll(&db, &linear, &cmd).unwrap();
+
+    let tasks = db
+        .tasks_by_linear_issue("RIG-373D", Some("engineer"), false)
+        .unwrap();
+    assert_eq!(tasks.len(), 1, "engineer task should be created");
+    assert_eq!(
+        tasks[0].model, "sonnet",
+        "3 SP (at threshold) should get light_model (sonnet), got: {}",
+        tasks[0].model
+    );
+}
+
+// Integration test: spawned reviewer task uses recheck_model on re-review regardless of SP.
+#[test]
+fn callback_reviewer_recheck_model_on_rerejection() {
+    ensure_working_dir();
+    let db = Db::open_in_memory().unwrap();
+    let cmd = FakeCommandRunner::new();
+
+    // Create a completed reviewer task for the issue (simulating round 0).
+    let mut reviewer_task = make_test_task("20260401-373e");
+    reviewer_task.linear_issue_id = "RIG-373E".to_string();
+    reviewer_task.pipeline_stage = "reviewer".to_string();
+    reviewer_task.task_type = "pipeline-reviewer".to_string();
+    reviewer_task.status = Status::Completed;
+    reviewer_task.estimate = 2; // low SP
+    db.insert_task(&reviewer_task).unwrap();
+
+    // Create the engineer task that will be re-spawned after rejection.
+    let mut engineer_task = make_test_task("20260401-373e-eng");
+    engineer_task.linear_issue_id = "RIG-373E".to_string();
+    engineer_task.pipeline_stage = "engineer".to_string();
+    engineer_task.task_type = "pipeline-engineer".to_string();
+    engineer_task.status = Status::Completed;
+    engineer_task.estimate = 2;
+    db.insert_task(&engineer_task).unwrap();
+
+    // Engineer re-completes after rejection fix.
+    let output = "## Fix\nFixed the issue.\n\nPR_URL=https://github.com/RigpaLabs/werma/pull/100\nVERDICT=DONE";
+
+    callback(
+        &db,
+        &engineer_task.id,
+        "engineer",
+        output,
+        "RIG-373E",
+        "~/projects/werma",
+        &cmd,
+    )
+    .unwrap();
+
+    // Reviewer should be spawned. Since there's already 1 completed reviewer task,
+    // this is round 1 → should use recheck_model (sonnet), not light_model.
+    let reviewer_tasks = db
+        .tasks_by_linear_issue("RIG-373E", Some("reviewer"), false)
+        .unwrap();
+    let spawned: Vec<_> = reviewer_tasks
+        .iter()
+        .filter(|t| t.status == Status::Pending)
+        .collect();
+    assert_eq!(spawned.len(), 1, "reviewer task should be spawned");
+    assert_eq!(
+        spawned[0].model, "sonnet",
+        "re-review (round 1) should use recheck_model (sonnet), got: {}",
+        spawned[0].model
     );
 }

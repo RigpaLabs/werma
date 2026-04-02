@@ -449,6 +449,7 @@ pub mod fakes {
         pub description: String,
         pub status: String,
         pub labels: Vec<String>,
+        pub estimate: Option<i32>,
     }
 
     /// Call record for StatefulFakeLinearApi call tracking.
@@ -529,6 +530,20 @@ pub mod fakes {
             status: &str,
             labels: Vec<String>,
         ) {
+            self.add_issue_with_estimate(id, identifier, title, description, status, labels, None);
+        }
+
+        /// Seed an issue with a specific estimate (story points).
+        pub fn add_issue_with_estimate(
+            &self,
+            id: &str,
+            identifier: &str,
+            title: &str,
+            description: &str,
+            status: &str,
+            labels: Vec<String>,
+            estimate: Option<i32>,
+        ) {
             let state = IssueState {
                 id: id.to_string(),
                 identifier: identifier.to_string(),
@@ -536,6 +551,7 @@ pub mod fakes {
                 description: description.to_string(),
                 status: status.to_string(),
                 labels,
+                estimate,
             };
             self.issues.borrow_mut().insert(id.to_string(), state);
             self.identifier_to_uuid
@@ -601,12 +617,13 @@ pub mod fakes {
                 .map(|l| serde_json::json!({"name": l}))
                 .collect();
             let state_type = status_to_state_type(&issue.status);
+            let estimate = issue.estimate.unwrap_or(3);
             serde_json::json!({
                 "id": issue.id.to_string(),
                 "identifier": issue.identifier,
                 "title": issue.title,
                 "description": issue.description,
-                "estimate": 3,
+                "estimate": estimate,
                 "state": {"type": state_type},
                 "labels": {"nodes": label_nodes}
             })

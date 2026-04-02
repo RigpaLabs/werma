@@ -277,8 +277,8 @@ stages:
     agent: pipeline-engineer
     model: opus
     fallback: sonnet
-    light_model: opus
-    light_threshold: 2
+    light_model: sonnet
+    light_threshold: 3
     max_turns: 40
     manual: skip
     transitions:
@@ -533,8 +533,8 @@ stages:
     fn light_model_deserialized() {
         let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
         let engineer = config.stage("engineer").unwrap();
-        assert_eq!(engineer.light_model.as_deref(), Some("opus"));
-        assert_eq!(engineer.light_threshold, Some(2));
+        assert_eq!(engineer.light_model.as_deref(), Some("sonnet"));
+        assert_eq!(engineer.light_threshold, Some(3));
         assert_eq!(engineer.max_turns, Some(40));
     }
 
@@ -553,13 +553,15 @@ stages:
     fn effective_model_uses_light_for_low_sp() {
         let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
         let engineer = config.stage("engineer").unwrap();
-        // Low SP (1-2): uses light_model (opus)
-        assert_eq!(engineer.effective_model(1, 0), "opus");
-        assert_eq!(engineer.effective_model(2, 0), "opus");
-        // High SP (3+): uses base model
-        assert_eq!(engineer.effective_model(3, 0), "opus");
+        // Low SP (1-3): uses light_model (sonnet)
+        assert_eq!(engineer.effective_model(1, 0), "sonnet");
+        assert_eq!(engineer.effective_model(2, 0), "sonnet");
+        assert_eq!(engineer.effective_model(3, 0), "sonnet");
+        // High SP (5+): uses base model (opus)
         assert_eq!(engineer.effective_model(5, 0), "opus");
-        // No estimate (0): uses base model
+        assert_eq!(engineer.effective_model(8, 0), "opus");
+        assert_eq!(engineer.effective_model(13, 0), "opus");
+        // No estimate (0): uses base model (opus)
         assert_eq!(engineer.effective_model(0, 0), "opus");
     }
 
@@ -569,6 +571,69 @@ stages:
         let analyst = config.stage("analyst").unwrap();
         // No light_model configured: always uses base
         assert_eq!(analyst.effective_model(1, 0), "opus");
+        assert_eq!(analyst.effective_model(5, 0), "opus");
+    }
+
+    #[test]
+    fn effective_model_recheck_takes_precedence_over_light() {
+        // Reviewer has both recheck_model and could theoretically have light_model.
+        // recheck_model should always win on round >= 1, regardless of SP.
+        let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
+        let reviewer = config.stage("reviewer").unwrap();
+        // Round 1+ with low SP: recheck_model wins
+        assert_eq!(reviewer.effective_model(1, 1), "sonnet");
+        assert_eq!(reviewer.effective_model(2, 2), "sonnet");
+        // Round 1+ with high SP: recheck_model still wins
+        assert_eq!(reviewer.effective_model(8, 1), "sonnet");
+        assert_eq!(reviewer.effective_model(13, 3), "sonnet");
+    }
+
+    #[test]
+    fn effective_model_boundary_at_threshold() {
+        // Custom config with threshold=3: SP 3 → light, SP 5 → base
+        let yaml = r#"
+pipeline: test
+stages:
+  eng:
+    agent: pipeline-engineer
+    model: opus
+    light_model: haiku
+    light_threshold: 3
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        let eng = config.stage("eng").unwrap();
+        assert_eq!(eng.effective_model(3, 0), "haiku", "at threshold → light");
+        assert_eq!(eng.effective_model(5, 0), "opus", "above threshold → base");
+    }
+
+    #[test]
+    fn effective_model_default_threshold_is_2() {
+        // When light_threshold is absent, default is 2.
+        let yaml = r#"
+pipeline: test
+stages:
+  eng:
+    agent: pipeline-engineer
+    model: opus
+    light_model: sonnet
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        let eng = config.stage("eng").unwrap();
+        assert_eq!(eng.effective_model(1, 0), "sonnet");
+        assert_eq!(eng.effective_model(2, 0), "sonnet");
+        assert_eq!(
+            eng.effective_model(3, 0),
+            "opus",
+            "above default threshold of 2"
+        );
+    }
+
+    #[test]
+    fn effective_model_negative_estimate_uses_base() {
+        let config: PipelineConfig = serde_yaml::from_str(sample_yaml()).unwrap();
+        let engineer = config.stage("engineer").unwrap();
+        // Negative estimate treated same as unset — uses base model
+        assert_eq!(engineer.effective_model(-1, 0), "opus");
     }
 
     #[test]
