@@ -1,7 +1,14 @@
-.PHONY: build test check fmt fmt-check clippy clean
+.PHONY: build build-release test check fmt fmt-check clippy clean
 
 build:
 	cd engine && cargo build
+
+build-release:
+	cd engine && cargo build --release
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		echo "codesigning..."; \
+		codesign --force --sign - engine/target/release/werma; \
+	fi
 
 test:
 	cd engine && cargo test

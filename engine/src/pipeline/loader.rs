@@ -5,10 +5,28 @@ use super::config::PipelineConfig;
 /// Built-in default pipeline YAML compiled into the binary.
 const BUILTIN_DEFAULT_YAML: &str = include_str!("../../pipelines/default.yaml");
 
+/// Built-in economy pipeline YAML compiled into the binary.
+const BUILTIN_ECONOMY_YAML: &str = include_str!("../../pipelines/economy.yaml");
+
 /// Load the pipeline config (always uses the compiled-in builtin).
 pub fn load_default() -> Result<PipelineConfig> {
     warn_stale_runtime_override();
     let config = load_from_str(BUILTIN_DEFAULT_YAML, "<builtin>")?;
+    warn_deprecated_per_stage(&config);
+    Ok(config)
+}
+
+/// Load a named pipeline by name. Supports builtin names ("default", "economy").
+///
+/// This is the repo-scoped entry point: poll.rs and decision.rs call this
+/// when they know which repo they're working with.
+pub fn load_named(name: &str) -> Result<PipelineConfig> {
+    let (yaml, source) = match name {
+        "default" => (BUILTIN_DEFAULT_YAML, "<builtin:default>"),
+        "economy" => (BUILTIN_ECONOMY_YAML, "<builtin:economy>"),
+        other => anyhow::bail!("unknown pipeline name '{other}' (available: default, economy)"),
+    };
+    let config = load_from_str(yaml, source)?;
     warn_deprecated_per_stage(&config);
     Ok(config)
 }
@@ -138,6 +156,63 @@ mod tests {
         let config = load_from_str(BUILTIN_DEFAULT_YAML, "<test>").unwrap();
         assert_eq!(config.pipeline, "default");
         assert!(!config.stages.is_empty());
+    }
+
+    #[test]
+    fn load_named_default_succeeds() {
+        let config = load_named("default").unwrap();
+        assert_eq!(config.pipeline, "default");
+        assert!(!config.stages.is_empty());
+    }
+
+    #[test]
+    fn load_named_economy_succeeds() {
+        let config = load_named("economy").unwrap();
+        assert_eq!(config.pipeline, "economy");
+        assert!(!config.stages.is_empty());
+        // Economy pipeline engineer uses codex runtime
+        let engineer = config.stage("engineer").unwrap();
+        assert_eq!(engineer.runtime, Some(crate::models::AgentRuntime::Codex));
+    }
+
+    #[test]
+    fn load_named_unknown_fails() {
+        let result = load_named("nonexistent");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("unknown pipeline name"));
+        assert!(msg.contains("nonexistent"));
+    }
+
+    #[test]
+    fn economy_pipeline_stages_match_default() {
+        // Economy pipeline should have the same stage names as default
+        let default = load_named("default").unwrap();
+        let economy = load_named("economy").unwrap();
+        let default_stages: Vec<&str> = default.stages.keys().map(String::as_str).collect();
+        let economy_stages: Vec<&str> = economy.stages.keys().map(String::as_str).collect();
+        assert_eq!(default_stages, economy_stages);
+    }
+
+    #[test]
+    fn economy_pipeline_uses_sonnet_for_analyst() {
+        let config = load_named("economy").unwrap();
+        let analyst = config.stage("analyst").unwrap();
+        assert_eq!(analyst.model, "sonnet");
+    }
+
+    #[test]
+    fn economy_pipeline_reviewer_uses_codex() {
+        let config = load_named("economy").unwrap();
+        let reviewer = config.stage("reviewer").unwrap();
+        assert_eq!(reviewer.runtime, Some(crate::models::AgentRuntime::Codex));
+    }
+
+    #[test]
+    fn economy_pipeline_deployer_uses_codex() {
+        let config = load_named("economy").unwrap();
+        let deployer = config.stage("deployer").unwrap();
+        assert_eq!(deployer.runtime, Some(crate::models::AgentRuntime::Codex));
     }
 
     #[test]

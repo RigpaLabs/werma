@@ -59,6 +59,10 @@ download_release() {
         if [ -f "$tmp_dir/werma" ]; then
             BINARY="$tmp_dir/werma"
             chmod +x "$BINARY"
+            # macOS: ad-hoc codesign so Gatekeeper does not SIGKILL the binary during smoke test
+            if [ "$(uname -s)" = "Darwin" ]; then
+                codesign --force --sign - "$BINARY"
+            fi
             echo "  ✓ Downloaded $tag for $TARGET"
             return 0
         fi
@@ -97,6 +101,13 @@ cargo_build() {
     cargo build --release --manifest-path "$WERMA_DIR/engine/Cargo.toml"
     BINARY="$WERMA_DIR/engine/target/release/werma"
     echo "  ✓ Built successfully"
+
+    # macOS: ad-hoc codesign so Gatekeeper does not SIGKILL the binary
+    if [ "$(uname -s)" = "Darwin" ]; then
+        echo "→ Codesigning binary (macOS)..."
+        codesign --force --sign - "$BINARY"
+        echo "  ✓ Codesigned"
+    fi
 }
 
 # --- Main flow ---
@@ -130,6 +141,10 @@ echo "→ Installing binary..."
 mkdir -p "$HOME/.local/bin"
 cp "$BINARY" "$HOME/.local/bin/werma"
 chmod +x "$HOME/.local/bin/werma"
+# macOS: cp creates a new inode, invalidating the ad-hoc signature — re-sign
+if [ "$(uname -s)" = "Darwin" ]; then
+    codesign --force --sign - "$HOME/.local/bin/werma"
+fi
 echo "  ✓ werma → $HOME/.local/bin/werma"
 
 # --- Create runtime directories ---

@@ -382,6 +382,25 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
 
     let working_dir = resolve_home(&task.working_dir);
 
+    // RIG-366: Defense-in-depth — validate runtime against repo allowlist at runner time.
+    // Catches edge cases where tasks were created before an allowlist was tightened.
+    {
+        let user_cfg = crate::config::UserConfig::load();
+        let repo_label = user_cfg.repo_label_from_dir(&task.working_dir);
+        if let Some(ref repo) = repo_label {
+            if !user_cfg.is_runtime_allowed(repo, task.runtime) {
+                bail!(
+                    "runtime '{}' is not allowed for repo '{}' (allowed: {:?}). \
+                     Task {} will not be executed.",
+                    task.runtime,
+                    repo,
+                    user_cfg.allowed_runtimes_for_repo(repo),
+                    task_id,
+                );
+            }
+        }
+    }
+
     // Set up worktree for write tasks — gives each agent an isolated copy
     let effective_dir = if crate::worktree::needs_worktree(&task.task_type) {
         let branch = crate::worktree::generate_branch_name(task);
