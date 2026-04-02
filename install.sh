@@ -59,6 +59,10 @@ download_release() {
         if [ -f "$tmp_dir/werma" ]; then
             BINARY="$tmp_dir/werma"
             chmod +x "$BINARY"
+            # macOS: ad-hoc codesign so Gatekeeper does not SIGKILL the binary during smoke test
+            if [ "$(uname -s)" = "Darwin" ]; then
+                codesign --force --sign - "$BINARY"
+            fi
             echo "  ✓ Downloaded $tag for $TARGET"
             return 0
         fi
