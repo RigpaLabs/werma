@@ -123,16 +123,14 @@ pub fn cmd_complete(
     }
 
     // Research completion: curator follow-up + Linear update
-    if task.task_type == "research"
-        && !task.linear_issue_id.is_empty()
-        && let Err(e) = pipeline::handle_research_completion(
-            db,
-            &task,
-            &result_text,
-            &crate::linear::LinearClient::new()?,
-        )
-    {
-        eprintln!("research completion error for {id}: {e}");
+    if task.task_type == "research" && !task.linear_issue_id.is_empty() {
+        if let Some(ref client) = crate::tracker::linear_for_identifier(&task.linear_issue_id) {
+            if let Err(e) =
+                pipeline::handle_research_completion(db, &task, &result_text, client.as_ref())
+            {
+                eprintln!("research completion error for {id}: {e}");
+            }
+        }
     }
 
     // Notifications
@@ -163,7 +161,7 @@ pub fn cmd_fail(db: &Db, id: &str) -> Result<()> {
     // Post failure comment to Linear for pipeline tasks
     if !task.pipeline_stage.is_empty()
         && !task.linear_issue_id.is_empty()
-        && let Ok(linear) = crate::linear::LinearClient::new()
+        && let Some(ref linear) = crate::tracker::linear_for_identifier(&task.linear_issue_id)
     {
         let _ = linear.comment(
             &task.linear_issue_id,

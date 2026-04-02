@@ -2,32 +2,27 @@ use anyhow::{Context, Result, bail};
 
 use crate::db::Db;
 use crate::traits::RealCommandRunner;
-use crate::{config, linear, pipeline, ui};
+use crate::{config, linear, pipeline, tracker, ui};
 
 pub fn cmd_pipeline_poll(db: &Db) -> Result<()> {
-    let linear_client = linear::LinearClient::new()?;
+    let linear_client = tracker::linear_client()
+        .ok_or_else(|| anyhow::anyhow!("Linear tracker not configured (LINEAR_API_KEY not set)"))?;
     let cmd = RealCommandRunner;
     ui::with_spinner("Polling Linear statuses...", || {
-        pipeline::poll(db, &linear_client, &cmd)
+        pipeline::poll(db, &*linear_client, &cmd)
     })
 }
 
 pub fn cmd_pipeline_status(db: &Db) -> Result<()> {
-    let linear_client = match linear::LinearClient::new() {
-        Ok(c) => Some(c),
-        Err(e) => {
-            eprintln!("  WARNING: Linear not available — {e}");
-            eprintln!("  Pipeline status will not show Linear issue counts.\n");
-            None
-        }
+    let linear_client = if let Some(c) = tracker::linear_client() {
+        Some(c)
+    } else {
+        eprintln!("  WARNING: Linear not available");
+        eprintln!("  Pipeline status will not show Linear issue counts.\n");
+        None
     };
     ui::with_spinner("Fetching pipeline status...", || {
-        pipeline::status(
-            db,
-            linear_client
-                .as_ref()
-                .map(|c| c as &dyn pipeline::LinearApi),
-        )
+        pipeline::status(db, linear_client.as_deref())
     })
 }
 
@@ -41,7 +36,8 @@ pub fn cmd_pipeline_validate() -> Result<()> {
 
 pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<()> {
     let db = crate::open_db()?;
-    let linear_client = linear::LinearClient::new()?;
+    let linear_client = tracker::linear_client()
+        .ok_or_else(|| anyhow::anyhow!("Linear tracker not configured (LINEAR_API_KEY not set)"))?;
     // Start with the default pipeline for stage validation; per-issue tasks
     // may use a repo-specific pipeline below (RIG-367).
     let config = pipeline::loader::load_default()?;

@@ -119,7 +119,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     let notifier = crate::traits::RealNotifier;
     // Optional: absent if LINEAR_API_KEY is not configured.
     let linear_merge = merge::RealLinearMerge::new().ok();
-    let linear_poll = crate::linear::LinearClient::new().ok();
+    let linear_poll = crate::tracker::linear_client();
     let expected_team_keys = crate::linear::configured_team_keys().unwrap_or_default();
 
     loop {
@@ -130,15 +130,19 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 log_daemon(&log_path, &format!("schedule check error: {e}"));
             }
 
-            if let Err(e) =
-                pipeline::process_completed_tasks(&db, werma_dir, &cmd_runner, &notifier)
-            {
+            if let Err(e) = pipeline::process_completed_tasks(
+                &db,
+                werma_dir,
+                &cmd_runner,
+                &notifier,
+                linear_poll.as_deref(),
+            ) {
                 log_daemon(&log_path, &format!("pipeline callback error: {e}"));
             }
 
             // Drain outbox: execute pending external effects (Linear, GitHub, notifications).
             // Only runs when LINEAR_API_KEY is configured.
-            if let Some(ref lp) = linear_poll {
+            if let Some(lp) = linear_poll.as_deref() {
                 match crate::pipeline::effects::process_effects(&db, lp, &cmd_runner, &notifier) {
                     Ok(r) if r.processed > 0 || r.failed > 0 => {
                         log_daemon(
@@ -161,7 +165,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
             }
 
             if last_cancel_check.elapsed() >= Duration::from_secs(CANCEL_CHECK_INTERVAL_SECS) {
-                if let Some(ref lp) = linear_poll {
+                if let Some(lp) = linear_poll.as_deref() {
                     if let Err(e) = cancel_check::check_canceled_and_stuck(
                         &db,
                         werma_dir,
@@ -220,7 +224,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
             if last_pipeline_poll.elapsed() >= Duration::from_secs(PIPELINE_POLL_INTERVAL_SECS) {
                 max_concurrent = crate::pipeline::load_max_concurrent();
                 launch_stagger_secs = crate::pipeline::load_launch_stagger_secs();
-                if let Some(ref lp) = linear_poll {
+                if let Some(lp) = linear_poll.as_deref() {
                     if let Err(e) = crate::pipeline::poll(&db, lp, &cmd_runner) {
                         log_daemon(&log_path, &format!("pipeline poll error: {e}"));
                     }
@@ -587,13 +591,13 @@ mod tests {
         let werma_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(werma_dir.path().join("logs")).unwrap();
 
-        // process_completed_tasks with no LINEAR_API_KEY — LinearClient::new() fails
-        // but the function should still return Ok
+        // process_completed_tasks with no linear client — should still return Ok
         let result = pipeline::process_completed_tasks(
             &db,
             werma_dir.path(),
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
+            None,
         );
         assert!(result.is_ok());
     }
@@ -616,6 +620,7 @@ mod tests {
             werma_dir.path(),
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
+            None,
         )
         .unwrap();
     }
@@ -652,7 +657,7 @@ mod tests {
 
         // 2. Pipeline callbacks (no tasks — no-op)
         let result =
-            pipeline::process_completed_tasks(&db, werma_dir.path(), &cmd_runner, &notifier);
+            pipeline::process_completed_tasks(&db, werma_dir.path(), &cmd_runner, &notifier, None);
         assert!(result.is_ok());
 
         // 3. Zombie check (no running tasks — no-op)
