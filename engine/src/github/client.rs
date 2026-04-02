@@ -119,8 +119,8 @@ impl<'a> GitHubIssueClient<'a> {
             "status:backlog" | "status:blocked" => "backlog",
             "status:todo" => "unstarted",
             "status:in-progress" | "status:review" | "status:qa" | "status:deploy"
-            | "status:failed" => "started",
-            "status:ready" | "status:done" => "completed",
+            | "status:failed" | "status:ready" => "started",
+            "status:done" => "completed",
             "status:canceled" => "canceled",
             _ => "unstarted",
         }
@@ -528,7 +528,9 @@ impl<'a> GitHubIssueClient<'a> {
             }
         };
 
-        Ok((state_type, self.owner.clone()))
+        // Return empty team key — GitHub issues don't belong to Linear teams.
+        // The empty-string guard in cancel_check.rs will skip the team-mismatch check.
+        Ok((state_type, String::new()))
     }
 
     pub fn list_comments(
@@ -677,6 +679,10 @@ mod tests {
         assert_eq!(
             GitHubIssueClient::label_to_state_type("status:backlog"),
             "backlog"
+        );
+        assert_eq!(
+            GitHubIssueClient::label_to_state_type("status:ready"),
+            "started"
         );
     }
 
@@ -1046,7 +1052,7 @@ mod tests {
         let client = test_client(&cmd);
         let (state, team) = client.get_issue_state_and_team("42").unwrap();
         assert_eq!(state, "started");
-        assert_eq!(team, "testowner");
+        assert_eq!(team, ""); // GitHub issues return empty team key
     }
 
     #[test]
