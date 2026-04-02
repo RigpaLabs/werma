@@ -16,6 +16,7 @@ mod models;
 #[allow(dead_code)]
 mod notify;
 mod pipeline;
+mod project;
 mod runner;
 mod traits;
 mod ui;
