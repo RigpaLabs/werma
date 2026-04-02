@@ -293,17 +293,26 @@ mod tests {
     }
 
     #[test]
-    fn linear_url_requires_workspace_env() {
-        // Without WERMA_LINEAR_WORKSPACE set, should return None
-        // (We can't set env vars reliably in parallel tests, so we just verify it
-        // returns None when the var is absent — which it will be in CI.)
+    fn linear_url_depends_on_workspace_env() {
         let id = IssueIdentifier::Linear {
             team_key: "RIG".to_string(),
             number: 42,
         };
-        // Either Some (if env var is set in the test runner) or None (if not) — both valid.
-        // The important thing is it doesn't panic.
-        let _ = id.url();
+        // In CI / test runners WERMA_LINEAR_WORKSPACE is typically unset → None.
+        // We can't safely set/remove env vars (unsafe in edition 2024 + forbid(unsafe_code)),
+        // so verify the result is structurally correct when present, or None when absent.
+        match std::env::var("WERMA_LINEAR_WORKSPACE").ok() {
+            Some(ws) => assert_eq!(
+                id.url(),
+                Some(format!("https://linear.app/{ws}/issue/RIG-42")),
+                "should build Linear URL using workspace slug from env"
+            ),
+            None => assert_eq!(
+                id.url(),
+                None,
+                "should be None when WERMA_LINEAR_WORKSPACE is absent"
+            ),
+        }
     }
 
     // ─── ProjectResolver ────────────────────────────────────────────────────

@@ -172,7 +172,11 @@ pub(crate) fn auto_create_pr(
     let pr_title = format!("{linear_issue_id} feat: implementation");
     let issue_link = if let Some(url) = crate::project::ProjectResolver::issue_url(linear_issue_id)
     {
-        format!("\n\nLinear: {url}")
+        let label = match crate::project::ProjectResolver::tracker(linear_issue_id) {
+            Some(crate::project::Tracker::Linear) => "Linear",
+            _ => "Issue",
+        };
+        format!("\n\n{label}: {url}")
     } else {
         eprintln!(
             "auto-PR: could not generate issue URL for {linear_issue_id} — \
