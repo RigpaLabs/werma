@@ -1,4 +1,5 @@
 use crate::db::{Db, make_test_task};
+use crate::github::GitHubIssueClient;
 use crate::models::{EffectType, Status};
 use crate::pipeline::executor::{callback, poll};
 use crate::traits::fakes::{FakeCommandRunner, FakeLinearApi, FakeNotifier};
@@ -1757,4 +1758,159 @@ fn callback_reviewer_recheck_model_on_rerejection() {
         "re-review (round 1) should use recheck_model (sonnet), got: {}",
         spawned[0].model
     );
+}
+
+// ─── RIG-379: GitHubIssueClient integration test ────────────────────────────
+//
+// Verifies that GitHubIssueClient correctly speaks the LinearApi protocol so
+// that the full poll→callback→effect cycle works with GitHub Issues as the
+// backing tracker.
+//
+// Scope:
+//   1. get_issues_by_status("review") — normalises gh JSON → LinearApi shape
+//   2. callback() writes MoveIssue + PostComment effects for a GitHub issue ID
+//   3. move_issue_by_name() sends the correct `gh issue view` + `gh issue edit` calls
+
+/// Test 1 — `get_issues_by_status` normalises a GitHub issue into LinearApi shape.
+///
+/// The real `gh issue list` returns an array of raw issue objects.  After
+/// `normalize_issue()` the result must have the fields that `poll.rs` reads:
+/// `id`, `identifier`, `title`, `description`, `state.type`, `labels.nodes`.
+#[test]
+fn github_client_get_issues_by_status_normalises_shape() {
+    let cmd = FakeCommandRunner::new();
+
+    // Pre-load the single `gh issue list` response (JSON array of 1 issue)
+    cmd.push_success(
+        r#"[
+          {
+            "number": 42,
+            "title": "Implement engineer stage",
+            "body": "As an agent I want to code",
+            "state": "OPEN",
+            "labels": [
+              {"name": "status:review"},
+              {"name": "sp:3"},
+              {"name": "repo:werma"}
+            ]
+          }
+        ]"#,
+    );
+
+    let client = GitHubIssueClient::new(&cmd, "RigpaLabs".to_string(), "werma-test".to_string());
+    let issues = client.get_issues_by_status("review").unwrap();
+
+    assert_eq!(issues.len(), 1);
+    let issue = &issues[0];
+
+    // id must be the issue number as a string
+    assert_eq!(issue["id"].as_str().unwrap(), "42");
+    // identifier must be repo#number format
+    assert_eq!(issue["identifier"].as_str().unwrap(), "werma-test#42");
+    // title and description preserved
+    assert_eq!(issue["title"].as_str().unwrap(), "Implement engineer stage");
+    assert_eq!(
+        issue["description"].as_str().unwrap(),
+        "As an agent I want to code"
+    );
+    // state type: status:review → "started"
+    assert_eq!(issue["state"]["type"].as_str().unwrap(), "started");
+    // estimate extracted from sp:3 label
+    assert_eq!(issue["estimate"].as_i64().unwrap(), 3);
+    // labels preserved in Linear's { nodes: [{ name }] } shape
+    let nodes = issue["labels"]["nodes"].as_array().unwrap();
+    assert!(
+        nodes.iter().any(|n| n["name"] == "status:review"),
+        "expected status:review label node"
+    );
+
+    // Verify exactly 1 gh command was issued
+    let calls = cmd.calls.borrow();
+    assert_eq!(calls.len(), 1);
+    let args = &calls[0].1;
+    assert!(args.contains(&"issue".to_string()));
+    assert!(args.contains(&"list".to_string()));
+    assert!(args.contains(&"status:review".to_string()));
+    assert!(args.contains(&"RigpaLabs/werma-test".to_string()));
+}
+
+/// Test 2 — `callback()` writes correct effects for a GitHub-style issue ID.
+///
+/// When an engineer task completes for issue `"werma-test#42"` the callback
+/// must queue a `MoveIssue("review")` effect and a `PostComment` effect.
+/// The GitHub `id` in the DB is the numeric part ("42") — matching what
+/// `normalize_issue()` emits as `id`.
+#[test]
+fn github_client_callback_queues_effects() {
+    let db = Db::open_in_memory().unwrap();
+    let cmd = FakeCommandRunner::new();
+
+    // Insert a completed engineer task whose issue ID matches the GitHub format.
+    // `id` in DB is the numeric part only, as emitted by normalize_issue().
+    let mut task = make_test_task("20260402-379a");
+    task.status = Status::Completed;
+    task.linear_issue_id = "42".to_string();
+    task.pipeline_stage = "engineer".to_string();
+    db.insert_task(&task).unwrap();
+
+    let result = "## Implementation\nAll done.\n\nPR_URL=https://github.com/RigpaLabs/werma/pull/99\nVERDICT=DONE";
+
+    callback(
+        &db,
+        "20260402-379a",
+        "engineer",
+        result,
+        "42",
+        "~/projects/werma",
+        &cmd,
+    )
+    .unwrap();
+
+    // MoveIssue effect → "review"
+    assert_move_effect(&db, "review");
+
+    // PostComment effect summarising the engineer stage
+    assert_comment_effect(&db, "Engineer DONE");
+}
+
+/// Test 3 — `move_issue_by_name()` issues the correct `gh` CLI calls.
+///
+/// `move_issue_by_name("42", "review")` must:
+///   1. Call `gh issue view 42 --repo RigpaLabs/werma-test --json labels`
+///      to fetch current labels.
+///   2. Call `gh issue edit 42 --repo RigpaLabs/werma-test
+///            --remove-label status:in-progress --add-label status:review`
+///      to swap the status label.
+#[test]
+fn github_client_move_issue_by_name_correct_calls() {
+    let cmd = FakeCommandRunner::new();
+
+    // Response to `gh issue view --json labels`
+    cmd.push_success(r#"{"labels":[{"name":"status:in-progress"},{"name":"repo:werma"}]}"#);
+    // Response to `gh issue edit` (mutation — stdout irrelevant)
+    cmd.push_success("");
+
+    let client = GitHubIssueClient::new(&cmd, "RigpaLabs".to_string(), "werma-test".to_string());
+    client.move_issue_by_name("42", "review").unwrap();
+
+    let calls = cmd.calls.borrow();
+    assert_eq!(calls.len(), 2, "expected 2 gh calls (view + edit)");
+
+    // Call 1: gh issue view 42 --repo RigpaLabs/werma-test --json labels
+    let view_args = &calls[0].1;
+    assert_eq!(view_args[0], "issue");
+    assert_eq!(view_args[1], "view");
+    assert_eq!(view_args[2], "42");
+    assert!(view_args.contains(&"RigpaLabs/werma-test".to_string()));
+    assert!(view_args.contains(&"labels".to_string()));
+
+    // Call 2: gh issue edit 42 --repo ... --remove-label status:in-progress --add-label status:review
+    let edit_args = &calls[1].1;
+    assert_eq!(edit_args[0], "issue");
+    assert_eq!(edit_args[1], "edit");
+    assert_eq!(edit_args[2], "42");
+    assert!(edit_args.contains(&"--remove-label".to_string()));
+    assert!(edit_args.contains(&"status:in-progress".to_string()));
+    assert!(edit_args.contains(&"--add-label".to_string()));
+    assert!(edit_args.contains(&"status:review".to_string()));
 }
