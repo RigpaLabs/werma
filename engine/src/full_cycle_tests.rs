@@ -874,4 +874,182 @@ mod tests {
             new_reviewer.prompt
         );
     }
+
+    // ─── RIG-373: Full cycle model routing by estimate ────────────────────────
+
+    /// Full cycle: 2 SP issue → engineer gets sonnet, 5 SP issue → engineer gets opus.
+    /// Verifies model routing propagates correctly through poll → task creation.
+    #[test]
+    fn rig373_light_model_routing_by_estimate() {
+        ensure_working_dir();
+        let db = Db::open_in_memory().unwrap();
+        let linear = StatefulFakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Add two issues: one low SP (2), one high SP (5).
+        linear.add_issue_with_estimate(
+            "uuid-373-low",
+            "RIG-373L",
+            "Small fix",
+            "Fix a typo",
+            "in_progress",
+            vec!["repo:werma".to_string()],
+            Some(2),
+        );
+        linear.add_issue_with_estimate(
+            "uuid-373-high",
+            "RIG-373H",
+            "Complex feature",
+            "Add new subsystem",
+            "in_progress",
+            vec!["repo:werma".to_string()],
+            Some(5),
+        );
+
+        // Poll picks up both in_progress issues.
+        poll(&db, &linear, &cmd).unwrap();
+
+        // Verify low-SP issue got sonnet.
+        let low_tasks = db
+            .tasks_by_linear_issue("RIG-373L", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(low_tasks.len(), 1, "low-SP engineer task should be created");
+        assert_eq!(
+            low_tasks[0].model, "sonnet",
+            "2 SP issue → engineer should use light_model (sonnet), got: {}",
+            low_tasks[0].model
+        );
+        assert_eq!(low_tasks[0].estimate, 2);
+
+        // Verify high-SP issue got opus.
+        let high_tasks = db
+            .tasks_by_linear_issue("RIG-373H", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(
+            high_tasks.len(),
+            1,
+            "high-SP engineer task should be created"
+        );
+        assert_eq!(
+            high_tasks[0].model, "opus",
+            "5 SP issue → engineer should use base model (opus), got: {}",
+            high_tasks[0].model
+        );
+        assert_eq!(high_tasks[0].estimate, 5);
+
+        // Complete low-SP engineer → callback spawns reviewer.
+        db.set_task_status(&low_tasks[0].id, Status::Completed)
+            .unwrap();
+        let low_output = "## Done\nFixed typo.\n\nPR_URL=https://github.com/RigpaLabs/werma/pull/373\nVERDICT=DONE";
+        callback(
+            &db,
+            &low_tasks[0].id,
+            "engineer",
+            low_output,
+            "RIG-373L",
+            "~/projects/werma",
+            &cmd,
+        )
+        .unwrap();
+
+        // Spawned reviewer for low-SP issue: first review (round 0) → reviewer base model.
+        // Note: default.yaml reviewer has model=sonnet (reviewer is always sonnet-tier).
+        let low_reviewers = db
+            .tasks_by_linear_issue("RIG-373L", Some("reviewer"), false)
+            .unwrap();
+        assert_eq!(low_reviewers.len(), 1, "reviewer should be spawned");
+        assert_eq!(
+            low_reviewers[0].model, "sonnet",
+            "first review (round 0) should use reviewer base model (sonnet), got: {}",
+            low_reviewers[0].model
+        );
+
+        // Simulate reviewer rejection → engineer re-spawned → re-completes → reviewer round 1.
+        db.set_task_status(&low_reviewers[0].id, Status::Completed)
+            .unwrap();
+        let reject_output = "## Review\nNeeds fix.\nREVIEW_VERDICT=REJECTED";
+        callback(
+            &db,
+            &low_reviewers[0].id,
+            "reviewer",
+            reject_output,
+            "RIG-373L",
+            "~/projects/werma",
+            &cmd,
+        )
+        .unwrap();
+
+        // Engineer re-spawned for the fix.
+        let re_eng = db
+            .tasks_by_linear_issue("RIG-373L", Some("engineer"), false)
+            .unwrap();
+        let pending_eng: Vec<_> = re_eng
+            .iter()
+            .filter(|t| t.status == Status::Pending)
+            .collect();
+        assert_eq!(pending_eng.len(), 1, "engineer should be re-spawned");
+
+        // Complete re-engineer.
+        db.set_task_status(&pending_eng[0].id, Status::Completed)
+            .unwrap();
+        let re_eng_output =
+            "## Fix\nApplied.\n\nPR_URL=https://github.com/RigpaLabs/werma/pull/373\nVERDICT=DONE";
+        callback(
+            &db,
+            &pending_eng[0].id,
+            "engineer",
+            re_eng_output,
+            "RIG-373L",
+            "~/projects/werma",
+            &cmd,
+        )
+        .unwrap();
+
+        // Reviewer round 1 → should use recheck_model (sonnet).
+        let re_reviewers = db
+            .tasks_by_linear_issue("RIG-373L", Some("reviewer"), false)
+            .unwrap();
+        let pending_rev: Vec<_> = re_reviewers
+            .iter()
+            .filter(|t| t.status == Status::Pending)
+            .collect();
+        assert_eq!(pending_rev.len(), 1, "reviewer round 1 should be spawned");
+        assert_eq!(
+            pending_rev[0].model, "sonnet",
+            "re-review (round 1) should use recheck_model (sonnet), got: {}",
+            pending_rev[0].model
+        );
+    }
+
+    /// Full cycle: unset estimate (0 SP) → engineer gets opus (default).
+    #[test]
+    fn rig373_unset_estimate_gets_opus() {
+        ensure_working_dir();
+        let db = Db::open_in_memory().unwrap();
+        let linear = StatefulFakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Issue with no estimate set (defaults to 0 in JSON).
+        linear.add_issue_with_estimate(
+            "uuid-373-zero",
+            "RIG-373Z",
+            "Unestimated issue",
+            "No SP set",
+            "in_progress",
+            vec!["repo:werma".to_string()],
+            Some(0),
+        );
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        let tasks = db
+            .tasks_by_linear_issue("RIG-373Z", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].model, "opus",
+            "unset estimate (0) → should use base model (opus), got: {}",
+            tasks[0].model
+        );
+    }
 }
