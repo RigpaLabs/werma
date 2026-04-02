@@ -170,21 +170,21 @@ pub(crate) fn auto_create_pr(
 
     // 6. Create PR
     let pr_title = format!("{linear_issue_id} feat: implementation");
-    let pr_body = if let Ok(ws) = std::env::var("WERMA_LINEAR_WORKSPACE") {
-        format!(
-            "## Summary\nPipeline engineer task `{task_id}`.\n\n\
-             Linear: https://linear.app/{ws}/issue/{linear_issue_id}",
-        )
+    let issue_link = if let Some(url) = crate::project::ProjectResolver::issue_url(linear_issue_id)
+    {
+        let label = match crate::project::ProjectResolver::tracker(linear_issue_id) {
+            Some(crate::project::Tracker::Linear) => "Linear",
+            _ => "Issue",
+        };
+        format!("\n\n{label}: {url}")
     } else {
         eprintln!(
-            "auto-PR: WERMA_LINEAR_WORKSPACE not set — PR body will not include Linear link. \
-             Set it to your Linear workspace slug (e.g. WERMA_LINEAR_WORKSPACE=myorg) to enable."
+            "auto-PR: could not generate issue URL for {linear_issue_id} — \
+                 for Linear issues, set WERMA_LINEAR_WORKSPACE to your workspace slug."
         );
-        format!(
-            "## Summary\nPipeline engineer task `{task_id}`.\n\n\
-             Issue: {linear_issue_id}",
-        )
+        format!("\n\nIssue: {linear_issue_id}")
     };
+    let pr_body = format!("## Summary\nPipeline engineer task `{task_id}`.{issue_link}");
 
     let output = cmd
         .run(

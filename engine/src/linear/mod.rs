@@ -5,7 +5,10 @@ mod config;
 pub use client::LinearClient;
 #[allow(unused_imports)]
 pub use client::is_after_timestamp;
-pub use config::{configured_team_keys, infer_working_dir, is_manual_issue, validate_working_dir};
+pub use config::{
+    configured_team_keys, infer_working_dir, is_linear_identifier, is_manual_issue,
+    validate_working_dir,
+};
 
 use anyhow::Result;
 use serde_json::Value;

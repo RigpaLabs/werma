@@ -124,6 +124,17 @@ pub fn configured_team_keys() -> Result<Vec<String>> {
     Ok(config.teams.iter().map(|t| t.team_key.clone()).collect())
 }
 
+/// Return `true` if `identifier` is a Linear-style identifier (e.g. `RIG-123`).
+///
+/// Returns `false` for GitHub identifiers (`owner/repo#45`), UUIDs, or anything else.
+/// Use this to guard Linear API calls before attempting to route to Linear.
+pub fn is_linear_identifier(identifier: &str) -> bool {
+    matches!(
+        crate::project::ProjectResolver::tracker(identifier),
+        Some(crate::project::Tracker::Linear)
+    )
+}
+
 /// Extract the team key prefix from an issue identifier (e.g. "RIG-123" → "RIG").
 /// Returns empty string for UUIDs or unparseable identifiers.
 pub fn team_key_from_identifier(identifier: &str) -> String {
@@ -645,6 +656,19 @@ mod tests {
         assert_eq!(config.status_id("FAT", "in_progress").unwrap(), "fat-ip");
         // Empty team key falls back to primary
         assert_eq!(config.status_id("", "in_progress").unwrap(), "rig-ip");
+    }
+
+    #[test]
+    fn is_linear_identifier_recognises_linear() {
+        assert!(is_linear_identifier("RIG-123"));
+        assert!(is_linear_identifier("FAT-42"));
+        assert!(is_linear_identifier("AR-1"));
+        assert!(!is_linear_identifier("owner/repo#45"));
+        assert!(!is_linear_identifier(
+            "755e63ee-a00e-4fef-9d7a-b8907652e2b2"
+        ));
+        assert!(!is_linear_identifier("rig-123")); // lowercase key → not Linear
+        assert!(!is_linear_identifier(""));
     }
 
     #[test]

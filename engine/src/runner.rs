@@ -132,8 +132,10 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
         }
     }
 
-    // Inject Linear issue context for ALL tasks (pipeline and non-pipeline)
+    // Inject issue context for tasks that have a Linear identifier.
+    // GitHub identifiers (owner/repo#N) are skipped — they cannot be resolved via the Linear API.
     if !task.linear_issue_id.is_empty()
+        && crate::linear::is_linear_identifier(&task.linear_issue_id)
         && let Ok(client) = crate::linear::LinearClient::new()
     {
         match client.get_issue_by_identifier(&task.linear_issue_id) {
@@ -449,7 +451,9 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     // Late-inject Linear comments at execution time (not creation time)
     // so agents see context updates posted after task was created.
     if full_prompt.contains("{linear_comments}") {
-        let comments_text = if task.linear_issue_id.is_empty() {
+        let comments_text = if task.linear_issue_id.is_empty()
+            || !crate::linear::is_linear_identifier(&task.linear_issue_id)
+        {
             String::new()
         } else if let Ok(client) = crate::linear::LinearClient::new() {
             fetch_linear_comments(&client, db, task)
@@ -463,7 +467,9 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     // Late-inject sub-issues for analyst stage (epic detection).
     // Fetches child issues from Linear so analyst can analyze epics holistically.
     if full_prompt.contains("{sub_issues}") {
-        let sub_issues_text = if task.linear_issue_id.is_empty() {
+        let sub_issues_text = if task.linear_issue_id.is_empty()
+            || !crate::linear::is_linear_identifier(&task.linear_issue_id)
+        {
             String::new()
         } else if let Ok(client) = crate::linear::LinearClient::new() {
             fetch_sub_issues(&client, &task.linear_issue_id)
