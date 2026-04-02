@@ -36,10 +36,11 @@ struct PreparedContinue {
 /// Validate a task for continue and resolve derived fields.
 /// Pure logic — no I/O, no tmux, no filesystem writes.
 fn prepare_continue(task: &Task, id: &str, prompt: Option<String>) -> Result<PreparedContinue> {
-    if task.runtime == crate::models::AgentRuntime::Codex {
+    if task.runtime != crate::models::AgentRuntime::ClaudeCode {
         bail!(
-            "cannot continue Codex task {id} — Codex does not support session resume yet. \
-             Re-run with `werma retry {id}` instead."
+            "cannot continue {} task {id} — only Claude Code supports session resume. \
+             Re-run with `werma retry {id}` instead.",
+            task.runtime
         );
     }
 
@@ -295,13 +296,22 @@ mod tests {
     // --- prepare_continue tests ---
 
     #[test]
-    fn continue_rejects_codex_runtime() {
-        let mut task = make_continue_task("001");
-        task.runtime = AgentRuntime::Codex;
-        let result = prepare_continue(&task, "001", None);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("Codex"), "error should mention Codex: {err}");
+    fn continue_rejects_non_claude_runtimes() {
+        for (runtime, label) in [
+            (AgentRuntime::Codex, "codex"),
+            (AgentRuntime::GeminiCli, "gemini-cli"),
+            (AgentRuntime::QwenCode, "qwen-code"),
+        ] {
+            let mut task = make_continue_task("001");
+            task.runtime = runtime;
+            let result = prepare_continue(&task, "001", None);
+            assert!(result.is_err(), "should reject {label}");
+            let err = result.unwrap_err().to_string();
+            assert!(
+                err.contains("only Claude Code"),
+                "error for {label} should mention Claude Code: {err}"
+            );
+        }
     }
 
     #[test]

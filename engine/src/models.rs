@@ -2,13 +2,35 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-/// Agent execution runtime: Claude Code (default) or OpenAI Codex CLI.
+/// Agent execution runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentRuntime {
     #[default]
     ClaudeCode,
     Codex,
+    #[serde(alias = "gemini")]
+    GeminiCli,
+    #[serde(alias = "qwen")]
+    QwenCode,
+}
+
+impl AgentRuntime {
+    /// All known runtime variants.
+    pub const ALL: &[AgentRuntime] = &[
+        Self::ClaudeCode,
+        Self::Codex,
+        Self::GeminiCli,
+        Self::QwenCode,
+    ];
+
+    /// Whether this runtime is trusted for unsupervised execution.
+    /// Trusted runtimes can run on any repo without an explicit allowlist entry
+    /// (used by `UserConfig::is_runtime_allowed` as the default allowlist).
+    /// Untrusted runtimes require explicit `repo_runtimes` configuration.
+    pub fn is_trusted(self) -> bool {
+        matches!(self, Self::ClaudeCode | Self::Codex)
+    }
 }
 
 impl fmt::Display for AgentRuntime {
@@ -16,6 +38,8 @@ impl fmt::Display for AgentRuntime {
         match self {
             Self::ClaudeCode => write!(f, "claude-code"),
             Self::Codex => write!(f, "codex"),
+            Self::GeminiCli => write!(f, "gemini-cli"),
+            Self::QwenCode => write!(f, "qwen-code"),
         }
     }
 }
@@ -27,8 +51,10 @@ impl FromStr for AgentRuntime {
         match s {
             "claude-code" | "claude" => Ok(Self::ClaudeCode),
             "codex" => Ok(Self::Codex),
+            "gemini-cli" | "gemini" => Ok(Self::GeminiCli),
+            "qwen-code" | "qwen" => Ok(Self::QwenCode),
             _ => Err(anyhow::anyhow!(
-                "unknown runtime: {s} (expected claude-code or codex)"
+                "unknown runtime: {s} (expected claude-code, codex, gemini-cli, or qwen-code)"
             )),
         }
     }
@@ -265,23 +291,34 @@ mod tests {
     fn runtime_display() {
         assert_eq!(AgentRuntime::ClaudeCode.to_string(), "claude-code");
         assert_eq!(AgentRuntime::Codex.to_string(), "codex");
+        assert_eq!(AgentRuntime::GeminiCli.to_string(), "gemini-cli");
+        assert_eq!(AgentRuntime::QwenCode.to_string(), "qwen-code");
     }
 
     #[test]
     fn runtime_from_str_roundtrip() {
-        for rt in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        for rt in [
+            AgentRuntime::ClaudeCode,
+            AgentRuntime::Codex,
+            AgentRuntime::GeminiCli,
+            AgentRuntime::QwenCode,
+        ] {
             let s = rt.to_string();
             let parsed: AgentRuntime = s.parse().unwrap();
             assert_eq!(parsed, rt);
         }
-        // "claude" alias
+        // aliases
         let parsed: AgentRuntime = "claude".parse().unwrap();
         assert_eq!(parsed, AgentRuntime::ClaudeCode);
+        let parsed: AgentRuntime = "gemini".parse().unwrap();
+        assert_eq!(parsed, AgentRuntime::GeminiCli);
+        let parsed: AgentRuntime = "qwen".parse().unwrap();
+        assert_eq!(parsed, AgentRuntime::QwenCode);
     }
 
     #[test]
     fn runtime_from_str_invalid() {
-        let result: Result<AgentRuntime, _> = "gemini".parse();
+        let result: Result<AgentRuntime, _> = "unknown-runtime".parse();
         assert!(result.is_err());
     }
 
@@ -296,11 +333,37 @@ mod tests {
         let rt2 = AgentRuntime::ClaudeCode;
         let json2 = serde_json::to_string(&rt2).unwrap();
         assert_eq!(json2, "\"claude-code\"");
+
+        let rt3 = AgentRuntime::GeminiCli;
+        let json3 = serde_json::to_string(&rt3).unwrap();
+        assert_eq!(json3, "\"gemini-cli\"");
+
+        let rt4 = AgentRuntime::QwenCode;
+        let json4 = serde_json::to_string(&rt4).unwrap();
+        assert_eq!(json4, "\"qwen-code\"");
+    }
+
+    #[test]
+    fn runtime_serde_alias_deserialize() {
+        // "gemini" alias deserializes to GeminiCli
+        let parsed: AgentRuntime = serde_json::from_str("\"gemini\"").unwrap();
+        assert_eq!(parsed, AgentRuntime::GeminiCli);
+        // "qwen" alias deserializes to QwenCode
+        let parsed: AgentRuntime = serde_json::from_str("\"qwen\"").unwrap();
+        assert_eq!(parsed, AgentRuntime::QwenCode);
     }
 
     #[test]
     fn runtime_default_is_claude_code() {
         assert_eq!(AgentRuntime::default(), AgentRuntime::ClaudeCode);
+    }
+
+    #[test]
+    fn runtime_is_trusted() {
+        assert!(AgentRuntime::ClaudeCode.is_trusted());
+        assert!(AgentRuntime::Codex.is_trusted());
+        assert!(!AgentRuntime::GeminiCli.is_trusted());
+        assert!(!AgentRuntime::QwenCode.is_trusted());
     }
 
     #[test]

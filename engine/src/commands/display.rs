@@ -137,7 +137,7 @@ pub fn compact_task_id(id: &str) -> &str {
     id.rsplit('-').next().unwrap_or(id)
 }
 
-/// Format runtime suffix for display — only shows when non-default (codex).
+/// Format runtime suffix for display — only shows when non-default.
 pub fn runtime_suffix(task: &Task) -> String {
     if task.runtime != crate::models::AgentRuntime::ClaudeCode {
         format!(" [{}]", task.runtime)

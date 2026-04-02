@@ -58,11 +58,31 @@ pub fn codex_model(model: &str) -> &str {
     }
 }
 
+/// Resolve model for Gemini CLI runtime.
+/// Claude shorthands map to empty (use Gemini's default). Explicit model IDs pass through.
+pub fn gemini_model(model: &str) -> &str {
+    match model {
+        "opus" | "sonnet" | "haiku" => "",
+        other => other,
+    }
+}
+
+/// Resolve model for Qwen Code runtime.
+/// Claude shorthands map to empty (use Qwen's default). Explicit model IDs pass through.
+pub fn qwen_model(model: &str) -> &str {
+    match model {
+        "opus" | "sonnet" | "haiku" => "",
+        other => other,
+    }
+}
+
 /// Resolve the model string for a task, taking runtime into account.
 fn resolve_model(model: &str, runtime: AgentRuntime) -> &str {
     match runtime {
-        AgentRuntime::Codex => codex_model(model),
         AgentRuntime::ClaudeCode => model_flag(model),
+        AgentRuntime::Codex => codex_model(model),
+        AgentRuntime::GeminiCli => gemini_model(model),
+        AgentRuntime::QwenCode => qwen_model(model),
     }
 }
 
@@ -585,11 +605,13 @@ struct ExecScriptParams<'a> {
 }
 
 /// Generate a self-contained bash exec script for tmux.
-/// Dispatches to Claude Code or Codex script generator based on runtime.
+/// Dispatches to the appropriate script generator based on runtime.
 fn generate_exec_script(params: &ExecScriptParams<'_>) -> String {
     match params.runtime {
         AgentRuntime::ClaudeCode => generate_claude_exec_script(params),
         AgentRuntime::Codex => generate_codex_exec_script(params),
+        AgentRuntime::GeminiCli => generate_gemini_exec_script(params),
+        AgentRuntime::QwenCode => generate_qwen_exec_script(params),
     }
 }
 
@@ -602,6 +624,28 @@ fn codex_sandbox_mode(task_type: &str) -> &'static str {
         }
         // research uses Write, so it's NOT read-only
         _ => "workspace-write",
+    }
+}
+
+/// Determine Gemini CLI approval mode based on task type.
+/// Note: Gemini uses `auto_edit` (underscore).
+fn gemini_approval_mode(task_type: &str) -> &'static str {
+    match task_type {
+        "pipeline-reviewer" | "pipeline-analyst" | "pipeline-qa" | "review" | "analyze"
+        | "research" | "research-curator" => "plan",
+        "code" | "refactor" | "pipeline-engineer" => "auto_edit",
+        _ => "yolo",
+    }
+}
+
+/// Determine Qwen Code approval mode based on task type.
+/// Note: Qwen uses `auto-edit` (hyphen).
+fn qwen_approval_mode(task_type: &str) -> &'static str {
+    match task_type {
+        "pipeline-reviewer" | "pipeline-analyst" | "pipeline-qa" | "review" | "analyze"
+        | "research" | "research-curator" => "plan",
+        "code" | "refactor" | "pipeline-engineer" => "auto-edit",
+        _ => "yolo",
     }
 }
 
@@ -707,6 +751,203 @@ fi
 werma complete "$TASK_ID" --result-file "$RESULT_FILE"
 
 echo "$(date): DONE (runtime=codex)" >> "$LOG_FILE"
+"##
+    )
+}
+
+/// Generate a Gemini CLI exec script for tmux.
+fn generate_gemini_exec_script(params: &ExecScriptParams<'_>) -> String {
+    let prompt_file_str = params.prompt_file.display();
+    let working_dir_str = params.working_dir.display();
+    let log_file_str = params.log_file.display();
+    let task_id = params.task_id;
+    let output = params.output;
+    let model = params.model;
+    let approval_mode = gemini_approval_mode(params.task_type);
+
+    let worktree_guard = if params.is_write_task {
+        r#"
+# SAFETY GUARD: write tasks must run inside a .trees/ worktree, never on main checkout
+if [[ "$WORKING_DIR" != */.trees/* ]]; then
+    echo "$(date): SAFETY ABORT — write task $TASK_ID would run outside .trees/ (dir: $WORKING_DIR)" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+fi
+"#
+    } else {
+        ""
+    };
+
+    format!(
+        r##"#!/bin/bash
+set -euo pipefail
+
+TASK_ID='{task_id}'
+PROMPT_FILE='{prompt_file_str}'
+OUTPUT='{output}'
+WORKING_DIR='{working_dir_str}'
+LOG_FILE='{log_file_str}'
+RESULT_FILE="${{LOG_FILE%.log}}-output.md"
+
+# Redirect all stderr to log from the start
+exec 2>> "$LOG_FILE"
+
+echo "$(date): EXEC_START task=$TASK_ID runtime=gemini-cli model={model} approval={approval_mode}" >> "$LOG_FILE"
+
+cd "$WORKING_DIR" || {{
+    echo "$(date): FAILED — cd to $WORKING_DIR failed" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+}}
+{worktree_guard}
+PROMPT=$(cat "$PROMPT_FILE")
+
+echo "$(date): GEMINI_START pid=$$" >> "$LOG_FILE"
+
+MODEL_FLAG=""
+if [ -n "{model}" ]; then
+    MODEL_FLAG="-m {model}"
+fi
+
+RESULT_JSON=$(gemini --approval-mode {approval_mode} $MODEL_FLAG -o json -p "$PROMPT") || {{
+    EXIT_CODE=$?
+    echo "$(date): GEMINI_EXIT code=$EXIT_CODE" >> "$LOG_FILE"
+    echo "$(date): FAILED (exit $EXIT_CODE)" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+}}
+
+# Gemini JSON: single object with .response field
+RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.response // empty' 2>/dev/null)
+
+if [ -z "$RESULT_TEXT" ]; then
+    RESULT_TEXT="$RESULT_JSON"
+fi
+
+SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+
+# Guard: if truly empty, log and fail
+if [ -z "$(echo "$RESULT_TEXT" | tr -d '[:space:]')" ]; then
+    echo "$(date): EMPTY OUTPUT — gemini returned no parseable result" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+fi
+
+echo "$RESULT_TEXT" > "$RESULT_FILE"
+
+if [ -n "$OUTPUT" ]; then
+    mkdir -p "$(dirname "$OUTPUT")"
+    echo "$RESULT_TEXT" > "$OUTPUT"
+fi
+
+# Gemini does not provide cost or turns
+werma complete "$TASK_ID" --session "$SESSION_ID" --result-file "$RESULT_FILE"
+
+echo "$(date): DONE (runtime=gemini-cli)" >> "$LOG_FILE"
+"##
+    )
+}
+
+/// Generate a Qwen Code exec script for tmux.
+fn generate_qwen_exec_script(params: &ExecScriptParams<'_>) -> String {
+    let prompt_file_str = params.prompt_file.display();
+    let working_dir_str = params.working_dir.display();
+    let log_file_str = params.log_file.display();
+    let task_id = params.task_id;
+    let output = params.output;
+    let model = params.model;
+    let max_turns = params.max_turns;
+    let approval_mode = qwen_approval_mode(params.task_type);
+
+    let worktree_guard = if params.is_write_task {
+        r#"
+# SAFETY GUARD: write tasks must run inside a .trees/ worktree, never on main checkout
+if [[ "$WORKING_DIR" != */.trees/* ]]; then
+    echo "$(date): SAFETY ABORT — write task $TASK_ID would run outside .trees/ (dir: $WORKING_DIR)" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+fi
+"#
+    } else {
+        ""
+    };
+
+    format!(
+        r##"#!/bin/bash
+set -euo pipefail
+
+TASK_ID='{task_id}'
+PROMPT_FILE='{prompt_file_str}'
+OUTPUT='{output}'
+WORKING_DIR='{working_dir_str}'
+MAX_TURNS='{max_turns}'
+LOG_FILE='{log_file_str}'
+RESULT_FILE="${{LOG_FILE%.log}}-output.md"
+
+# Redirect all stderr to log from the start
+exec 2>> "$LOG_FILE"
+
+echo "$(date): EXEC_START task=$TASK_ID runtime=qwen-code model={model} approval={approval_mode}" >> "$LOG_FILE"
+
+cd "$WORKING_DIR" || {{
+    echo "$(date): FAILED — cd to $WORKING_DIR failed" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+}}
+{worktree_guard}
+PROMPT=$(cat "$PROMPT_FILE")
+
+echo "$(date): QWEN_START pid=$$" >> "$LOG_FILE"
+
+MODEL_FLAG=""
+if [ -n "{model}" ]; then
+    MODEL_FLAG="-m {model}"
+fi
+
+RESULT_JSON=$(qwen --approval-mode {approval_mode} $MODEL_FLAG --max-session-turns "$MAX_TURNS" -o json -p "$PROMPT") || {{
+    EXIT_CODE=$?
+    echo "$(date): QWEN_EXIT code=$EXIT_CODE" >> "$LOG_FILE"
+    echo "$(date): FAILED (exit $EXIT_CODE)" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+}}
+
+# Qwen JSON: array — last element has .result field
+RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.[-1].result // empty' 2>/dev/null)
+
+if [ -z "$RESULT_TEXT" ]; then
+    RESULT_TEXT="$RESULT_JSON"
+fi
+
+SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.[0].session_id // empty' 2>/dev/null || echo "")
+
+# Detect errors in Qwen output
+IS_ERROR=$(echo "$RESULT_JSON" | jq -r '.[-1].is_error // empty' 2>/dev/null || echo "")
+if [ "$IS_ERROR" = "true" ]; then
+    echo "$(date): QWEN returned is_error=true" >> "$LOG_FILE"
+    echo "$RESULT_TEXT" > "$RESULT_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+fi
+
+# Guard: if truly empty, log and fail
+if [ -z "$(echo "$RESULT_TEXT" | tr -d '[:space:]')" ]; then
+    echo "$(date): EMPTY OUTPUT — qwen returned no parseable result" >> "$LOG_FILE"
+    werma fail "$TASK_ID"
+    exit 1
+fi
+
+echo "$RESULT_TEXT" > "$RESULT_FILE"
+
+if [ -n "$OUTPUT" ]; then
+    mkdir -p "$(dirname "$OUTPUT")"
+    echo "$RESULT_TEXT" > "$OUTPUT"
+fi
+
+# Qwen does not provide cost data
+werma complete "$TASK_ID" --session "$SESSION_ID" --result-file "$RESULT_FILE"
+
+echo "$(date): DONE (runtime=qwen-code)" >> "$LOG_FILE"
 "##
     )
 }
@@ -2175,5 +2416,295 @@ mod tests {
             "claude-sonnet-4-6",
             "ClaudeCode runtime: sonnet → claude-sonnet-4-6"
         );
+
+        // GeminiCli: Claude shorthands → empty (let Gemini use default)
+        assert_eq!(
+            resolve_model("opus", AgentRuntime::GeminiCli),
+            "",
+            "Gemini runtime: opus → empty"
+        );
+        assert_eq!(
+            resolve_model("gemini-2.5-flash", AgentRuntime::GeminiCli),
+            "gemini-2.5-flash",
+            "Gemini runtime: explicit model passes through"
+        );
+
+        // QwenCode: Claude shorthands → empty (let Qwen use default)
+        assert_eq!(
+            resolve_model("opus", AgentRuntime::QwenCode),
+            "",
+            "Qwen runtime: opus → empty"
+        );
+        assert_eq!(
+            resolve_model("qwen3-coder", AgentRuntime::QwenCode),
+            "qwen3-coder",
+            "Qwen runtime: explicit model passes through"
+        );
+    }
+
+    // ─── RIG-369: Gemini CLI exec script tests ────────────────────────────
+
+    #[test]
+    fn generate_gemini_exec_script_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-gemini",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "gemini-2.5-flash",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: false,
+            runtime: AgentRuntime::GeminiCli,
+            task_type: "research",
+        });
+
+        assert!(
+            script.contains("gemini --approval-mode plan"),
+            "research should use plan approval mode: {script}"
+        );
+        assert!(
+            script.contains("-o json -p"),
+            "should use JSON output with -p flag"
+        );
+        assert!(
+            script.contains(".response"),
+            "should extract .response from JSON"
+        );
+        assert!(
+            !script.contains("claude -p"),
+            "gemini script must not contain claude -p"
+        );
+        assert!(
+            !script.contains("codex exec"),
+            "gemini script must not contain codex exec"
+        );
+    }
+
+    #[test]
+    fn generate_gemini_exec_script_code_uses_auto_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-gemini-code",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Edit,Write,Bash",
+            max_turns: 30,
+            model: "",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: true,
+            runtime: AgentRuntime::GeminiCli,
+            task_type: "pipeline-engineer",
+        });
+
+        assert!(
+            script.contains("--approval-mode auto_edit"),
+            "engineer should use auto_edit: {script}"
+        );
+        assert!(
+            script.contains("SAFETY ABORT"),
+            "write task should have worktree guard"
+        );
+    }
+
+    #[test]
+    fn generate_gemini_exec_script_full_uses_yolo() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-gemini-full",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Edit,Write,Bash",
+            max_turns: 30,
+            model: "",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: true,
+            runtime: AgentRuntime::GeminiCli,
+            task_type: "full",
+        });
+
+        assert!(
+            script.contains("--approval-mode yolo"),
+            "full task should use yolo: {script}"
+        );
+    }
+
+    // ─── RIG-369: Qwen Code exec script tests ────────────────────────────
+
+    #[test]
+    fn generate_qwen_exec_script_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-qwen",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "qwen3-coder",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: false,
+            runtime: AgentRuntime::QwenCode,
+            task_type: "research",
+        });
+
+        assert!(
+            script.contains("qwen --approval-mode plan"),
+            "research should use plan approval mode: {script}"
+        );
+        assert!(
+            script.contains("-o json -p"),
+            "should use JSON output with -p flag"
+        );
+        assert!(
+            script.contains(".[-1].result"),
+            "should extract .[-1].result from JSON array"
+        );
+        assert!(
+            script.contains("--max-session-turns"),
+            "should pass max turns to qwen"
+        );
+        assert!(
+            !script.contains("claude -p"),
+            "qwen script must not contain claude -p"
+        );
+        assert!(
+            !script.contains("codex exec"),
+            "qwen script must not contain codex exec"
+        );
+    }
+
+    #[test]
+    fn generate_qwen_exec_script_code_uses_auto_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-qwen-code",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Edit,Write,Bash",
+            max_turns: 30,
+            model: "",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: true,
+            runtime: AgentRuntime::QwenCode,
+            task_type: "code",
+        });
+
+        assert!(
+            script.contains("--approval-mode auto-edit"),
+            "code should use auto-edit (hyphen for qwen): {script}"
+        );
+    }
+
+    #[test]
+    fn generate_qwen_exec_script_detects_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-qwen-err",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: false,
+            runtime: AgentRuntime::QwenCode,
+            task_type: "research",
+        });
+
+        assert!(
+            script.contains("is_error"),
+            "qwen script should check is_error: {script}"
+        );
+    }
+
+    // ─── RIG-369: Model mapping tests ────────────────────────────────────
+
+    #[test]
+    fn gemini_model_maps_claude_shorthands_to_empty() {
+        assert_eq!(gemini_model("opus"), "");
+        assert_eq!(gemini_model("sonnet"), "");
+        assert_eq!(gemini_model("haiku"), "");
+    }
+
+    #[test]
+    fn gemini_model_passes_through_explicit_models() {
+        assert_eq!(gemini_model("gemini-2.5-flash"), "gemini-2.5-flash");
+        assert_eq!(
+            gemini_model("gemini-3-flash-preview"),
+            "gemini-3-flash-preview"
+        );
+    }
+
+    #[test]
+    fn qwen_model_maps_claude_shorthands_to_empty() {
+        assert_eq!(qwen_model("opus"), "");
+        assert_eq!(qwen_model("sonnet"), "");
+        assert_eq!(qwen_model("haiku"), "");
+    }
+
+    #[test]
+    fn qwen_model_passes_through_explicit_models() {
+        assert_eq!(qwen_model("qwen3-coder"), "qwen3-coder");
+        assert_eq!(qwen_model("coder-model"), "coder-model");
+    }
+
+    // ─── RIG-369: Approval mode tests ────────────────────────────────────
+
+    #[test]
+    fn gemini_approval_mode_mapping() {
+        assert_eq!(gemini_approval_mode("research"), "plan");
+        assert_eq!(gemini_approval_mode("review"), "plan");
+        assert_eq!(gemini_approval_mode("pipeline-reviewer"), "plan");
+        assert_eq!(gemini_approval_mode("pipeline-analyst"), "plan");
+        assert_eq!(gemini_approval_mode("code"), "auto_edit");
+        assert_eq!(gemini_approval_mode("pipeline-engineer"), "auto_edit");
+        assert_eq!(gemini_approval_mode("full"), "yolo");
+    }
+
+    #[test]
+    fn qwen_approval_mode_mapping() {
+        assert_eq!(qwen_approval_mode("research"), "plan");
+        assert_eq!(qwen_approval_mode("review"), "plan");
+        assert_eq!(qwen_approval_mode("pipeline-reviewer"), "plan");
+        assert_eq!(qwen_approval_mode("code"), "auto-edit");
+        assert_eq!(qwen_approval_mode("pipeline-engineer"), "auto-edit");
+        assert_eq!(qwen_approval_mode("full"), "yolo");
     }
 }

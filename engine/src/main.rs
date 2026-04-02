@@ -9,6 +9,8 @@ mod dashboard;
 #[allow(dead_code)]
 mod db;
 #[allow(dead_code)]
+mod github;
+#[allow(dead_code)]
 mod linear;
 mod migrate;
 #[allow(dead_code)]
@@ -470,6 +472,26 @@ mod tests {
             match parse(&["add", "test prompt", "--runtime", "codex"]) {
                 Commands::Add { runtime, .. } => {
                     assert_eq!(runtime, "codex");
+                }
+                other => panic!("expected Add, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_add_with_gemini_runtime() {
+            match parse(&["add", "test prompt", "--runtime", "gemini-cli"]) {
+                Commands::Add { runtime, .. } => {
+                    assert_eq!(runtime, "gemini-cli");
+                }
+                other => panic!("expected Add, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_add_with_qwen_runtime() {
+            match parse(&["add", "test prompt", "--runtime", "qwen-code"]) {
+                Commands::Add { runtime, .. } => {
+                    assert_eq!(runtime, "qwen-code");
                 }
                 other => panic!("expected Add, got {other:?}"),
             }
