@@ -306,8 +306,11 @@ fn main() -> anyhow::Result<()> {
             match action {
                 cli::PipelineAction::Poll => commands::pipeline_cmd::cmd_pipeline_poll(&db)?,
                 cli::PipelineAction::Status => commands::pipeline_cmd::cmd_pipeline_status(&db)?,
-                cli::PipelineAction::Show { stage } => {
-                    commands::pipeline_cmd::cmd_pipeline_show(stage.as_deref())?;
+                cli::PipelineAction::Show { stage, pipeline } => {
+                    commands::pipeline_cmd::cmd_pipeline_show(
+                        stage.as_deref(),
+                        pipeline.as_deref(),
+                    )?;
                 }
                 cli::PipelineAction::Validate => commands::pipeline_cmd::cmd_pipeline_validate()?,
                 cli::PipelineAction::Run { issues, stage } => {
@@ -916,9 +919,10 @@ mod tests {
         fn parse_pipeline_show() {
             match parse(&["pipeline", "show"]) {
                 Commands::Pipeline {
-                    action: crate::cli::PipelineAction::Show { stage },
+                    action: crate::cli::PipelineAction::Show { stage, pipeline },
                 } => {
                     assert!(stage.is_none());
+                    assert!(pipeline.is_none());
                 }
                 other => panic!("expected Pipeline Show, got {other:?}"),
             }
@@ -928,9 +932,23 @@ mod tests {
         fn parse_pipeline_show_with_stage() {
             match parse(&["pipeline", "show", "--stage", "engineer"]) {
                 Commands::Pipeline {
-                    action: crate::cli::PipelineAction::Show { stage },
+                    action: crate::cli::PipelineAction::Show { stage, pipeline },
                 } => {
                     assert_eq!(stage, Some("engineer".into()));
+                    assert!(pipeline.is_none());
+                }
+                other => panic!("expected Pipeline Show, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_pipeline_show_with_pipeline() {
+            match parse(&["pipeline", "show", "--pipeline", "honeyjourney"]) {
+                Commands::Pipeline {
+                    action: crate::cli::PipelineAction::Show { stage, pipeline },
+                } => {
+                    assert!(stage.is_none());
+                    assert_eq!(pipeline, Some("honeyjourney".into()));
                 }
                 other => panic!("expected Pipeline Show, got {other:?}"),
             }
