@@ -58,7 +58,7 @@ pub enum Commands {
         #[arg(long)]
         stage: Option<String>,
 
-        /// Agent runtime: claude-code|codex (default: claude-code)
+        /// Agent runtime: claude-code|codex|gemini-cli|qwen-code (default: claude-code)
         #[arg(long, default_value = "claude-code")]
         runtime: String,
     },

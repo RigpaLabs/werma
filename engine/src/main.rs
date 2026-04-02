@@ -475,6 +475,26 @@ mod tests {
         }
 
         #[test]
+        fn parse_add_with_gemini_runtime() {
+            match parse(&["add", "test prompt", "--runtime", "gemini-cli"]) {
+                Commands::Add { runtime, .. } => {
+                    assert_eq!(runtime, "gemini-cli");
+                }
+                other => panic!("expected Add, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_add_with_qwen_runtime() {
+            match parse(&["add", "test prompt", "--runtime", "qwen-code"]) {
+                Commands::Add { runtime, .. } => {
+                    assert_eq!(runtime, "qwen-code");
+                }
+                other => panic!("expected Add, got {other:?}"),
+            }
+        }
+
+        #[test]
         fn parse_add_default_runtime() {
             match parse(&["add", "test prompt"]) {
                 Commands::Add { runtime, .. } => {

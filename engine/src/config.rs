@@ -12,8 +12,8 @@ pub const DEFAULT_COMPLETED_LIMIT: usize = 17;
 /// Users can override per-repo via `[repos]` in `~/.werma/config.toml`.
 const DEFAULT_REPO_BASE: &str = "~/projects";
 
-/// Default allowed runtimes when no explicit allowlist is configured.
-const DEFAULT_ALLOWED_RUNTIMES: &[&str] = &["claude-code", "codex"];
+// Default allowed runtimes are derived from `AgentRuntime::is_trusted()` — no
+// separate constant needed.  See `is_runtime_allowed()` and `allowed_runtimes_for_repo()`.
 
 /// User-level configuration loaded from `~/.werma/config.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -34,7 +34,7 @@ pub struct UserConfig {
 
     /// Repo label → allowed runtimes list.
     /// Example: `fathom = ["claude-code", "codex"]`
-    /// Repos not listed here use DEFAULT_ALLOWED_RUNTIMES.
+    /// Repos not listed here allow only trusted runtimes (see `AgentRuntime::is_trusted`).
     #[serde(default)]
     pub repo_runtimes: HashMap<String, Vec<String>>,
 }
@@ -78,13 +78,14 @@ impl UserConfig {
     }
 
     /// Check if a runtime is allowed for a given repo.
-    /// Uses the explicit allowlist if configured, otherwise DEFAULT_ALLOWED_RUNTIMES.
+    /// Uses the explicit allowlist if configured, otherwise falls back to
+    /// `AgentRuntime::is_trusted()` (currently Claude Code + Codex).
     pub fn is_runtime_allowed(&self, repo: &str, runtime: AgentRuntime) -> bool {
-        let runtime_str = runtime.to_string();
         if let Some(allowed) = self.repo_runtimes.get(repo) {
+            let runtime_str = runtime.to_string();
             allowed.iter().any(|r| r == &runtime_str)
         } else {
-            DEFAULT_ALLOWED_RUNTIMES.contains(&runtime_str.as_str())
+            runtime.is_trusted()
         }
     }
 
@@ -93,9 +94,10 @@ impl UserConfig {
         if let Some(allowed) = self.repo_runtimes.get(repo) {
             allowed.clone()
         } else {
-            DEFAULT_ALLOWED_RUNTIMES
+            AgentRuntime::ALL
                 .iter()
-                .map(|s| (*s).to_string())
+                .filter(|r| r.is_trusted())
+                .map(ToString::to_string)
                 .collect()
         }
     }
@@ -464,6 +466,37 @@ mod tests {
         let cfg = UserConfig::load_from(&path);
         let allowed = cfg.allowed_runtimes_for_repo("my-repo");
         assert_eq!(allowed, vec!["claude-code"]);
+    }
+
+    #[test]
+    fn gemini_qwen_blocked_by_default_allowlist() {
+        let cfg = UserConfig::default();
+        assert!(
+            !cfg.is_runtime_allowed("any-repo", AgentRuntime::GeminiCli),
+            "gemini should be blocked by default"
+        );
+        assert!(
+            !cfg.is_runtime_allowed("any-repo", AgentRuntime::QwenCode),
+            "qwen should be blocked by default"
+        );
+    }
+
+    #[test]
+    fn gemini_qwen_allowed_with_explicit_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[repo_runtimes]\nmy-repo = [\"claude-code\", \"gemini-cli\", \"qwen-code\"]\n",
+        )
+        .unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        assert!(cfg.is_runtime_allowed("my-repo", AgentRuntime::GeminiCli));
+        assert!(cfg.is_runtime_allowed("my-repo", AgentRuntime::QwenCode));
+        assert!(cfg.is_runtime_allowed("my-repo", AgentRuntime::ClaudeCode));
+        // Not in allowlist for other repos
+        assert!(!cfg.is_runtime_allowed("other", AgentRuntime::GeminiCli));
     }
 
     // ─── repo_label_from_dir tests ──────────────────────────────────────────
