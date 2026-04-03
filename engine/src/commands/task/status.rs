@@ -42,6 +42,7 @@ fn fetch_terminal_buckets(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_status(
     db: &Db,
     watch: bool,
@@ -49,6 +50,7 @@ pub fn cmd_status(
     plain: bool,
     interval: u64,
     all: bool,
+    art: bool,
     completed_limit: Option<usize>,
 ) -> Result<()> {
     // `--all` overrides config limit
@@ -143,9 +145,21 @@ pub fn cmd_status(
                 terminal_counts,
             };
             let content = if use_compact {
-                ui::render_compact_buf(&buckets, Some(interval), current_term_width, tick_count)
+                ui::render_compact_buf(
+                    &buckets,
+                    Some(interval),
+                    current_term_width,
+                    tick_count,
+                    art,
+                )
             } else {
-                ui::render_status_buf(&buckets, Some(interval), current_term_width, tick_count)
+                ui::render_status_buf(
+                    &buckets,
+                    Some(interval),
+                    current_term_width,
+                    tick_count,
+                    art,
+                )
             };
 
             ui::refresh_screen(&content, prev_lines);
@@ -158,14 +172,14 @@ pub fn cmd_status(
         if auto_compacted {
             eprintln!("tip: terminal width < 60, using compact mode (or pass -c)");
         }
-        render_compact(db, None, limit)?;
+        render_compact(db, None, limit, art)?;
     } else {
-        render_status(db, limit)?;
+        render_status(db, limit, art)?;
     }
     Ok(())
 }
 
-fn render_status(db: &Db, limit: Option<usize>) -> Result<()> {
+fn render_status(db: &Db, limit: Option<usize>, show_art: bool) -> Result<()> {
     let running = db.list_tasks(Some(Status::Running))?;
     let pending = db.list_tasks(Some(Status::Pending))?;
     let (completed, failed, canceled) = fetch_terminal_buckets(db, limit)?;
@@ -178,9 +192,11 @@ fn render_status(db: &Db, limit: Option<usize>) -> Result<()> {
     let term_width = terminal_size::terminal_size()
         .map(|(w, _)| w.0 as usize)
         .unwrap_or(80);
-    let art = crate::art::render_art(term_width, 0);
-    if !art.is_empty() {
-        print!("{art}");
+    if show_art {
+        let art = crate::art::render_art(term_width, 0);
+        if !art.is_empty() {
+            print!("{art}");
+        }
     }
 
     println!();
@@ -254,7 +270,12 @@ fn render_status(db: &Db, limit: Option<usize>) -> Result<()> {
     Ok(())
 }
 
-fn render_compact(db: &Db, interval: Option<u64>, limit: Option<usize>) -> Result<()> {
+fn render_compact(
+    db: &Db,
+    interval: Option<u64>,
+    limit: Option<usize>,
+    show_art: bool,
+) -> Result<()> {
     let running = db.list_tasks(Some(Status::Running))?;
     let pending = db.list_tasks(Some(Status::Pending))?;
     let (completed, failed, canceled) = fetch_terminal_buckets(db, limit)?;
@@ -268,9 +289,11 @@ fn render_compact(db: &Db, interval: Option<u64>, limit: Option<usize>) -> Resul
         .map(|(w, _)| w.0 as usize)
         .unwrap_or(80);
 
-    let art = crate::art::render_art(term_width, 0);
-    if !art.is_empty() {
-        print!("{art}");
+    if show_art {
+        let art = crate::art::render_art(term_width, 0);
+        if !art.is_empty() {
+            print!("{art}");
+        }
     }
 
     let sep = "───────────────────────────────────";
@@ -451,7 +474,7 @@ mod tests {
     #[test]
     fn cmd_status_plain_watch_conflict() {
         let db = test_db();
-        let result = cmd_status(&db, true, false, true, 2, false, Some(17));
+        let result = cmd_status(&db, true, false, true, 2, false, false, Some(17));
         assert!(
             result.is_err(),
             "--plain and --watch must be rejected together"
@@ -461,6 +484,52 @@ mod tests {
             msg.contains("mutually exclusive"),
             "error message should mention mutual exclusion"
         );
+    }
+
+    // default (art=false) — render_status_buf must not contain art escape sequences from art module
+    #[test]
+    fn status_buf_default_no_art() {
+        let buckets = crate::ui::StatusBuckets {
+            running: &[],
+            pending: &[],
+            completed: &[],
+            failed: &[],
+            canceled: &[],
+            terminal_counts: None,
+        };
+        let buf = crate::ui::render_status_buf(&buckets, None, 120, 0, false);
+        // Art output starts with ANSI color codes for the pixel art — it should be absent
+        // The art module emits lines starting with spaces + ANSI color for each pixel row.
+        // We verify art is skipped by checking the buffer doesn't start with an art prefix.
+        // Art lines contain "▀" or "▄" block characters used by the Garuda renderer.
+        assert!(
+            !buf.contains('\u{2580}') && !buf.contains('\u{2584}'),
+            "art block chars must not appear when art=false"
+        );
+    }
+
+    // --art flag — render_status_buf must contain art block chars when art=true
+    #[test]
+    fn status_buf_art_flag_enabled() {
+        let buckets = crate::ui::StatusBuckets {
+            running: &[],
+            pending: &[],
+            completed: &[],
+            failed: &[],
+            canceled: &[],
+            terminal_counts: None,
+        };
+        // Use a wide terminal width to ensure art is rendered (art.rs may skip on narrow)
+        let buf = crate::ui::render_status_buf(&buckets, None, 120, 0, true);
+        // If art module produces output at this width, verify block chars present.
+        // render_art returns "" for very narrow widths — only assert when non-empty.
+        let art_check = crate::art::render_art(120, 0);
+        if !art_check.is_empty() {
+            assert!(
+                buf.contains('\u{2580}') || buf.contains('\u{2584}'),
+                "art block chars must appear when art=true"
+            );
+        }
     }
 
     // render_plain must include Canceled tasks

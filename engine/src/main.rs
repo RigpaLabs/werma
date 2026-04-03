@@ -156,6 +156,7 @@ fn main() -> anyhow::Result<()> {
             plain,
             interval,
             all,
+            art,
         } => {
             let db = open_db()?;
             let cfg = config::UserConfig::load();
@@ -166,6 +167,7 @@ fn main() -> anyhow::Result<()> {
                 plain,
                 interval,
                 all,
+                art,
                 cfg.resolved_completed_limit(),
             )?;
         }
@@ -545,12 +547,14 @@ mod tests {
                     plain,
                     interval,
                     all,
+                    art,
                 } => {
                     assert!(!watch);
                     assert!(!compact);
                     assert!(!plain);
                     assert_eq!(interval, 3);
                     assert!(!all);
+                    assert!(!art);
                 }
                 other => panic!("expected Status, got {other:?}"),
             }
@@ -573,12 +577,14 @@ mod tests {
                     plain,
                     interval,
                     all,
+                    art,
                 } => {
                     assert!(watch);
                     assert!(compact);
                     assert!(!plain);
                     assert_eq!(interval, 5);
                     assert!(!all);
+                    assert!(!art);
                 }
                 other => panic!("expected Status, got {other:?}"),
             }
@@ -593,12 +599,14 @@ mod tests {
                     plain,
                     interval,
                     all,
+                    art,
                 } => {
                     assert!(!watch);
                     assert!(!compact);
                     assert!(plain);
                     assert_eq!(interval, 3);
                     assert!(!all);
+                    assert!(!art);
                 }
                 other => panic!("expected Status, got {other:?}"),
             }
@@ -619,6 +627,22 @@ mod tests {
             match parse(&["st", "-p"]) {
                 Commands::Status { plain, .. } => {
                     assert!(plain);
+                }
+                other => panic!("expected Status, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn parse_status_art_flag() {
+            match parse(&["st", "--art"]) {
+                Commands::Status { art, .. } => {
+                    assert!(art, "--art flag must enable art");
+                }
+                other => panic!("expected Status, got {other:?}"),
+            }
+            match parse(&["st", "-A"]) {
+                Commands::Status { art, .. } => {
+                    assert!(art, "-A short flag must enable art");
                 }
                 other => panic!("expected Status, got {other:?}"),
             }
