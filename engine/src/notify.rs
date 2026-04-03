@@ -135,6 +135,11 @@ fn render_field(field: DisplayField, task: &crate::models::Task) -> Option<Strin
         DisplayField::Model => {
             if task.model.is_empty() {
                 None
+            } else if task.runtime != crate::models::AgentRuntime::ClaudeCode {
+                // RIG-387: show runtime prefix when not claude-code so qwen/gemini/codex
+                // tasks are distinguishable from claude tasks in `werma st`.
+                // e.g. "(qwen-code/sonnet)" instead of just "(sonnet)"
+                Some(format!("{}/{}", task.runtime, task.model))
             } else {
                 Some(task.model.clone())
             }
@@ -355,5 +360,55 @@ mod tests {
     fn parse_field_names_empty() {
         let fields = parse_field_names(&[]);
         assert!(fields.is_empty());
+    }
+
+    // ─── RIG-387: runtime prefix in Model display ────────────────────────
+
+    /// When runtime is not claude-code, Model display must include the runtime prefix.
+    ///
+    /// Bug: `render_field(Model)` returned just `task.model` ("sonnet") even for qwen/gemini
+    /// tasks, making them indistinguishable from claude-code tasks in `werma st`.
+    #[test]
+    fn display_fields_model_shows_runtime_prefix_for_non_claude() {
+        let task = crate::models::Task {
+            model: "sonnet".into(),
+            runtime: crate::models::AgentRuntime::QwenCode,
+            turns_used: 5,
+            ..Default::default()
+        };
+        let result = format_display_fields(&task, DEFAULT_STATUS_FIELDS);
+        assert_eq!(
+            result, "  (qwen-code/sonnet/5t)",
+            "non-claude runtime must be prefixed to model in display"
+        );
+    }
+
+    /// Claude-code runtime must NOT add a prefix — keep backward compatibility.
+    #[test]
+    fn display_fields_model_no_prefix_for_claude_code() {
+        let task = crate::models::Task {
+            model: "opus".into(),
+            runtime: crate::models::AgentRuntime::ClaudeCode,
+            turns_used: 10,
+            ..Default::default()
+        };
+        let result = format_display_fields(&task, DEFAULT_STATUS_FIELDS);
+        assert_eq!(
+            result, "  (opus/10t)",
+            "claude-code runtime must not add a prefix"
+        );
+    }
+
+    /// Codex runtime also shows prefix.
+    #[test]
+    fn display_fields_model_shows_codex_prefix() {
+        let task = crate::models::Task {
+            model: "o4-mini".into(),
+            runtime: crate::models::AgentRuntime::Codex,
+            ..Default::default()
+        };
+        let fields = &[DisplayField::Model];
+        let result = format_display_fields(&task, fields);
+        assert_eq!(result, "  (codex/o4-mini)");
     }
 }

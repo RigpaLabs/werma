@@ -15,7 +15,23 @@ use crate::db::Db;
 use crate::traits::CommandRunner;
 
 /// Insert a task using a raw `&Connection` — for use inside `Db::transaction()` closures.
+///
+/// Applies the same guard as `Db::insert_task()`: pipeline tasks (non-empty `pipeline_stage`)
+/// must have a non-empty `linear_issue_id`. Without this guard, callback-spawned tasks with
+/// empty identifiers bypass dedup and cause ghost task spawn loops (RIG-387).
 fn insert_task_with_conn(conn: &Connection, task: &crate::models::Task) -> Result<()> {
+    // RIG-387: same guard as Db::insert_task() — pipeline tasks must have a non-empty identifier.
+    // Without this, callback-spawned tasks with empty linear_issue_id bypass dedup and cause
+    // infinite spawn loops (has_any_nonfailed_task_for_issue_stage("", stage) matches nothing).
+    if !task.pipeline_stage.is_empty() && task.linear_issue_id.is_empty() {
+        anyhow::bail!(
+            "refusing to insert pipeline task {}: empty linear_issue_id (stage={}). \
+             This is a bug — identifier must be set before spawning a pipeline task.",
+            task.id,
+            task.pipeline_stage
+        );
+    }
+
     let depends_on = serde_json::to_string(&task.depends_on)?;
     let context_files = serde_json::to_string(&task.context_files)?;
     let linear_pushed: i32 = if task.linear_pushed { 1 } else { 0 };
@@ -26,13 +42,15 @@ fn insert_task_with_conn(conn: &Connection, task: &crate::models::Task) -> Resul
             type, prompt, output_path, working_dir, model, max_turns,
             allowed_tools, session_id, linear_issue_id, linear_pushed,
             pipeline_stage, depends_on, context_files, repo_hash, estimate,
-            retry_count, retry_after, cost_usd, turns_used, handoff_content
+            retry_count, retry_after, cost_usd, turns_used, handoff_content,
+            runtime
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6,
             ?7, ?8, ?9, ?10, ?11, ?12,
             ?13, ?14, ?15, ?16,
             ?17, ?18, ?19, ?20, ?21,
-            ?22, ?23, ?24, ?25, ?26
+            ?22, ?23, ?24, ?25, ?26,
+            ?27
         )",
         params![
             task.id,
@@ -61,6 +79,7 @@ fn insert_task_with_conn(conn: &Connection, task: &crate::models::Task) -> Resul
             task.cost_usd,
             task.turns_used,
             task.handoff_content,
+            task.runtime.to_string(),
         ],
     )?;
     Ok(())
@@ -797,6 +816,79 @@ mod tests {
                         .is_some_and(|b| b.contains("Soft failure"))
             }),
             "should queue PostComment about soft failure, got: {effects:?}"
+        );
+    }
+
+    // ─── RIG-387: insert_task_with_conn guard + runtime column ───────────────
+
+    /// insert_task_with_conn must reject pipeline tasks with empty linear_issue_id.
+    ///
+    /// Bug: the raw-connection INSERT path had no validation, allowing tasks with
+    /// empty linear_issue_id to be inserted. The dedup query
+    /// `has_any_nonfailed_task_for_issue_stage("", stage)` then matches nothing,
+    /// so the poll loop spawns a new task on every tick — 41+ ghost tasks per session.
+    #[test]
+    fn insert_task_with_conn_rejects_empty_identifier() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        let result = db.transaction(|conn| {
+            let mut task = crate::db::make_test_task("20260403-387a");
+            task.pipeline_stage = "engineer".to_string();
+            task.linear_issue_id = String::new(); // empty — must be rejected
+            insert_task_with_conn(conn, &task)
+        });
+
+        assert!(
+            result.is_err(),
+            "insert_task_with_conn must reject pipeline tasks with empty linear_issue_id"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("empty linear_issue_id"),
+            "error must mention empty linear_issue_id, got: {msg}"
+        );
+    }
+
+    /// Non-pipeline tasks (empty pipeline_stage) with empty linear_issue_id must still be accepted.
+    #[test]
+    fn insert_task_with_conn_allows_non_pipeline_empty_identifier() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        db.transaction(|conn| {
+            let mut task = crate::db::make_test_task("20260403-387b");
+            task.pipeline_stage = String::new(); // non-pipeline
+            task.linear_issue_id = String::new(); // empty — OK for non-pipeline
+            insert_task_with_conn(conn, &task)
+        })
+        .unwrap();
+
+        let stored = db.task("20260403-387b").unwrap();
+        assert!(stored.is_some(), "non-pipeline task must be inserted");
+    }
+
+    /// insert_task_with_conn must persist the runtime column (27th field).
+    ///
+    /// Bug: the INSERT statement had 26 columns and omitted `runtime`, so callback-spawned
+    /// tasks always got the DB default runtime (claude-code) regardless of config.
+    #[test]
+    fn insert_task_with_conn_persists_runtime() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+
+        db.transaction(|conn| {
+            let mut task = crate::db::make_test_task("20260403-387c");
+            task.pipeline_stage = "engineer".to_string();
+            task.linear_issue_id = "RIG-387".to_string();
+            task.runtime = crate::models::AgentRuntime::QwenCode;
+            insert_task_with_conn(conn, &task)
+        })
+        .unwrap();
+
+        let stored = db.task("20260403-387c").unwrap().unwrap();
+        assert_eq!(
+            stored.runtime,
+            crate::models::AgentRuntime::QwenCode,
+            "runtime must be persisted by insert_task_with_conn; \
+             before fix it always defaulted to claude-code"
         );
     }
 
