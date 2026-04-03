@@ -170,6 +170,15 @@ impl<'a> GitHubIssueClient<'a> {
     /// Output shape matches what Linear returns and poll.rs consumes.
     fn normalize_issue(&self, gh: &Value) -> Value {
         let number = gh["number"].as_u64().unwrap_or(0);
+        // RIG-385: number=0 means the 'number' field was missing or wrong type in gh output.
+        // Log a warning so this shows up in daemon logs for diagnosis.
+        if number == 0 {
+            eprintln!(
+                "  ! normalize_issue: gh issue has number=0 or missing 'number' field \
+                 (raw type={:?}) — identifier will be malformed",
+                gh["number"]
+            );
+        }
         let title = gh["title"].as_str().unwrap_or("");
         let body = gh["body"].as_str().unwrap_or("");
         let labels = gh["labels"].as_array().cloned().unwrap_or_default();

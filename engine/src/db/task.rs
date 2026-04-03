@@ -87,6 +87,16 @@ impl super::Db {
 
     /// Insert a new task.
     pub fn insert_task(&self, task: &Task) -> Result<()> {
+        // RIG-385: pipeline tasks MUST have a non-empty linear_issue_id.
+        // An empty identifier breaks the dedup guard (searches "" → no match → infinite spawn).
+        if !task.pipeline_stage.is_empty() && task.linear_issue_id.is_empty() {
+            anyhow::bail!(
+                "refusing to insert pipeline task {}: empty linear_issue_id (stage={}). \
+                 This is a bug — identifier must be set by normalize_issue / process_issue_for_stage.",
+                task.id,
+                task.pipeline_stage
+            );
+        }
         let depends_on = serde_json::to_string(&task.depends_on)?;
         let context_files = serde_json::to_string(&task.context_files)?;
         let linear_pushed: i32 = if task.linear_pushed { 1 } else { 0 };
@@ -1319,5 +1329,38 @@ mod tests {
 
         let tasks = db.list_recent_terminal_tasks(17).unwrap();
         assert_eq!(tasks.len(), 1, "returns all tasks when fewer than limit");
+    }
+
+    #[test]
+    fn insert_pipeline_task_with_empty_linear_issue_id_is_rejected() {
+        // RIG-385: pipeline tasks with empty linear_issue_id must be rejected at the DB level.
+        // An empty identifier breaks the dedup guard (searches "" → no match → infinite spawn).
+        let db = Db::open_in_memory().unwrap();
+        let mut task = make_test_task("20260403-bad");
+        task.pipeline_stage = "engineer".to_string();
+        task.linear_issue_id = String::new(); // intentionally empty
+
+        let result = db.insert_task(&task);
+        assert!(
+            result.is_err(),
+            "should reject pipeline task with empty linear_issue_id"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("empty linear_issue_id"),
+            "error message should mention empty linear_issue_id, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn insert_non_pipeline_task_with_empty_linear_issue_id_is_allowed() {
+        // RIG-385: non-pipeline tasks (pipeline_stage="") can have empty linear_issue_id —
+        // that's the normal case for `werma add` tasks.
+        let db = Db::open_in_memory().unwrap();
+        let mut task = make_test_task("20260403-ok");
+        task.pipeline_stage = String::new(); // not a pipeline task
+        task.linear_issue_id = String::new();
+
+        db.insert_task(&task).unwrap(); // must succeed
     }
 }
