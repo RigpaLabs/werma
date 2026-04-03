@@ -245,6 +245,7 @@ pub fn render_status_buf(
     interval: Option<u64>,
     term_width: usize,
     tick: u64,
+    show_art: bool,
 ) -> String {
     use std::fmt::Write;
     let StatusBuckets {
@@ -257,10 +258,12 @@ pub fn render_status_buf(
     } = buckets;
     let mut buf = String::new();
 
-    // Pixel art mascot header (skipped in compact mode and narrow terminals)
-    let art = crate::art::render_art(term_width, tick);
-    if !art.is_empty() {
-        buf.push_str(&art);
+    // Pixel art mascot header (opt-in via --art flag)
+    if show_art {
+        let art = crate::art::render_art(term_width, tick);
+        if !art.is_empty() {
+            buf.push_str(&art);
+        }
     }
 
     let _ = writeln!(buf);
@@ -355,6 +358,7 @@ pub fn render_compact_buf(
     interval: Option<u64>,
     term_width: usize,
     tick: u64,
+    show_art: bool,
 ) -> String {
     use std::fmt::Write;
     let StatusBuckets {
@@ -367,10 +371,12 @@ pub fn render_compact_buf(
     } = buckets;
     let mut buf = String::new();
 
-    // Pixel art mascot header
-    let art = crate::art::render_art(term_width, tick);
-    if !art.is_empty() {
-        buf.push_str(&art);
+    // Pixel art mascot header (opt-in via --art flag)
+    if show_art {
+        let art = crate::art::render_art(term_width, tick);
+        if !art.is_empty() {
+            buf.push_str(&art);
+        }
     }
 
     let sep = "───────────────────────────────────";
@@ -613,7 +619,7 @@ mod tests {
             canceled: &[],
             terminal_counts: None,
         };
-        let buf = render_status_buf(&buckets, Some(3), 80, 0);
+        let buf = render_status_buf(&buckets, Some(3), 80, 0, false);
         assert!(buf.contains("running (0)"));
         assert!(buf.contains("pending (0)"));
         assert!(buf.contains("↻ 3s"));
@@ -631,7 +637,7 @@ mod tests {
             canceled: &[],
             terminal_counts: None,
         };
-        let buf = render_compact_buf(&buckets, Some(5), 80, 0);
+        let buf = render_compact_buf(&buckets, Some(5), 80, 0, false);
         // ANSI codes wrap the numbers, so check for the text without exact formatting
         assert!(buf.contains("running"));
         assert!(buf.contains("pending"));

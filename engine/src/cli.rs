@@ -98,6 +98,10 @@ pub enum Commands {
         /// Show all completed/failed/canceled tasks (default: last 17, configurable via config.toml)
         #[arg(short, long)]
         all: bool,
+
+        /// Show Garuda pixel art banner (hidden by default)
+        #[arg(short = 'A', long)]
+        art: bool,
     },
 
     /// Show task details + output
