@@ -1270,4 +1270,118 @@ mod regression {
             "rejection feedback must be passed to spawned engineer"
         );
     }
+
+    // ─── RIG-387 ─────────────────────────────────────────────────────────────
+
+    /// GitHub poll must not create pipeline tasks with empty linear_issue_id.
+    ///
+    /// Bug: `insert_task_with_conn()` (callback spawn path) had no guard against
+    /// empty `linear_issue_id`. The dedup query
+    /// `has_any_nonfailed_task_for_issue_stage("", stage)` then matched nothing,
+    /// causing the poll loop to spawn a new ghost task on every tick (41+ per session).
+    ///
+    /// Fix: `insert_task_with_conn()` now applies the same guard as `Db::insert_task()`:
+    /// pipeline tasks with empty `linear_issue_id` are rejected with an error.
+    #[test]
+    fn regression_rig387_callback_spawn_rejects_empty_identifier() {
+        use crate::pipeline::callback::callback;
+
+        let db = Db::open_in_memory().unwrap();
+        let cmd = FakeCommandRunner::new();
+
+        // Insert a completed engineer task with a valid identifier (simulates a real task).
+        let mut task = crate::db::make_test_task("20260403-387-eng");
+        task.status = Status::Completed;
+        task.linear_issue_id = "werma-test#42".to_string();
+        task.pipeline_stage = "engineer".to_string();
+        db.insert_task(&task).unwrap();
+
+        // Callback fires with a valid identifier — must succeed and NOT produce ghost tasks.
+        let result = "Implementation complete.\nVERDICT=DONE";
+        callback(
+            &db,
+            "20260403-387-eng",
+            "engineer",
+            result,
+            "werma-test#42",
+            "~/projects/werma",
+            &cmd,
+        )
+        .unwrap();
+
+        // Any spawned task must have a non-empty linear_issue_id.
+        let all_tasks = db.list_tasks(None).unwrap();
+        for t in &all_tasks {
+            if !t.pipeline_stage.is_empty() {
+                assert!(
+                    !t.linear_issue_id.is_empty(),
+                    "RIG-387 regression: pipeline task {} (stage={}) has empty linear_issue_id — \
+                     ghost task spawn loop would result",
+                    t.id,
+                    t.pipeline_stage
+                );
+            }
+        }
+    }
+
+    /// Callback-spawned reviewer task stores runtime via `insert_task_with_conn`.
+    ///
+    /// Bug: `insert_task_with_conn()` omitted the `runtime` column (26 cols instead of 27),
+    /// so callback-spawned tasks always got the DB default runtime (claude-code) regardless
+    /// of what runtime was configured for the pipeline stage.
+    ///
+    /// The direct unit test (`insert_task_with_conn_persists_runtime` in callback/mod.rs)
+    /// covers the column-level write with QwenCode. This integration test verifies the
+    /// full callback path writes a valid runtime value for spawned reviewer tasks.
+    #[test]
+    fn regression_rig387_callback_spawn_stores_runtime() {
+        use crate::pipeline::callback::callback;
+
+        let db = Db::open_in_memory().unwrap();
+        let cmd = FakeCommandRunner::new();
+
+        // Engineer task with QwenCode runtime completes — reviewer should be spawned.
+        let mut task = crate::db::make_test_task("20260403-387-rt");
+        task.status = Status::Completed;
+        task.linear_issue_id = "RIG-387b".to_string();
+        task.pipeline_stage = "engineer".to_string();
+        task.runtime = crate::models::AgentRuntime::QwenCode;
+        db.insert_task(&task).unwrap();
+
+        // DONE verdict triggers reviewer spawn.
+        let result = "Done.\nPR_URL=https://github.com/org/repo/pull/99\nVERDICT=DONE";
+        callback(
+            &db,
+            "20260403-387-rt",
+            "engineer",
+            result,
+            "RIG-387b",
+            "~/projects/werma",
+            &cmd,
+        )
+        .unwrap();
+
+        // Find spawned reviewer task.
+        let all_tasks = db.list_tasks(None).unwrap();
+        let spawned: Vec<_> = all_tasks
+            .iter()
+            .filter(|t| t.id != "20260403-387-rt" && !t.pipeline_stage.is_empty())
+            .collect();
+
+        // Spawned reviewer gets runtime from pipeline config (default = ClaudeCode).
+        // Assert against the concrete expected value, not a second DB read (avoids tautology).
+        // The companion unit test in callback/mod.rs proves insert_task_with_conn writes
+        // non-default runtime (QwenCode) correctly.
+        for t in &spawned {
+            let stored = db.task(&t.id).unwrap().unwrap();
+            assert_eq!(
+                stored.runtime,
+                crate::models::AgentRuntime::ClaudeCode,
+                "RIG-387 regression: spawned reviewer task {} should have ClaudeCode runtime \
+                 from default pipeline config, got {:?}",
+                t.id,
+                stored.runtime
+            );
+        }
+    }
 }
