@@ -1,15 +1,22 @@
 use anyhow::{Context, Result, bail};
 
 use crate::db::Db;
-use crate::traits::RealCommandRunner;
+use crate::github::GitHubIssueClient;
+use crate::project::IssueIdentifier;
+use crate::traits::{CommandRunner, RealCommandRunner};
 use crate::{config, linear, pipeline, tracker, ui};
 
 pub fn cmd_pipeline_poll(db: &Db) -> Result<()> {
     let linear_client = tracker::try_linear_client()?;
     let cmd = RealCommandRunner;
-    ui::with_spinner("Polling Linear statuses...", || {
-        pipeline::poll(db, &*linear_client, &cmd)
-    })
+    let user_cfg = config::UserConfig::load();
+    let gh_count = user_cfg.tracker.github.len();
+    let spinner_msg = if gh_count > 0 {
+        format!("Polling Linear + {gh_count} GitHub repo(s)...")
+    } else {
+        "Polling Linear statuses...".to_string()
+    };
+    ui::with_spinner(&spinner_msg, || pipeline::poll(db, &*linear_client, &cmd))
 }
 
 pub fn cmd_pipeline_status(db: &Db) -> Result<()> {
@@ -36,10 +43,11 @@ pub fn cmd_pipeline_validate() -> Result<()> {
 
 pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<()> {
     let db = crate::open_db()?;
-    let linear_client = tracker::try_linear_client()?;
+    let cmd = RealCommandRunner;
     // Start with the default pipeline for stage validation; per-issue tasks
     // may use a repo-specific pipeline below (RIG-367).
     let config = pipeline::loader::load_default()?;
+    let user_cfg = crate::config::UserConfig::load();
 
     // Detect if a stage name was passed as a positional arg (e.g. `werma pipeline run RIG-178 analyst`).
     // The CLI defines `issues` as a greedy Vec<String>, so "analyst" gets consumed as an identifier.
@@ -76,16 +84,22 @@ pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<(
     }
 
     if filtered.is_empty() {
-        bail!("no issue identifiers provided. Usage: werma pipeline run RIG-XX [--stage <stage>]");
+        bail!(
+            "no issue identifiers provided. Usage: werma pipeline run <RIG-XX|owner/repo#N> [--stage <stage>]"
+        );
     }
 
     let mut created = 0;
     let mut skipped = 0;
 
     for identifier in &filtered {
-        // Fetch issue from Linear
+        // RIG-384: Route to the correct tracker client based on identifier format.
+        let client: Box<dyn crate::linear::LinearApi> =
+            resolve_tracker_client(identifier, &user_cfg, &cmd)?;
+
+        // Fetch issue from tracker
         let (_issue_id, ident, title, description, labels) =
-            match linear_client.get_issue_by_identifier(identifier) {
+            match client.get_issue_by_identifier(identifier) {
                 Ok(data) => data,
                 Err(e) => {
                     eprintln!("  ! {identifier}: {e}");
@@ -103,12 +117,10 @@ pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<(
             continue;
         }
 
-        // Note: task is always created in pending state regardless of max_concurrent.
-        // The daemon's drain_queue respects concurrency limits when launching tasks.
-
+        // Infer working dir: for GH identifiers, try repo config first, then label-based
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        let user_cfg = crate::config::UserConfig::load();
-        let working_dir = linear::infer_working_dir(&title, &label_refs, &user_cfg);
+        let working_dir =
+            infer_working_dir_for_identifier(identifier, &title, &label_refs, &user_cfg);
         if linear::validate_working_dir(&working_dir).is_none() {
             eprintln!("  ! skipping {ident} [{title}]: working dir '{working_dir}' does not exist");
             skipped += 1;
@@ -138,6 +150,87 @@ pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<(
 
     println!("\nPipeline run: {created} created, {skipped} skipped");
     Ok(())
+}
+
+/// Resolve the correct tracker client for a given identifier (RIG-384).
+///
+/// Routes based on identifier format:
+/// - `owner/repo#N` → GitHubIssueClient (owner/repo from identifier)
+/// - `repo#N` → GitHubIssueClient (owner looked up from `[tracker.github]` config)
+/// - `TEAM-N` → Linear client
+fn resolve_tracker_client<'a>(
+    identifier: &str,
+    user_cfg: &crate::config::UserConfig,
+    cmd: &'a dyn CommandRunner,
+) -> Result<Box<dyn crate::linear::LinearApi + 'a>> {
+    // Try parsing as a typed identifier first
+    if let Some(parsed) = IssueIdentifier::parse(identifier) {
+        match parsed {
+            IssueIdentifier::GitHub { owner, repo, .. } => {
+                return Ok(Box::new(GitHubIssueClient::new(cmd, owner, repo)));
+            }
+            IssueIdentifier::Linear { .. } => {
+                return tracker::try_linear_client();
+            }
+        }
+    }
+
+    // Try `repo#N` format: look up owner from [tracker.github] config
+    if let Some(hash_pos) = identifier.find('#') {
+        let repo_part = &identifier[..hash_pos];
+        // Check if repo_part matches a tracker.github label directly
+        if let Some(entry) = user_cfg.tracker.github_entry(repo_part) {
+            return Ok(Box::new(GitHubIssueClient::new(
+                cmd,
+                entry.owner.clone(),
+                entry.repo.clone(),
+            )));
+        }
+        // Also check if repo_part matches an entry's repo name
+        for entry in user_cfg.tracker.github.values() {
+            if entry.repo == repo_part {
+                return Ok(Box::new(GitHubIssueClient::new(
+                    cmd,
+                    entry.owner.clone(),
+                    entry.repo.clone(),
+                )));
+            }
+        }
+    }
+
+    // Fall back to Linear
+    tracker::try_linear_client()
+}
+
+/// Infer working directory, with GitHub repo config as fallback (RIG-384).
+///
+/// For GitHub identifiers (`repo#N`, `owner/repo#N`), first checks if the repo
+/// matches a `[tracker.github]` entry and uses its configured directory.
+/// Falls back to standard label/keyword-based inference.
+fn infer_working_dir_for_identifier(
+    identifier: &str,
+    title: &str,
+    labels: &[&str],
+    user_cfg: &crate::config::UserConfig,
+) -> String {
+    // For GH identifiers, try to match the repo part to a tracker.github entry
+    if let Some(hash_pos) = identifier.find('#') {
+        let before_hash = &identifier[..hash_pos];
+        // Extract repo name (handle both "repo" and "owner/repo")
+        let repo_name = before_hash
+            .rfind('/')
+            .map(|pos| &before_hash[pos + 1..])
+            .unwrap_or(before_hash);
+
+        for (label, entry) in &user_cfg.tracker.github {
+            if entry.repo == repo_name || label == repo_name {
+                return user_cfg.repo_dir(label);
+            }
+        }
+    }
+
+    // Fall back to standard label/keyword-based inference
+    linear::infer_working_dir(title, labels, user_cfg)
 }
 
 /// Switch the active pipeline for a repo by updating `~/.werma/config.toml` in-place.
@@ -244,5 +337,51 @@ mod tests {
         assert!(result.contains("werma = \"/custom/werma\""));
         // New pipeline key added
         assert!(result.contains("fathom = \"economy\""));
+    }
+
+    // ─── RIG-384: GitHub identifier routing ───────────────────────────
+
+    fn cfg_with_github() -> crate::config::UserConfig {
+        let toml = r#"
+[tracker.github]
+honeyjourney = { owner = "ArLeyar", repo = "honeyjourney" }
+"#;
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), toml).unwrap();
+        crate::config::UserConfig::load_from(tmp.path())
+    }
+
+    #[test]
+    fn infer_working_dir_github_full_identifier() {
+        let cfg = cfg_with_github();
+        let dir = infer_working_dir_for_identifier("ArLeyar/honeyjourney#20", "Fix bug", &[], &cfg);
+        // Should resolve via tracker.github entry
+        assert!(
+            dir.contains("honeyjourney"),
+            "should infer dir from GH repo config, got: {dir}"
+        );
+    }
+
+    #[test]
+    fn infer_working_dir_github_short_identifier() {
+        let cfg = cfg_with_github();
+        let dir = infer_working_dir_for_identifier("honeyjourney#5", "Fix", &[], &cfg);
+        assert!(
+            dir.contains("honeyjourney"),
+            "should infer dir from short GH identifier, got: {dir}"
+        );
+    }
+
+    #[test]
+    fn infer_working_dir_falls_back_for_linear() {
+        let cfg = cfg_with_github();
+        // Linear identifier — should fall through to standard inference
+        let dir =
+            infer_working_dir_for_identifier("RIG-100", "Fix werma issue", &["repo:werma"], &cfg);
+        // With repo:werma label, should resolve to werma dir
+        assert!(
+            dir.contains("werma"),
+            "Linear identifier should use standard inference, got: {dir}"
+        );
     }
 }

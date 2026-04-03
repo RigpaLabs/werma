@@ -22,7 +22,6 @@ const DEFAULT_REPO_BASE: &str = "~/projects";
 /// [tracker.github]
 /// my-oss-project = { owner = "arleyar", repo = "my-oss-project" }
 /// ```
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct GitHubTrackerEntry {
@@ -41,12 +40,13 @@ pub struct GitHubTrackerEntry {
 /// ```
 ///
 /// Repos not listed under `[tracker.github]` fall back to `default`.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct TrackerConfig {
     /// Default tracker for repos not explicitly mapped. Defaults to `"linear"`.
+    /// Used by `tracker_for_repo()` — not read directly by current code.
     #[serde(default = "default_tracker")]
+    #[allow(dead_code)]
     pub default: String,
 
     /// Repo label → GitHub owner/repo pair.
@@ -63,7 +63,9 @@ impl TrackerConfig {
     /// Returns `"github"` when the repo is listed under `[tracker.github]`,
     /// otherwise falls back to `self.default` (usually `"linear"`).
     ///
-    /// Called by future GitHub Issues integration (RIG-324b) — not yet wired to runtime.
+    /// Route a repo label to the correct tracker type (`"github"` or `"linear"`).
+    /// Currently unused — callers use `github_entry()` / `.github.values()` directly.
+    /// Kept as a convenience helper for future use.
     #[allow(dead_code)]
     pub fn tracker_for_repo(&self, repo: &str) -> &str {
         if self.github.contains_key(repo) {
@@ -77,8 +79,7 @@ impl TrackerConfig {
     ///
     /// Returns `None` when no explicit GitHub mapping is configured for this repo.
     ///
-    /// Called by future GitHub Issues integration (RIG-324b) — not yet wired to runtime.
-    #[allow(dead_code)]
+    /// Called by GitHub Issues polling (RIG-384) to create per-repo `GitHubIssueClient`.
     pub fn github_entry(&self, repo: &str) -> Option<&GitHubTrackerEntry> {
         self.github.get(repo)
     }
@@ -108,9 +109,8 @@ pub struct UserConfig {
     pub repo_runtimes: HashMap<String, Vec<String>>,
 
     /// Per-repo tracker selection (Linear vs GitHub Issues).
-    /// Read by future GitHub Issues runtime (RIG-324b) — parsed from config but not yet dispatched.
+    /// Used by pipeline polling (RIG-384) to create per-repo GitHub clients.
     #[serde(default)]
-    #[allow(dead_code)]
     pub tracker: TrackerConfig,
 
     /// Configurable fields for `werma st` output.
