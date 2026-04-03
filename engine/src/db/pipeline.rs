@@ -848,10 +848,12 @@ mod tests {
 
         let mut t1 = make_test_task("20260312-001");
         t1.pipeline_stage = "engineer".to_string();
+        t1.linear_issue_id = "RIG-001".to_string();
         db.insert_task(&t1).unwrap();
 
         let mut t2 = make_test_task("20260312-002");
         t2.pipeline_stage = "reviewer".to_string();
+        t2.linear_issue_id = "RIG-001".to_string();
         db.insert_task(&t2).unwrap();
         db.set_task_status("20260312-002", Status::Running).unwrap();
 
@@ -859,6 +861,7 @@ mod tests {
 
         let mut t4 = make_test_task("20260312-004");
         t4.pipeline_stage = "engineer".to_string();
+        t4.linear_issue_id = "RIG-002".to_string();
         db.insert_task(&t4).unwrap();
         db.set_task_status("20260312-004", Status::Completed)
             .unwrap();

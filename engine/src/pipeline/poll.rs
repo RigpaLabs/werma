@@ -1048,6 +1048,17 @@ fn process_issue_for_stage(
         runtime: resolved.runtime,
     };
 
+    // RIG-385: defensive check — identifier must still be non-empty at this point.
+    // The guard at the top of this function should have returned early if identifier was empty,
+    // but we log explicitly here so daemon logs capture the exact value on any regression.
+    if identifier.is_empty() {
+        eprintln!(
+            "  ! BUG RIG-385: identifier empty at insert point for issue_id={issue_id} \
+             stage={stage_name} — skipping to prevent ghost task"
+        );
+        return Ok(PollAction::Ignored);
+    }
+    eprintln!("  ~ [{identifier}] inserting task {task_id} stage={stage_name}");
     db.insert_task(&task)?;
 
     // Remove trigger label (label-based path)
@@ -2266,5 +2277,147 @@ stages:
         let (created, skipped) = poll_github_repos(&db, &cmd, &config, &user_cfg).unwrap();
         assert_eq!(created, 0);
         assert_eq!(skipped, 0);
+    }
+
+    // ─── RIG-385: regression tests — linear_issue_id must never be empty ─────
+
+    #[test]
+    fn gh_normalize_to_process_sets_linear_issue_id() {
+        // RIG-385: integration test — real gh CLI JSON shape → normalize_issue →
+        // process_issue_for_stage → task.linear_issue_id must be non-empty.
+        //
+        // This is the exact JSON shape that `gh issue list --json number,title,body,labels,state`
+        // produces in production. `state` is a plain string ("OPEN"/"CLOSED"), `labels` is an
+        // array of objects with `name`, `color`, `description`, `id`.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = FakeCommandRunner::new();
+
+        // Push realistic gh CLI output (state is a plain string, not nested object)
+        cmd.push_success(
+            &serde_json::to_string(&serde_json::json!([
+                {
+                    "number": 20,
+                    "title": "Implement feature X",
+                    "body": "Feature description",
+                    "labels": [
+                        {"id": "LA_abc", "name": "status:in-progress", "color": "0075ca", "description": ""},
+                        {"id": "LA_def", "name": "sp:3", "color": "e4e669", "description": ""}
+                    ],
+                    "state": "OPEN"
+                }
+            ]))
+            .unwrap(),
+        );
+
+        let gh_client = crate::github::GitHubIssueClient::new(
+            &cmd,
+            "honeyjourney".to_string(),
+            "honeyjourney".to_string(),
+        );
+        let issues = gh_client.get_issues_by_status("in_progress").unwrap();
+
+        assert_eq!(issues.len(), 1, "should return one issue");
+        assert_eq!(
+            issues[0]["identifier"], "honeyjourney#20",
+            "normalize_issue must produce non-empty identifier from real gh JSON shape"
+        );
+
+        let config = test_config();
+        let linear = FakeLinearApi::new();
+        let user_cfg = crate::config::UserConfig::default();
+        let stage_cfg = config.stage("engineer").unwrap();
+
+        let result = process_issue_for_stage(
+            &db,
+            &linear,
+            &cmd,
+            &config,
+            &user_cfg,
+            &issues[0],
+            "engineer",
+            stage_cfg,
+            &user_cfg.repo_dir("werma"),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(result, PollAction::Created),
+            "should create engineer task for gh issue"
+        );
+
+        let tasks = db
+            .tasks_by_linear_issue("honeyjourney#20", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(tasks.len(), 1, "should create exactly one task");
+        assert_eq!(
+            tasks[0].linear_issue_id, "honeyjourney#20",
+            "RIG-385: linear_issue_id must be set from gh normalized identifier, not empty string"
+        );
+    }
+
+    #[test]
+    fn gh_normalize_dedup_prevents_duplicate_tasks() {
+        // RIG-385: after a task is created for a gh issue, the dedup guard must block
+        // subsequent poll cycles from creating another task for the same issue.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let config = test_config();
+        let user_cfg = crate::config::UserConfig::default();
+
+        let issue = fake_issue_with_state(
+            "20",
+            "honeyjourney#20",
+            "Implement feature X",
+            &["status:in-progress", "sp:3"],
+            "started",
+        );
+        let stage_cfg = config.stage("engineer").unwrap();
+        let working_dir = user_cfg.repo_dir("werma");
+
+        // First poll — creates task
+        process_issue_for_stage(
+            &db,
+            &linear,
+            &cmd,
+            &config,
+            &user_cfg,
+            &issue,
+            "engineer",
+            stage_cfg,
+            &working_dir,
+            None,
+        )
+        .unwrap();
+
+        // Second poll — must be blocked by dedup guard
+        let result = process_issue_for_stage(
+            &db,
+            &linear,
+            &cmd,
+            &config,
+            &user_cfg,
+            &issue,
+            "engineer",
+            stage_cfg,
+            &working_dir,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(result, PollAction::Skipped),
+            "second poll for same gh issue must be blocked by dedup"
+        );
+
+        let tasks = db
+            .tasks_by_linear_issue("honeyjourney#20", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "RIG-385: dedup guard must prevent duplicate tasks — only one task allowed per issue+stage"
+        );
     }
 }
