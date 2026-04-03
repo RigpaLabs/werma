@@ -7,6 +7,7 @@ use super::loader::resolve_prompt;
 use super::loader::{load_default, load_named};
 use super::prompt::{build_vars, render_prompt};
 use crate::db::Db;
+use crate::github::GitHubIssueClient;
 use crate::linear::LinearApi;
 use crate::models::{Status, Task};
 use crate::traits::CommandRunner;
@@ -648,8 +649,438 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
         }
     }
 
+    // ─── GitHub Issues repos (RIG-384) ──────────────────────────────────
+    // Poll repos configured with [tracker.github] in config.toml.
+    // Each GH repo gets its own GitHubIssueClient that implements LinearApi,
+    // so the same guard logic (dedup, circuit breaker, cooldown) applies.
+    let (gh_created, gh_skipped) = poll_github_repos(db, cmd, &config, &user_cfg)?;
+    total_created += gh_created;
+    total_skipped += gh_skipped;
+
     println!("\nPipeline poll: {total_created} created, {total_skipped} skipped");
     Ok(())
+}
+
+/// Poll all GitHub Issues repos from `[tracker.github]` config (RIG-384).
+///
+/// For each configured GH repo, creates a `GitHubIssueClient` and runs the same
+/// status-based + label-based polling as the Linear path. The GH client implements
+/// `LinearApi`, so all guards (dedup, cross-stage, circuit breaker, failure cooldown)
+/// are reused without duplication.
+fn poll_github_repos(
+    db: &Db,
+    cmd: &dyn CommandRunner,
+    default_config: &PipelineConfig,
+    user_cfg: &crate::config::UserConfig,
+) -> Result<(usize, usize)> {
+    let mut total_created = 0;
+    let mut total_skipped = 0;
+
+    if user_cfg.tracker.github.is_empty() {
+        return Ok((0, 0));
+    }
+
+    for (repo_label, gh_entry) in &user_cfg.tracker.github {
+        let gh_client = GitHubIssueClient::new(cmd, gh_entry.owner.clone(), gh_entry.repo.clone());
+
+        // Determine which pipeline this repo uses
+        let pipeline_name = user_cfg.pipeline_for_repo(repo_label);
+        let repo_config = if pipeline_name == "default" {
+            default_config.clone()
+        } else {
+            match load_named(pipeline_name) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "  ! GitHub repo '{repo_label}': failed to load pipeline '{pipeline_name}': {e}"
+                    );
+                    continue;
+                }
+            }
+        };
+
+        // The working dir for all issues in this GH repo
+        let working_dir = user_cfg.repo_dir(repo_label);
+        if crate::issue_helpers::validate_working_dir(&working_dir).is_none() {
+            eprintln!(
+                "  ! GitHub repo '{repo_label}': working dir '{working_dir}' does not exist, skipping"
+            );
+            continue;
+        }
+
+        let poll_stages = repo_config.poll_stages();
+
+        // ── Status-based polling ──────────────────────────────────────────
+        let mut status_to_stages: HashMap<String, Vec<String>> = HashMap::new();
+        for (stage_name, stage_cfg) in &poll_stages {
+            for key in stage_cfg.status_keys() {
+                status_to_stages
+                    .entry(key.to_string())
+                    .or_default()
+                    .push(stage_name.to_string());
+            }
+        }
+
+        for (status_key, stage_names) in &status_to_stages {
+            let issues = match gh_client.get_issues_by_status(status_key) {
+                Ok(issues) => issues,
+                Err(e) => {
+                    eprintln!(
+                        "  ! GitHub repo '{repo_label}': failed to poll status '{status_key}': {e}"
+                    );
+                    continue;
+                }
+            };
+
+            for issue in &issues {
+                for stage_name in stage_names {
+                    let stage_cfg = match repo_config.stage(stage_name) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+
+                    let result = process_issue_for_stage(
+                        db,
+                        &gh_client,
+                        cmd,
+                        &repo_config,
+                        user_cfg,
+                        issue,
+                        stage_name,
+                        stage_cfg,
+                        &working_dir,
+                        None, // no trigger label
+                    )?;
+                    match result {
+                        PollAction::Created => total_created += 1,
+                        PollAction::Skipped => total_skipped += 1,
+                        PollAction::Ignored => {}
+                    }
+                }
+            }
+        }
+
+        // ── Label-based polling ───────────────────────────────────────────
+        for (stage_name, stage_cfg) in &poll_stages {
+            let label = match &stage_cfg.linear_label {
+                Some(l) => l.clone(),
+                None => continue,
+            };
+
+            let issues = match gh_client.get_issues_by_label(&label) {
+                Ok(issues) => issues,
+                Err(e) => {
+                    eprintln!(
+                        "  ! GitHub repo '{repo_label}': failed to poll label '{label}': {e}"
+                    );
+                    continue;
+                }
+            };
+
+            for issue in &issues {
+                let result = process_issue_for_stage(
+                    db,
+                    &gh_client,
+                    cmd,
+                    &repo_config,
+                    user_cfg,
+                    issue,
+                    stage_name,
+                    stage_cfg,
+                    &working_dir,
+                    Some(&label), // trigger label for label-based path
+                )?;
+                match result {
+                    PollAction::Created => total_created += 1,
+                    PollAction::Skipped => total_skipped += 1,
+                    PollAction::Ignored => {}
+                }
+            }
+        }
+    }
+
+    Ok((total_created, total_skipped))
+}
+
+/// Outcome of attempting to process a single issue for a single pipeline stage.
+enum PollAction {
+    /// A task was created.
+    Created,
+    /// The issue was explicitly skipped (guard matched).
+    Skipped,
+    /// The issue was silently ignored (no guard matched, but no action taken).
+    Ignored,
+}
+
+/// Process a single issue for a specific pipeline stage (RIG-384).
+///
+/// Applies all guards (dedup, cross-stage, manual, circuit breaker, failure cooldown,
+/// PR merged) and creates a task if appropriate. Used by both the GitHub polling loop
+/// and can be reused by future tracker integrations.
+///
+/// When `trigger_label` is `Some`, operates in label-based mode with additional guards
+/// (backlog-only, analyst spec:done, stale label cleanup).
+#[allow(clippy::too_many_arguments)]
+fn process_issue_for_stage(
+    db: &Db,
+    client: &dyn LinearApi,
+    cmd: &dyn CommandRunner,
+    config: &PipelineConfig,
+    user_cfg: &crate::config::UserConfig,
+    issue: &serde_json::Value,
+    stage_name: &str,
+    stage_cfg: &super::config::StageConfig,
+    working_dir: &str,
+    trigger_label: Option<&str>,
+) -> Result<PollAction> {
+    let issue_id = issue["id"].as_str().unwrap_or("");
+    let identifier = issue["identifier"].as_str().unwrap_or("");
+    let title = issue["title"].as_str().unwrap_or("");
+    let description = issue["description"].as_str().unwrap_or("");
+
+    // RIG-307: skip issues with empty id or identifier
+    if issue_id.is_empty() || identifier.is_empty() {
+        return Ok(PollAction::Ignored);
+    }
+
+    let state_type = issue["state"]["type"].as_str().unwrap_or("");
+
+    // Skip completed/canceled issues
+    if state_type == "completed" || state_type == "canceled" || state_type == "cancelled" {
+        return Ok(PollAction::Skipped);
+    }
+
+    let labels: Vec<&str> = issue["labels"]["nodes"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|l| l["name"].as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    // Label-based triggers only fire on Backlog issues
+    if trigger_label.is_some() && state_type != "backlog" {
+        return Ok(PollAction::Skipped);
+    }
+
+    // Research issues in todo bypass standard pipeline
+    if is_research_issue(&labels) && state_type == "unstarted" {
+        return Ok(PollAction::Ignored);
+    }
+
+    // Manual issues: skip execution stages (skip_manual=true) or label triggers
+    if crate::issue_helpers::is_manual_issue(&labels)
+        && (trigger_label.is_some() || stage_cfg.skip_manual())
+    {
+        return Ok(PollAction::Skipped);
+    }
+
+    // Skip if active/callback-pending task exists (RIG-209, RIG-277)
+    if db.has_any_nonfailed_task_for_issue_stage(identifier, stage_name)? {
+        eprintln!(
+            "  ~ skipping {identifier} stage={stage_name}: active or callback-pending task exists"
+        );
+        return Ok(PollAction::Skipped);
+    }
+
+    // RIG-296: cross-stage guard
+    if db.has_running_pipeline_task_for_issue(identifier)? {
+        eprintln!("  ~ skipping {identifier} stage={stage_name}: another pipeline task is running");
+        return Ok(PollAction::Skipped);
+    }
+
+    // RIG-135: cross-stage dedup for reviewer
+    if stage_name == "reviewer" && db.has_any_review_task_for_issue(identifier)? {
+        return Ok(PollAction::Skipped);
+    }
+
+    // RIG-309: circuit breaker for reviewer
+    if stage_name == "reviewer" {
+        let max_rounds = stage_cfg
+            .review_round_limit()
+            .unwrap_or(super::callback::DEFAULT_MAX_REVIEW_ROUNDS) as i64;
+        let total_reviewer_tasks = db.count_all_tasks_for_issue_stage(identifier, "reviewer")?;
+        if total_reviewer_tasks >= max_rounds * 2 {
+            eprintln!(
+                "  ! {identifier} circuit breaker: {total_reviewer_tasks} total reviewer \
+                 tasks (limit: {}), skipping spawn",
+                max_rounds * 2
+            );
+            if total_reviewer_tasks == max_rounds * 2 {
+                if let Err(e) = client.move_issue_by_name(issue_id, "backlog") {
+                    eprintln!("  ! circuit breaker: failed to move {identifier} to backlog: {e}");
+                }
+                if let Err(e) = client.comment(
+                    identifier,
+                    &format!(
+                        "**Reviewer circuit breaker triggered** — {total_reviewer_tasks} \
+                         reviewer tasks spawned without resolution. Moving to Backlog. \
+                         Manual intervention required."
+                    ),
+                ) {
+                    eprintln!("  ! circuit breaker: failed to post comment on {identifier}: {e}");
+                }
+            }
+            return Ok(PollAction::Skipped);
+        }
+    }
+
+    // RIG-357: failure cooldown + cap
+    if should_skip_due_to_failures(db, identifier, stage_name, stage_cfg, client, issue_id)? {
+        return Ok(PollAction::Skipped);
+    }
+
+    // Label-based path: analyst guards (spec:done, engineer already ran)
+    if let Some(label) = trigger_label {
+        if stage_name == "analyst" {
+            let done_label = format!("{label}:done");
+            let blocked_label = format!("{label}:blocked");
+            let has_result = labels.iter().any(|l| {
+                l.eq_ignore_ascii_case("spec:done")
+                    || l.eq_ignore_ascii_case(&done_label)
+                    || l.eq_ignore_ascii_case(&blocked_label)
+            });
+            if has_result {
+                eprintln!(
+                    "  ~ skipping analyst for {identifier}: already processed (has result label)"
+                );
+                if let Err(e) = client.remove_label(issue_id, label) {
+                    eprintln!("  ! failed to remove stale '{label}' from {identifier}: {e}");
+                }
+                return Ok(PollAction::Skipped);
+            }
+
+            let engineer_tasks = db.tasks_by_linear_issue(identifier, Some("engineer"), false)?;
+            if !engineer_tasks.is_empty() {
+                eprintln!(
+                    "  ~ skipping analyst for {identifier}: engineer already ran ({} tasks)",
+                    engineer_tasks.len()
+                );
+                return Ok(PollAction::Skipped);
+            }
+        }
+    }
+
+    // Reviewer: skip if PR already merged (RIG-306)
+    if stage_name == "reviewer"
+        && is_pr_merged_for_issue(cmd, working_dir, identifier)
+        && !has_open_pr_for_issue(cmd, working_dir, identifier)
+    {
+        println!("  ~ {identifier} [{title}] PR already merged, moving to Done");
+        if let Err(e) = client.move_issue_by_name(issue_id, "done") {
+            eprintln!("  ! failed to move {identifier} to done: {e}");
+        }
+        return Ok(PollAction::Skipped);
+    }
+
+    // RIG-366: resolve per-repo pipeline config and validate runtime
+    let Some(resolved) = resolve_effective_stage(
+        working_dir,
+        stage_name,
+        stage_cfg,
+        config,
+        user_cfg,
+        identifier,
+    )?
+    else {
+        return Ok(PollAction::Skipped);
+    };
+
+    // Build prompt
+    let prompt = build_poll_prompt(
+        &resolved.effective_config,
+        &resolved.effective_stage_cfg,
+        identifier,
+        title,
+        description,
+        db,
+    );
+
+    let task_id = db.next_task_id()?;
+    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let issue_estimate = issue["estimate"].as_i64().unwrap_or(0) as i32;
+
+    let review_round: i64 = if stage_name == "reviewer" {
+        db.count_completed_tasks_for_issue_stage(identifier, "reviewer")?
+    } else {
+        0
+    };
+
+    let max_turns = resolved
+        .effective_stage_cfg
+        .max_turns
+        .map(|t| t as i32)
+        .unwrap_or_else(|| crate::default_turns(&resolved.effective_stage_cfg.agent));
+    let allowed_tools = crate::runner::tools_for_type(&resolved.effective_stage_cfg.agent, false);
+    let effective_model = resolved
+        .effective_stage_cfg
+        .effective_model(issue_estimate, review_round)
+        .to_string();
+
+    let task = Task {
+        id: task_id.clone(),
+        status: Status::Pending,
+        priority: 1,
+        created_at: now,
+        started_at: None,
+        finished_at: None,
+        task_type: resolved.effective_stage_cfg.agent.clone(),
+        prompt,
+        output_path: String::new(),
+        working_dir: working_dir.to_string(),
+        model: effective_model,
+        max_turns,
+        allowed_tools,
+        session_id: String::new(),
+        linear_issue_id: identifier.to_string(),
+        linear_pushed: false,
+        pipeline_stage: stage_name.to_string(),
+        depends_on: vec![],
+        context_files: vec![],
+        repo_hash: crate::runtime_repo_hash(),
+        estimate: issue_estimate,
+        retry_count: 0,
+        retry_after: None,
+        cost_usd: None,
+        turns_used: 0,
+        handoff_content: String::new(),
+        runtime: resolved.runtime,
+    };
+
+    db.insert_task(&task)?;
+
+    // Remove trigger label (label-based path)
+    if let Some(label) = trigger_label {
+        if let Err(e) = client.remove_label(issue_id, label) {
+            eprintln!("  ! failed to remove label '{label}' from {identifier}: {e}");
+        }
+    }
+
+    // on_start: move issue status
+    let on_start = if trigger_label.is_some() {
+        stage_cfg.on_start.as_ref()
+    } else {
+        resolved.effective_stage_cfg.on_start.as_ref()
+    };
+    if let Some(on_start) = on_start
+        && let Err(e) = client.move_issue_by_name(issue_id, &on_start.status)
+    {
+        eprintln!(
+            "  ! on_start move failed for {} -> {}: {e}",
+            identifier, on_start.status
+        );
+    }
+
+    let label_suffix = trigger_label
+        .map(|l| format!(" (label: {l})"))
+        .unwrap_or_default();
+    println!(
+        "  + {} [{}] stage={} type={}{}",
+        task_id, identifier, stage_name, resolved.effective_stage_cfg.agent, label_suffix
+    );
+
+    Ok(PollAction::Created)
 }
 
 /// Resolved pipeline configuration for a specific repo + stage combination (RIG-366).
@@ -1626,5 +2057,214 @@ stages:
             3,
             "under failure cap + past cooldown should allow new task spawn"
         );
+    }
+
+    // ─── RIG-384: GitHub Issues polling ───────────────────────────────
+
+    #[test]
+    fn process_issue_creates_task_for_github_issue() {
+        // RIG-384: process_issue_for_stage works with GH-shaped issue data
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let config = test_config();
+        let user_cfg = crate::config::UserConfig::default();
+
+        let issue = fake_issue_with_state(
+            "42",
+            "testrepo#42",
+            "Fix bug in testrepo",
+            &["status:in-progress", "repo:werma"],
+            "started",
+        );
+        let stage_cfg = config.stage("engineer").unwrap();
+        let result = process_issue_for_stage(
+            &db,
+            &linear,
+            &cmd,
+            &config,
+            &user_cfg,
+            &issue,
+            "engineer",
+            stage_cfg,
+            // Use werma dir as working_dir since that's what tests can access
+            &user_cfg.repo_dir("werma"),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(result, PollAction::Created),
+            "should create task for GH issue"
+        );
+
+        let tasks = db
+            .tasks_by_linear_issue("testrepo#42", Some("engineer"), false)
+            .unwrap();
+        assert_eq!(tasks.len(), 1, "should create one engineer task");
+        assert_eq!(tasks[0].linear_issue_id, "testrepo#42");
+        assert_eq!(tasks[0].pipeline_stage, "engineer");
+    }
+
+    #[test]
+    fn process_issue_skips_completed_github_issue() {
+        // RIG-384: completed GH issues should be skipped
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let config = test_config();
+        let user_cfg = crate::config::UserConfig::default();
+
+        let issue = fake_issue_with_state(
+            "43",
+            "testrepo#43",
+            "Done issue",
+            &["status:done"],
+            "completed",
+        );
+        let stage_cfg = config.stage("engineer").unwrap();
+        let result = process_issue_for_stage(
+            &db,
+            &linear,
+            &cmd,
+            &config,
+            &user_cfg,
+            &issue,
+            "engineer",
+            stage_cfg,
+            &user_cfg.repo_dir("werma"),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(result, PollAction::Skipped),
+            "should skip completed GH issue"
+        );
+    }
+
+    #[test]
+    fn process_issue_dedup_blocks_duplicate_github_task() {
+        // RIG-384: dedup prevents creating duplicate tasks for same GH issue + stage
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let config = test_config();
+        let user_cfg = crate::config::UserConfig::default();
+
+        // Insert an existing pending engineer task for this GH issue
+        let mut existing = crate::db::make_test_task("20260403-eng-gh");
+        existing.status = crate::models::Status::Pending;
+        existing.linear_issue_id = "testrepo#44".to_string();
+        existing.pipeline_stage = "engineer".to_string();
+        db.insert_task(&existing).unwrap();
+
+        let issue = fake_issue_with_state(
+            "44",
+            "testrepo#44",
+            "Dup test",
+            &["status:in-progress"],
+            "started",
+        );
+        let stage_cfg = config.stage("engineer").unwrap();
+        let result = process_issue_for_stage(
+            &db,
+            &linear,
+            &cmd,
+            &config,
+            &user_cfg,
+            &issue,
+            "engineer",
+            stage_cfg,
+            &user_cfg.repo_dir("werma"),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(result, PollAction::Skipped),
+            "should skip when active task exists for GH issue"
+        );
+    }
+
+    #[test]
+    fn process_issue_label_path_only_fires_on_backlog() {
+        // RIG-384: label-based triggers should only fire on backlog state
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let config = test_config();
+        let user_cfg = crate::config::UserConfig::default();
+
+        let issue = fake_issue_with_state(
+            "45",
+            "testrepo#45",
+            "In progress issue",
+            &["analyze", "status:in-progress"],
+            "started",
+        );
+        let stage_cfg = config.stage("analyst").unwrap();
+        let result = process_issue_for_stage(
+            &db,
+            &linear,
+            &cmd,
+            &config,
+            &user_cfg,
+            &issue,
+            "analyst",
+            stage_cfg,
+            &user_cfg.repo_dir("werma"),
+            Some("analyze"), // label-based trigger
+        )
+        .unwrap();
+
+        assert!(
+            matches!(result, PollAction::Skipped),
+            "label trigger should only fire on backlog state, not started"
+        );
+    }
+
+    #[test]
+    fn process_issue_skips_empty_identifier() {
+        // RIG-384: empty identifiers should be silently ignored
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let config = test_config();
+        let user_cfg = crate::config::UserConfig::default();
+
+        let issue = fake_issue_with_state("", "", "No ident", &[], "started");
+        let stage_cfg = config.stage("engineer").unwrap();
+        let result = process_issue_for_stage(
+            &db,
+            &linear,
+            &cmd,
+            &config,
+            &user_cfg,
+            &issue,
+            "engineer",
+            stage_cfg,
+            &user_cfg.repo_dir("werma"),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(result, PollAction::Ignored),
+            "should ignore issue with empty identifier"
+        );
+    }
+
+    #[test]
+    fn poll_github_repos_skips_when_no_github_config() {
+        // RIG-384: no GitHub repos configured → (0, 0)
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = FakeCommandRunner::new();
+        let config = test_config();
+        let user_cfg = crate::config::UserConfig::default();
+
+        let (created, skipped) = poll_github_repos(&db, &cmd, &config, &user_cfg).unwrap();
+        assert_eq!(created, 0);
+        assert_eq!(skipped, 0);
     }
 }
