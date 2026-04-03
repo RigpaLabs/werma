@@ -64,7 +64,8 @@ impl TrackerConfig {
     /// otherwise falls back to `self.default` (usually `"linear"`).
     ///
     /// Route a repo label to the correct tracker type (`"github"` or `"linear"`).
-    /// Used by daemon routing (RIG-324c) and pipeline polling (RIG-384).
+    /// Currently unused — callers use `github_entry()` / `.github.values()` directly.
+    /// Kept as a convenience helper for future use.
     #[allow(dead_code)]
     pub fn tracker_for_repo(&self, repo: &str) -> &str {
         if self.github.contains_key(repo) {

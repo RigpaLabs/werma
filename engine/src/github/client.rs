@@ -178,7 +178,7 @@ impl<'a> GitHubIssueClient<'a> {
         let state_type = status_label
             .as_deref()
             .map(Self::label_to_state_type)
-            .unwrap_or("unstarted");
+            .unwrap_or("backlog");
         let estimate = Self::find_estimate(&labels);
 
         // Rebuild labels in Linear's { nodes: [{ name }] } shape
@@ -802,7 +802,7 @@ mod tests {
         });
 
         let normalized = client.normalize_issue(&gh_issue);
-        assert_eq!(normalized["state"]["type"], "unstarted");
+        assert_eq!(normalized["state"]["type"], "backlog");
         assert_eq!(normalized["estimate"], 0);
     }
 

@@ -97,11 +97,15 @@ fn build_issue_link(linear_issue_id: &str, _task_id: &str) -> String {
         };
         format!("\n\n{label}: {url}")
     } else {
+        let label = match crate::project::ProjectResolver::tracker(linear_issue_id) {
+            Some(crate::project::Tracker::Linear) => "Linear",
+            _ => "Issue",
+        };
         eprintln!(
             "auto-PR: could not generate issue URL for {linear_issue_id} — \
                  for Linear issues, set WERMA_LINEAR_WORKSPACE to your workspace slug."
         );
-        format!("\n\nIssue: {linear_issue_id}")
+        format!("\n\n{label}: {linear_issue_id}")
     }
 }
 
@@ -869,11 +873,16 @@ mod tests {
 
     #[test]
     fn build_issue_link_without_workspace_env() {
-        // When WERMA_LINEAR_WORKSPACE is unset, fallback is "Issue: {id}"
+        // When WERMA_LINEAR_WORKSPACE is unset, fallback uses correct tracker label
         let link = build_issue_link("RIG-380", "task-1");
         assert!(
             link.contains("RIG-380"),
             "link should always contain the issue ID"
+        );
+        // Linear identifiers should use "Linear:" label even without full URL
+        assert!(
+            link.contains("Linear:") || link.contains("linear.app/"),
+            "Linear identifiers should use 'Linear:' label, got: {link}"
         );
     }
 
