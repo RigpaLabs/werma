@@ -1324,13 +1324,17 @@ mod regression {
         }
     }
 
-    /// Callback-spawned tasks inherit the correct runtime from the spawning task.
+    /// Callback-spawned reviewer task stores runtime via `insert_task_with_conn`.
     ///
     /// Bug: `insert_task_with_conn()` omitted the `runtime` column (26 cols instead of 27),
     /// so callback-spawned tasks always got the DB default runtime (claude-code) regardless
     /// of what runtime was configured for the pipeline stage.
+    ///
+    /// The direct unit test (`insert_task_with_conn_persists_runtime` in callback/mod.rs)
+    /// covers the column-level write with QwenCode. This integration test verifies the
+    /// full callback path writes a valid runtime value for spawned reviewer tasks.
     #[test]
-    fn regression_rig387_callback_spawn_inherits_runtime() {
+    fn regression_rig387_callback_spawn_stores_runtime() {
         use crate::pipeline::callback::callback;
 
         let db = Db::open_in_memory().unwrap();
@@ -1357,25 +1361,26 @@ mod regression {
         )
         .unwrap();
 
-        // Find any spawned pipeline task.
+        // Find spawned reviewer task.
         let all_tasks = db.list_tasks(None).unwrap();
         let spawned: Vec<_> = all_tasks
             .iter()
             .filter(|t| t.id != "20260403-387-rt" && !t.pipeline_stage.is_empty())
             .collect();
 
-        // If a reviewer was spawned, verify it has non-default runtime (QwenCode).
-        // The runtime carried through depends on pipeline config — this test verifies
-        // the column is at least written correctly (not forced to claude-code default).
+        // Spawned reviewer gets runtime from pipeline config (default = ClaudeCode).
+        // Assert against the concrete expected value, not a second DB read (avoids tautology).
+        // The companion unit test in callback/mod.rs proves insert_task_with_conn writes
+        // non-default runtime (QwenCode) correctly.
         for t in &spawned {
-            // The spawned task's runtime is determined by task_builder, but must be stored correctly.
-            // Before the fix, runtime was always claude-code regardless of what was passed.
             let stored = db.task(&t.id).unwrap().unwrap();
             assert_eq!(
-                stored.runtime, t.runtime,
-                "RIG-387 regression: stored runtime ({:?}) must match task struct runtime ({:?}) \
-                 for spawned task {}",
-                stored.runtime, t.runtime, t.id
+                stored.runtime,
+                crate::models::AgentRuntime::ClaudeCode,
+                "RIG-387 regression: spawned reviewer task {} should have ClaudeCode runtime \
+                 from default pipeline config, got {:?}",
+                t.id,
+                stored.runtime
             );
         }
     }
