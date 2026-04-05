@@ -101,6 +101,17 @@ impl super::Db {
         let context_files = serde_json::to_string(&task.context_files)?;
         let linear_pushed: i32 = if task.linear_pushed { 1 } else { 0 };
 
+        // RIG-388: log the exact identifier value at insert point for daemon diagnosis.
+        if !task.pipeline_stage.is_empty() {
+            eprintln!(
+                "[DB] insert_task: id={} stage={} linear_issue_id={:?} (len={})",
+                task.id,
+                task.pipeline_stage,
+                task.linear_issue_id,
+                task.linear_issue_id.len(),
+            );
+        }
+
         self.conn.execute(
             "INSERT INTO tasks (
                 id, status, priority, created_at, started_at, finished_at,
@@ -147,6 +158,27 @@ impl super::Db {
                 task.runtime.to_string(),
             ],
         )?;
+
+        // RIG-388: read-back verification — confirm the identifier was persisted correctly.
+        // This catches rusqlite parameter binding issues or DB corruption that could cause
+        // the dedup guard to miss existing tasks (empty identifier → no match → infinite spawn).
+        if !task.pipeline_stage.is_empty() {
+            let stored: String = self.conn.query_row(
+                "SELECT linear_issue_id FROM tasks WHERE id = ?1",
+                params![task.id],
+                |row| row.get(0),
+            )?;
+            if stored != task.linear_issue_id {
+                anyhow::bail!(
+                    "RIG-388 read-back mismatch: task {} inserted linear_issue_id={:?} \
+                     but DB contains {:?} — possible rusqlite binding or DB corruption bug",
+                    task.id,
+                    task.linear_issue_id,
+                    stored,
+                );
+            }
+        }
+
         Ok(())
     }
 
