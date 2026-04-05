@@ -393,18 +393,37 @@ pub fn decide_callback(
             return Ok(CallbackDecision { internal, effects });
         }
 
-        // Queue the issue move as an effect — processor calls move_with_retry.
-        effects.push(make_effect(
-            task_id,
-            linear_issue_id,
-            EffectType::MoveIssue,
-            &format!("move_issue:{}", t.status),
-            serde_json::json!({
-                "target_status": t.status,
-                // Notify on failure: processor can read this payload
-                "alert_on_failure": true,
-            }),
-        ));
+        // RIG-388: For GH issues (identifier contains '#'), skip MoveIssue on rejection
+        // cycles where a next-stage task is being spawned. The GH issue already has the
+        // status label (that's how it was polled), and re-adding it via move_issue_by_name
+        // triggers an infinite poll loop: poll → task → callback → re-add label → poll → ...
+        // The spawned task handles the next step; no label change needed.
+        let is_gh_issue = linear_issue_id.contains('#');
+        let is_rejection_with_spawn = !is_forward_verdict(&verdict_str) && t.spawn.is_some();
+        let suppress_move = is_gh_issue && is_rejection_with_spawn;
+
+        if suppress_move {
+            eprintln!(
+                "[CALLBACK] {linear_issue_id}: suppressing MoveIssue→{} for GH rejection \
+                 cycle (verdict={verdict_str}, spawn={:?}) — label already present, \
+                 spawned task handles next step (RIG-388)",
+                t.status,
+                t.spawn.as_deref(),
+            );
+        } else {
+            // Queue the issue move as an effect — processor calls move_with_retry.
+            effects.push(make_effect(
+                task_id,
+                linear_issue_id,
+                EffectType::MoveIssue,
+                &format!("move_issue:{}", t.status),
+                serde_json::json!({
+                    "target_status": t.status,
+                    // Notify on failure: processor can read this payload
+                    "alert_on_failure": true,
+                }),
+            ));
+        }
 
         // RIG-300: Analyst label swap.
         if stage == "analyst" {
@@ -2060,6 +2079,129 @@ mod tests {
         assert!(
             decision.internal.spawn_task.is_none(),
             "at max_rounds, must NOT spawn engineer — escalated to backlog"
+        );
+    }
+
+    // ─── RIG-388: GH rejection cycle — suppress MoveIssue ──────────────────
+
+    /// For GitHub issues (identifier contains '#'), reviewer REJECTED must NOT
+    /// produce a MoveIssue effect when it also spawns an engineer task.
+    /// Re-adding the status label would trigger the poll to create a duplicate task.
+    #[test]
+    fn decide_gh_reviewer_rejected_suppresses_move_issue() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        // GH-style identifier (contains '#')
+        let issue_id = "honeyjourney#20";
+        insert_reviewer_task(&db, "gh-388-r", issue_id);
+
+        let result = "## Review\n- blocker: missing tests\n\nREVIEW_VERDICT=REJECTED";
+
+        let decision = decide_callback(
+            &db,
+            "gh-388-r",
+            "reviewer",
+            result,
+            issue_id,
+            "~/projects/honeyjourney",
+            &cmd,
+        )
+        .unwrap();
+
+        let effects = &decision.effects;
+
+        // Must NOT have MoveIssue — the GH issue already has the status label
+        assert!(
+            !effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "GH reviewer REJECTED must suppress MoveIssue to prevent poll loop, got: {effects:?}"
+        );
+
+        // Must still spawn the engineer task
+        assert!(
+            decision.internal.spawn_task.is_some(),
+            "GH reviewer REJECTED must still spawn engineer task"
+        );
+        assert_eq!(
+            decision
+                .internal
+                .spawn_task
+                .as_ref()
+                .unwrap()
+                .pipeline_stage,
+            "engineer",
+        );
+    }
+
+    /// For Linear issues (no '#'), reviewer REJECTED must still produce MoveIssue.
+    #[test]
+    fn decide_linear_reviewer_rejected_keeps_move_issue() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        // Linear-style identifier (no '#')
+        let issue_id = "RIG-388";
+        insert_reviewer_task(&db, "lin-388-r", issue_id);
+
+        let result = "## Review\n- blocker: missing tests\n\nREVIEW_VERDICT=REJECTED";
+
+        let decision = decide_callback(
+            &db,
+            "lin-388-r",
+            "reviewer",
+            result,
+            issue_id,
+            "~/projects/werma",
+            &cmd,
+        )
+        .unwrap();
+
+        let effects = &decision.effects;
+
+        // Linear issues must still produce MoveIssue
+        assert!(
+            effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "Linear reviewer REJECTED must still produce MoveIssue, got: {effects:?}"
+        );
+
+        // And spawn engineer
+        assert!(
+            decision.internal.spawn_task.is_some(),
+            "Linear reviewer REJECTED must still spawn engineer task"
+        );
+    }
+
+    /// For GH issues, forward verdicts (APPROVED) must still produce MoveIssue.
+    #[test]
+    fn decide_gh_reviewer_approved_keeps_move_issue() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let cmd = crate::traits::fakes::FakeCommandRunner::new();
+        let issue_id = "honeyjourney#20";
+        insert_reviewer_task(&db, "gh-388-a", issue_id);
+
+        let result = "## Review\nLooks good!\n\nREVIEW_VERDICT=APPROVED";
+
+        let decision = decide_callback(
+            &db,
+            "gh-388-a",
+            "reviewer",
+            result,
+            issue_id,
+            "~/projects/honeyjourney",
+            &cmd,
+        )
+        .unwrap();
+
+        let effects = &decision.effects;
+
+        // Forward verdicts must still produce MoveIssue (e.g., review → ready)
+        assert!(
+            effects
+                .iter()
+                .any(|e| e.effect_type == EffectType::MoveIssue),
+            "GH reviewer APPROVED must still produce MoveIssue, got: {effects:?}"
         );
     }
 }

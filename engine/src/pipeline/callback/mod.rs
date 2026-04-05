@@ -32,6 +32,17 @@ fn insert_task_with_conn(conn: &Connection, task: &crate::models::Task) -> Resul
         );
     }
 
+    // RIG-388: log the exact identifier value at insert point for daemon diagnosis.
+    if !task.pipeline_stage.is_empty() {
+        eprintln!(
+            "[DB] insert_task_with_conn: id={} stage={} linear_issue_id={:?} (len={})",
+            task.id,
+            task.pipeline_stage,
+            task.linear_issue_id,
+            task.linear_issue_id.len(),
+        );
+    }
+
     let depends_on = serde_json::to_string(&task.depends_on)?;
     let context_files = serde_json::to_string(&task.context_files)?;
     let linear_pushed: i32 = if task.linear_pushed { 1 } else { 0 };
@@ -82,6 +93,25 @@ fn insert_task_with_conn(conn: &Connection, task: &crate::models::Task) -> Resul
             task.runtime.to_string(),
         ],
     )?;
+
+    // RIG-388: read-back verification — confirm the identifier was persisted correctly.
+    if !task.pipeline_stage.is_empty() {
+        let stored: String = conn.query_row(
+            "SELECT linear_issue_id FROM tasks WHERE id = ?1",
+            params![task.id],
+            |row| row.get(0),
+        )?;
+        if stored != task.linear_issue_id {
+            anyhow::bail!(
+                "RIG-388 read-back mismatch: task {} inserted linear_issue_id={:?} \
+                 but DB contains {:?} — possible rusqlite binding or DB corruption bug",
+                task.id,
+                task.linear_issue_id,
+                stored,
+            );
+        }
+    }
+
     Ok(())
 }
 
