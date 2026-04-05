@@ -263,12 +263,6 @@ impl<'a> GitHubIssueClient<'a> {
 
         let issues = json.as_array().cloned().unwrap_or_default();
         let normalized: Vec<Value> = issues.iter().map(|i| self.normalize_issue(i)).collect();
-        // RIG-388: log identifiers for daemon diagnosis
-        for issue in &normalized {
-            let ident = issue["identifier"].as_str().unwrap_or("<missing>");
-            let id = issue["id"].as_str().unwrap_or("<missing>");
-            eprintln!("  ~ GH poll status={status_name}: id={id} identifier={ident}");
-        }
         Ok(normalized)
     }
 

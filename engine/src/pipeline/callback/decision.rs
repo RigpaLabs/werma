@@ -335,13 +335,28 @@ pub fn decide_callback(
                          {attempt_count} failed attempts >= limit {max_attempts}, \
                          escalating via on_max_rounds={on_max_verdict} to {escalation_status}"
                     );
-                    effects.push(make_effect(
-                        task_id,
-                        linear_issue_id,
-                        EffectType::MoveIssue,
-                        &format!("retry_cap_escalate:{escalation_status}"),
-                        serde_json::json!({ "target_status": escalation_status }),
-                    ));
+                    // RIG-388: For GH issues, suppress MoveIssue if the escalation
+                    // target matches the stage's own polling status — re-adding the
+                    // same label triggers an infinite poll loop.
+                    let is_gh = linear_issue_id.contains('#');
+                    let targets_self = stage_cfg
+                        .linear_status
+                        .as_ref()
+                        .is_some_and(|s| s.0.iter().any(|v| v == &escalation_status));
+                    if !(is_gh && targets_self) {
+                        effects.push(make_effect(
+                            task_id,
+                            linear_issue_id,
+                            EffectType::MoveIssue,
+                            &format!("retry_cap_escalate:{escalation_status}"),
+                            serde_json::json!({ "target_status": escalation_status }),
+                        ));
+                    } else {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: suppressing MoveIssue→{escalation_status} \
+                             for GH retry-cap escalation — target matches stage polling status (RIG-388)"
+                        );
+                    }
                     effects.push(make_effect(
                         task_id,
                         linear_issue_id,
@@ -591,13 +606,28 @@ pub fn decide_callback(
                         "review cycle limit ({max_rounds}) reached for issue {linear_issue_id}, \
                          escalating to {escalation_status}"
                     );
-                    effects.push(make_effect(
-                        task_id,
-                        linear_issue_id,
-                        EffectType::MoveIssue,
-                        &format!("cycle_limit_escalate:{escalation_status}"),
-                        serde_json::json!({ "target_status": escalation_status }),
-                    ));
+                    // RIG-388: For GH issues, suppress MoveIssue if the escalation
+                    // target matches the stage's own polling status — same loop-prevention
+                    // as the retry-cap path above.
+                    let is_gh = linear_issue_id.contains('#');
+                    let targets_self = stage_cfg
+                        .linear_status
+                        .as_ref()
+                        .is_some_and(|s| s.0.iter().any(|v| v == &escalation_status));
+                    if !(is_gh && targets_self) {
+                        effects.push(make_effect(
+                            task_id,
+                            linear_issue_id,
+                            EffectType::MoveIssue,
+                            &format!("cycle_limit_escalate:{escalation_status}"),
+                            serde_json::json!({ "target_status": escalation_status }),
+                        ));
+                    } else {
+                        eprintln!(
+                            "[CALLBACK] {linear_issue_id}: suppressing MoveIssue→{escalation_status} \
+                             for GH review-cycle-limit — target matches stage polling status (RIG-388)"
+                        );
+                    }
                     effects.push(make_effect(
                         task_id,
                         linear_issue_id,
