@@ -61,6 +61,16 @@ pub fn log_daemon(log_path: &Path, msg: &str) {
         .and_then(|mut f| f.write_all(line.as_bytes()));
 }
 
+/// Log to `~/.werma/logs/daemon.log` without needing a path parameter.
+/// For use in code that doesn't have access to werma_dir (e.g. db/task.rs, pipeline/poll.rs).
+/// No-ops if home dir is unavailable.
+pub fn log_daemon_to_default(msg: &str) {
+    if let Some(home) = dirs::home_dir() {
+        let log_path = home.join(".werma/logs/daemon.log");
+        log_daemon(&log_path, msg);
+    }
+}
+
 // ─── Tick loop ───────────────────────────────────────────────────────────
 
 /// Run the daemon loop. Blocks forever (or until killed).

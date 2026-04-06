@@ -8,7 +8,11 @@
 -- nuked FAT-XX (and any future team) identifiers on every DB open.
 -- Fix: preserve any value matching the TEAM-NUMBER pattern (uppercase
 -- letters followed by a dash and digits).
+-- RIG-388: Also preserve GitHub Issues identifiers (repo#N format).
+-- Previously only [A-Z]*-[0-9]* was preserved (Linear TEAM-N).
+-- Now also preserves *#[0-9]* (e.g. honeyjourney#20).
 UPDATE tasks
 SET linear_issue_id = ''
 WHERE linear_issue_id <> ''
-  AND linear_issue_id NOT GLOB '[A-Z]*-[0-9]*';
+  AND linear_issue_id NOT GLOB '[A-Z]*-[0-9]*'
+  AND linear_issue_id NOT GLOB '*#[0-9]*';

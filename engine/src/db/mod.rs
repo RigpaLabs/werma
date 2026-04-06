@@ -29,6 +29,8 @@ const MIGRATION_011_SQL: &str = include_str!("../../migrations/011_runtime.sql")
 
 pub struct Db {
     pub(super) conn: Connection,
+    /// Path to the database file (None for in-memory).
+    db_path: Option<std::path::PathBuf>,
 }
 
 impl Db {
@@ -41,7 +43,16 @@ impl Db {
         let conn = Connection::open(path)
             .with_context(|| format!("opening database: {}", path.display()))?;
 
-        let db = Self { conn };
+        // RIG-388: force WAL autocheckpoint after every transaction.
+        // Without this, WAL writes from one Db::open() may not be visible
+        // to the next Db::open() on the same file (e.g. daemon tick N inserts,
+        // tick N+1 opens fresh connection and sees stale data → dedup fails).
+        conn.execute_batch("PRAGMA wal_autocheckpoint = 1")?;
+
+        let db = Self {
+            conn,
+            db_path: Some(path.to_path_buf()),
+        };
         db.migrate()?;
         Ok(db)
     }
@@ -50,7 +61,10 @@ impl Db {
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let db = Self { conn };
+        let db = Self {
+            conn,
+            db_path: None,
+        };
         db.migrate()?;
         Ok(db)
     }
@@ -489,7 +503,10 @@ mod tests {
         );
 
         // Now wrap in Db and run migrate — migration 006 must detect and fix it.
-        let db = Db { conn };
+        let db = Db {
+            conn,
+            db_path: None,
+        };
         db.migrate().unwrap();
 
         // After migration, inserting a 'canceled' task must succeed.
