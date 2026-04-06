@@ -503,7 +503,10 @@ mod tests {
         );
 
         // Now wrap in Db and run migrate — migration 006 must detect and fix it.
-        let db = Db { conn, db_path: None };
+        let db = Db {
+            conn,
+            db_path: None,
+        };
         db.migrate().unwrap();
 
         // After migration, inserting a 'canceled' task must succeed.

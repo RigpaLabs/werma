@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::params;
 
 use crate::models::{Status, Task};
 
@@ -153,9 +153,7 @@ impl super::Db {
         // visible to the next Db::open() (e.g. daemon tick N+1), causing dedup to fail
         // and creating infinite ghost task loops.
         if !task.pipeline_stage.is_empty() {
-            self.conn
-                .execute_batch("PRAGMA wal_checkpoint(FULL)")
-                .ok();
+            self.conn.execute_batch("PRAGMA wal_checkpoint(FULL)").ok();
 
             crate::daemon::log_daemon_to_default(&format!(
                 "[DB-INSERT] task={} stage={} linear_issue_id={:?} (checkpointed)",
@@ -533,7 +531,7 @@ impl super::Db {
 mod tests {
     use super::super::{Db, make_test_task};
     use crate::models::Status;
-    use rusqlite::{params, Connection};
+    use rusqlite::{Connection, params};
 
     #[test]
     fn insert_and_get_task() {
@@ -1404,11 +1402,13 @@ mod tests {
 
         // Raw SQLite connection (no migrations) — is the data there?
         let raw = Connection::open(&db_path).unwrap();
-        let raw_val: String = raw.query_row(
-            "SELECT linear_issue_id FROM tasks WHERE id = ?1",
-            params!["20260406-file-001"],
-            |row| row.get(0),
-        ).unwrap();
+        let raw_val: String = raw
+            .query_row(
+                "SELECT linear_issue_id FROM tasks WHERE id = ?1",
+                params!["20260406-file-001"],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(
             raw_val, "honeyjourney#20",
             "raw connection must see data — if this fails, WAL wasn't checkpointed"
