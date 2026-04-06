@@ -369,16 +369,19 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     runtime: resolved.runtime,
                 };
 
+                crate::daemon::log_daemon_to_default(&format!(
+                    "[POLL] inserting task={task_id} [{identifier}] stage={stage_name} path=linear-status"
+                ));
                 db.insert_task(&task)?;
 
                 // on_start: move issue to a different status when task is created
                 if let Some(ref on_start) = resolved.effective_stage_cfg.on_start
                     && let Err(e) = linear.move_issue_by_name(issue_id, &on_start.status)
                 {
-                    eprintln!(
-                        "  ! on_start move failed for {} -> {}: {e}",
-                        identifier, on_start.status
-                    );
+                    crate::daemon::log_daemon_to_default(&format!(
+                        "[POLL] on_start move failed for {identifier} -> {}: {e}",
+                        on_start.status
+                    ));
                 }
 
                 println!(
@@ -624,21 +627,26 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 runtime: resolved.runtime,
             };
 
+            crate::daemon::log_daemon_to_default(&format!(
+                "[POLL] inserting task={task_id} [{identifier}] stage={stage_name} path=linear-label"
+            ));
             db.insert_task(&task)?;
 
             // Remove the trigger label from the issue so it doesn't get picked up again
             if let Err(e) = linear.remove_label(issue_id, &label) {
-                eprintln!("  ! failed to remove label '{label}' from {identifier}: {e}");
+                crate::daemon::log_daemon_to_default(&format!(
+                    "[POLL] failed to remove label '{label}' from {identifier}: {e}"
+                ));
             }
 
             // on_start: move issue status
             if let Some(ref on_start) = stage_cfg.on_start
                 && let Err(e) = linear.move_issue_by_name(issue_id, &on_start.status)
             {
-                eprintln!(
-                    "  ! on_start move failed for {} -> {}: {e}",
-                    identifier, on_start.status
-                );
+                crate::daemon::log_daemon_to_default(&format!(
+                    "[POLL] on_start move failed for {identifier} -> {}: {e}",
+                    on_start.status
+                ));
             }
 
             println!(
@@ -1049,16 +1057,15 @@ fn process_issue_for_stage(
     };
 
     // RIG-385: defensive check — identifier must still be non-empty at this point.
-    // The guard at the top of this function should have returned early if identifier was empty,
-    // but we log explicitly here so daemon logs capture the exact value on any regression.
     if identifier.is_empty() {
-        eprintln!(
-            "  ! BUG RIG-385: identifier empty at insert point for issue_id={issue_id} \
-             stage={stage_name} — skipping to prevent ghost task"
-        );
+        crate::daemon::log_daemon_to_default(&format!(
+            "[POLL] BUG: identifier empty at insert for issue_id={issue_id} stage={stage_name}"
+        ));
         return Ok(PollAction::Ignored);
     }
-    eprintln!("  ~ [{identifier}] inserting task {task_id} stage={stage_name}");
+    crate::daemon::log_daemon_to_default(&format!(
+        "[POLL] inserting task={task_id} [{identifier}] stage={stage_name}"
+    ));
     db.insert_task(&task)?;
 
     // Remove trigger label (label-based path)

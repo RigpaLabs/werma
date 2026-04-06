@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::params;
+use rusqlite::{params, Connection};
 
 use crate::models::{Status, Task};
 
@@ -101,17 +101,6 @@ impl super::Db {
         let context_files = serde_json::to_string(&task.context_files)?;
         let linear_pushed: i32 = if task.linear_pushed { 1 } else { 0 };
 
-        // RIG-388: log the exact identifier value at insert point for daemon diagnosis.
-        if !task.pipeline_stage.is_empty() {
-            eprintln!(
-                "[DB] insert_task: id={} stage={} linear_issue_id={:?} (len={})",
-                task.id,
-                task.pipeline_stage,
-                task.linear_issue_id,
-                task.linear_issue_id.len(),
-            );
-        }
-
         self.conn.execute(
             "INSERT INTO tasks (
                 id, status, priority, created_at, started_at, finished_at,
@@ -159,24 +148,19 @@ impl super::Db {
             ],
         )?;
 
-        // RIG-388: read-back verification — confirm the identifier was persisted correctly.
-        // This catches rusqlite parameter binding issues or DB corruption that could cause
-        // the dedup guard to miss existing tasks (empty identifier → no match → infinite spawn).
+        // RIG-388: force WAL checkpoint after pipeline task insert.
+        // Without this, data written to WAL by one Db::open() connection may not be
+        // visible to the next Db::open() (e.g. daemon tick N+1), causing dedup to fail
+        // and creating infinite ghost task loops.
         if !task.pipeline_stage.is_empty() {
-            let stored: String = self.conn.query_row(
-                "SELECT linear_issue_id FROM tasks WHERE id = ?1",
-                params![task.id],
-                |row| row.get(0),
-            )?;
-            if stored != task.linear_issue_id {
-                anyhow::bail!(
-                    "RIG-388 read-back mismatch: task {} inserted linear_issue_id={:?} \
-                     but DB contains {:?} — possible rusqlite binding or DB corruption bug",
-                    task.id,
-                    task.linear_issue_id,
-                    stored,
-                );
-            }
+            self.conn
+                .execute_batch("PRAGMA wal_checkpoint(FULL)")
+                .ok();
+
+            crate::daemon::log_daemon_to_default(&format!(
+                "[DB-INSERT] task={} stage={} linear_issue_id={:?} (checkpointed)",
+                task.id, task.pipeline_stage, task.linear_issue_id,
+            ));
         }
 
         Ok(())
@@ -549,6 +533,7 @@ impl super::Db {
 mod tests {
     use super::super::{Db, make_test_task};
     use crate::models::Status;
+    use rusqlite::{params, Connection};
 
     #[test]
     fn insert_and_get_task() {
@@ -1394,5 +1379,61 @@ mod tests {
         task.linear_issue_id = String::new();
 
         db.insert_task(&task).unwrap(); // must succeed
+    }
+
+    /// RIG-388: verify linear_issue_id survives insert → read-back on file-based DB.
+    /// This catches WAL/journal issues that don't manifest with in-memory DBs.
+    #[test]
+    fn insert_task_file_db_cross_connection_readback() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        // Simulate daemon pattern: open → insert → close → reopen → read
+        {
+            let db = Db::open(&db_path).unwrap();
+            let mut task = make_test_task("20260406-file-001");
+            task.pipeline_stage = "engineer".to_string();
+            task.linear_issue_id = "honeyjourney#20".to_string();
+
+            db.insert_task(&task).unwrap();
+
+            // Same-connection read must work
+            let fetched = db.task("20260406-file-001").unwrap().unwrap();
+            assert_eq!(fetched.linear_issue_id, "honeyjourney#20");
+        } // db dropped here — connection closed
+
+        // Raw SQLite connection (no migrations) — is the data there?
+        let raw = Connection::open(&db_path).unwrap();
+        let raw_val: String = raw.query_row(
+            "SELECT linear_issue_id FROM tasks WHERE id = ?1",
+            params!["20260406-file-001"],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(
+            raw_val, "honeyjourney#20",
+            "raw connection must see data — if this fails, WAL wasn't checkpointed"
+        );
+
+        // Full Db::open (with migrations) — does migrate() break the data?
+        let db2 = Db::open(&db_path).unwrap();
+        let fetched2 = db2.task("20260406-file-001").unwrap().unwrap();
+        assert_eq!(
+            fetched2.linear_issue_id, "honeyjourney#20",
+            "Db::open must see the same data — if this fails, migrate() is the culprit"
+        );
+    }
+
+    /// RIG-388: verify the # character in identifiers is preserved.
+    #[test]
+    fn insert_task_hash_in_identifier() {
+        let db = Db::open_in_memory().unwrap();
+        let mut task = make_test_task("20260406-hash-001");
+        task.pipeline_stage = "engineer".to_string();
+        task.linear_issue_id = "repo#42".to_string();
+
+        db.insert_task(&task).unwrap();
+
+        let fetched = db.task("20260406-hash-001").unwrap().unwrap();
+        assert_eq!(fetched.linear_issue_id, "repo#42");
     }
 }
