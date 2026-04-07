@@ -130,25 +130,67 @@ impl DisplayField {
     }
 }
 
-/// Render a single display field value from a task.
-fn render_field(field: DisplayField, task: &crate::models::Task) -> Option<String> {
-    match field {
-        DisplayField::Runtime => Some(task.runtime.to_string()),
-        DisplayField::Model => {
+/// Resolve the user-facing model display name for a task, accounting for runtime.
+///
+/// * `ClaudeCode` — shorthand (opus/sonnet/haiku) as-is
+/// * `Codex`      — explicit model ID (e.g. "o3"); `None` for Claude shorthands (default)
+/// * `GeminiCli`  — strip "gemini-X.Y-" version prefix; "flash" for defaults/shorthands
+/// * `QwenCode`   — always "qwen" (single model, user doesn't pick a variant)
+fn display_model_name(task: &crate::models::Task) -> Option<String> {
+    use crate::models::AgentRuntime;
+    match task.runtime {
+        AgentRuntime::ClaudeCode => {
             if task.model.is_empty() {
                 None
-            } else if task.runtime != crate::models::AgentRuntime::ClaudeCode {
-                // RIG-387: show runtime prefix when not claude-code so qwen/gemini/codex
-                // tasks are distinguishable from claude tasks in `werma st`.
-                // e.g. "(qwen-code/sonnet)" instead of just "(sonnet)"
-                Some(format!("{}/{}", task.runtime, task.model))
             } else {
                 Some(task.model.clone())
             }
         }
+        AgentRuntime::QwenCode => Some("qwen".to_string()),
+        AgentRuntime::GeminiCli => {
+            // Claude shorthands + empty signal "use Gemini's default" (flash)
+            if task.model.is_empty() || matches!(task.model.as_str(), "opus" | "sonnet" | "haiku") {
+                Some("flash".to_string())
+            } else if let Some(rest) = task.model.strip_prefix("gemini-") {
+                // Skip version-like segments (digits/dots) to find the model
+                // family name:
+                //   "2.5-flash"              → skip "2.5"  → "flash"
+                //   "2.5-pro"                → skip "2.5"  → "pro"
+                //   "2.5-flash-preview-04-17"→ skip "2.5"  → "flash"
+                //   "flash"                  → no digits   → "flash"
+                let name = rest
+                    .split('-')
+                    .find(|s| !s.chars().all(|c| c.is_ascii_digit() || c == '.'))
+                    .unwrap_or(rest);
+                Some(name.to_string())
+            } else {
+                Some(task.model.clone())
+            }
+        }
+        AgentRuntime::Codex => {
+            // Claude shorthands indicate "use Codex default" — don't show a specific name
+            if task.model.is_empty() || matches!(task.model.as_str(), "opus" | "sonnet" | "haiku") {
+                None
+            } else {
+                Some(task.model.clone())
+            }
+        }
+    }
+}
+
+/// Render a single display field value from a task.
+fn render_field(field: DisplayField, task: &crate::models::Task) -> Option<String> {
+    match field {
+        DisplayField::Runtime => Some(task.runtime.to_string()),
+        DisplayField::Model => display_model_name(task),
         DisplayField::Cost => task.cost_usd.map(|c| format!("${c:.2}")),
         DisplayField::Turns => {
-            if task.turns_used > 0 {
+            if task.runtime == crate::models::AgentRuntime::QwenCode {
+                // Qwen doesn't report turns; duration is already shown in the
+                // time column for completed tasks, so emit nothing here to
+                // avoid duplication (e.g. "3m  (qwen/3m)").
+                None
+            } else if task.turns_used > 0 {
                 Some(format!("{}t", task.turns_used))
             } else {
                 None
@@ -364,28 +406,42 @@ mod tests {
         assert!(fields.is_empty());
     }
 
-    // ─── RIG-387: runtime prefix in Model display ────────────────────────
+    // ─── RIG-399: actual model name display per runtime ──────────────────
 
-    /// When runtime is not claude-code, Model display must include the runtime prefix.
-    ///
-    /// Bug: `render_field(Model)` returned just `task.model` ("sonnet") even for qwen/gemini
-    /// tasks, making them indistinguishable from claude-code tasks in `werma st`.
+    /// Qwen always shows "qwen" regardless of task.model shorthand.
     #[test]
-    fn display_fields_model_shows_runtime_prefix_for_non_claude() {
+    fn display_fields_qwen_shows_qwen_model_name() {
         let task = crate::models::Task {
-            model: "sonnet".into(),
+            model: "sonnet".into(), // shorthand ignored for Qwen
             runtime: crate::models::AgentRuntime::QwenCode,
-            turns_used: 5,
+            turns_used: 5, // turns ignored for Qwen
             ..Default::default()
         };
         let result = format_display_fields(&task, DEFAULT_STATUS_FIELDS);
         assert_eq!(
-            result, "  (qwen-code/sonnet/5t)",
-            "non-claude runtime must be prefixed to model in display"
+            result, "  (qwen)",
+            "Qwen tasks must show 'qwen' as model name"
         );
     }
 
-    /// Claude-code runtime must NOT add a prefix — keep backward compatibility.
+    /// Qwen completed tasks do NOT show duration in display fields — duration is
+    /// already shown in the time column by the caller, so repeating it would
+    /// produce duplicate output like "3m  (qwen/3m)".
+    #[test]
+    fn display_fields_qwen_completed_no_duplicate_duration() {
+        let task = crate::models::Task {
+            model: "sonnet".into(),
+            runtime: crate::models::AgentRuntime::QwenCode,
+            started_at: Some("2026-01-01T10:00:00".into()),
+            finished_at: Some("2026-01-01T10:03:00".into()),
+            ..Default::default()
+        };
+        let result = format_display_fields(&task, DEFAULT_STATUS_FIELDS);
+        // Only model, no duration — duration is in the time column
+        assert_eq!(result, "  (qwen)");
+    }
+
+    /// Claude-code runtime shows shorthand as-is with turns.
     #[test]
     fn display_fields_model_no_prefix_for_claude_code() {
         let task = crate::models::Task {
@@ -401,16 +457,96 @@ mod tests {
         );
     }
 
-    /// Codex runtime also shows prefix.
+    /// Codex with explicit model ID shows just the model (no runtime prefix).
     #[test]
-    fn display_fields_model_shows_codex_prefix() {
+    fn display_fields_codex_explicit_model_no_prefix() {
         let task = crate::models::Task {
             model: "o4-mini".into(),
             runtime: crate::models::AgentRuntime::Codex,
+            turns_used: 12,
+            ..Default::default()
+        };
+        let result = format_display_fields(&task, DEFAULT_STATUS_FIELDS);
+        assert_eq!(result, "  (o4-mini/12t)");
+    }
+
+    /// Codex with Claude shorthand (default model) shows turns only.
+    #[test]
+    fn display_fields_codex_default_model_omits_model_name() {
+        let task = crate::models::Task {
+            model: "sonnet".into(), // Claude shorthand = Codex default
+            runtime: crate::models::AgentRuntime::Codex,
+            turns_used: 8,
+            ..Default::default()
+        };
+        let result = format_display_fields(&task, DEFAULT_STATUS_FIELDS);
+        assert_eq!(result, "  (8t)");
+    }
+
+    /// Gemini with Claude shorthand shows "flash" (Gemini default).
+    #[test]
+    fn display_fields_gemini_default_shows_flash() {
+        let task = crate::models::Task {
+            model: "sonnet".into(), // Claude shorthand → Gemini default
+            runtime: crate::models::AgentRuntime::GeminiCli,
+            turns_used: 10,
+            ..Default::default()
+        };
+        let result = format_display_fields(&task, DEFAULT_STATUS_FIELDS);
+        assert_eq!(result, "  (flash/10t)");
+    }
+
+    /// Gemini with explicit model ID strips the "gemini-X.Y-" prefix.
+    #[test]
+    fn display_fields_gemini_strips_version_prefix() {
+        let task = crate::models::Task {
+            model: "gemini-2.5-flash".into(),
+            runtime: crate::models::AgentRuntime::GeminiCli,
+            turns_used: 15,
+            ..Default::default()
+        };
+        let result = format_display_fields(&task, DEFAULT_STATUS_FIELDS);
+        assert_eq!(result, "  (flash/15t)");
+    }
+
+    /// Gemini pro model strips correctly.
+    #[test]
+    fn display_fields_gemini_pro_strips_prefix() {
+        let task = crate::models::Task {
+            model: "gemini-2.5-pro".into(),
+            runtime: crate::models::AgentRuntime::GeminiCli,
+            turns_used: 20,
             ..Default::default()
         };
         let fields = &[DisplayField::Model];
         let result = format_display_fields(&task, fields);
-        assert_eq!(result, "  (codex/o4-mini)");
+        assert_eq!(result, "  (pro)");
+    }
+
+    /// Gemini preview/versioned models extract the family name, not a trailing
+    /// segment like "17" from "gemini-2.5-flash-preview-04-17".
+    #[test]
+    fn display_fields_gemini_preview_model_extracts_family() {
+        let task = crate::models::Task {
+            model: "gemini-2.5-flash-preview-04-17".into(),
+            runtime: crate::models::AgentRuntime::GeminiCli,
+            turns_used: 5,
+            ..Default::default()
+        };
+        let result = format_display_fields(&task, DEFAULT_STATUS_FIELDS);
+        assert_eq!(result, "  (flash/5t)");
+    }
+
+    #[test]
+    fn display_fields_gemini_preview_without_date() {
+        let task = crate::models::Task {
+            model: "gemini-3-flash-preview".into(),
+            runtime: crate::models::AgentRuntime::GeminiCli,
+            turns_used: 7,
+            ..Default::default()
+        };
+        let fields = &[DisplayField::Model];
+        let result = format_display_fields(&task, fields);
+        assert_eq!(result, "  (flash)");
     }
 }
