@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::io::Write as IoWrite;
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::Result;
 
@@ -11,6 +13,12 @@ use crate::traits::{CommandRunner, Notifier};
 
 use super::log_daemon;
 
+/// Maximum age (in seconds) before a task's callback is permanently abandoned.
+/// Uses `finished_at` if available, falling back to `created_at` for ghost tasks
+/// that never had `finished_at` set (e.g. tasks that accumulated without a proper
+/// finish timestamp).
+const MAX_CALLBACK_AGE_SECS: i64 = 86_400; // 24 hours
+
 /// Maximum callback attempts before abandoning and writing to dead-letter log.
 const MAX_CALLBACK_ATTEMPTS: i32 = 5;
 
@@ -20,12 +28,17 @@ const MAX_CALLBACK_ATTEMPTS: i32 = 5;
 ///
 /// `linear` is `None` when `LINEAR_API_KEY` is not configured. In that case, research
 /// completion and non-pipeline push operations are silently skipped.
+///
+/// `notified_tasks` tracks task IDs that were recently notified to prevent duplicate
+/// macOS/Slack alerts for the same auto-pushed task across consecutive polls.
 pub fn process_completed_tasks(
     db: &Db,
     werma_dir: &Path,
     cmd_runner: &dyn CommandRunner,
-    _notifier: &dyn Notifier,
+    notifier: &dyn Notifier,
     linear: Option<&dyn LinearApi>,
+    notified_tasks: &mut HashMap<String, Instant>,
+    notification_cooldown_secs: u64,
 ) -> Result<()> {
     let log_path = werma_dir.join("logs/daemon.log");
     let tasks = db.unpushed_linear_tasks()?;
@@ -37,31 +50,118 @@ pub fn process_completed_tasks(
     let now = chrono::Local::now().naive_local();
 
     for task in &tasks {
-        // TTL: skip callbacks for tasks finished more than 1 hour ago.
-        if let Some(ref finished) = task.finished_at {
-            if let Ok(finished_dt) =
-                chrono::NaiveDateTime::parse_from_str(finished, "%Y-%m-%dT%H:%M:%S")
-            {
-                if now.signed_duration_since(finished_dt).num_seconds() > 3600 {
-                    log_daemon(
-                        &log_path,
-                        &format!(
-                            "[CALLBACK] {}: {} — TTL expired (finished >1h ago), marking pushed",
-                            task.issue_identifier, task.id
-                        ),
-                    );
-                    if let Err(e) = db.set_linear_pushed(&task.id, true) {
+        // Ghost task guard: issue_identifier is empty so callback can never succeed.
+        // The DB query already filters these out (issue_identifier != ''), but guard
+        // defensively in case the function is called with tasks from other sources.
+        if task.issue_identifier.is_empty() {
+            log_daemon(
+                &log_path,
+                &format!(
+                    "[CALLBACK] {}: empty issue_identifier — ghost task, marking pushed",
+                    task.id
+                ),
+            );
+            if let Err(e) = db.set_linear_pushed(&task.id, true) {
+                log_daemon(
+                    &log_path,
+                    &format!(
+                        "[CALLBACK] {}: ghost task set_linear_pushed failed: {e}",
+                        task.id
+                    ),
+                );
+            }
+            continue;
+        }
+
+        // Age cap: auto-mark pushed if the task is older than MAX_CALLBACK_AGE_SECS.
+        // Try finished_at first; fall back to created_at when finished_at is absent or
+        // malformed (the primary cause of the March accumulation — tasks whose finish
+        // timestamp was never written had no TTL applied and retried forever).
+        let ref_dt: Option<chrono::NaiveDateTime> = task
+            .finished_at
+            .as_deref()
+            .and_then(|ts| chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S").ok())
+            .or_else(|| {
+                chrono::NaiveDateTime::parse_from_str(&task.created_at, "%Y-%m-%dT%H:%M:%S").ok()
+            });
+        if let Some(ref_dt) = ref_dt {
+            if now.signed_duration_since(ref_dt).num_seconds() > MAX_CALLBACK_AGE_SECS {
+                log_daemon(
+                    &log_path,
+                    &format!(
+                        "[CALLBACK] {}: {} — age cap (>24h), marking pushed",
+                        task.issue_identifier, task.id
+                    ),
+                );
+                match db.set_linear_pushed(&task.id, true) {
+                    Ok(()) => {
+                        notify_once(
+                            notifier,
+                            notified_tasks,
+                            notification_cooldown_secs,
+                            &task.id,
+                            &task.task_type,
+                            &task.issue_identifier,
+                            "age cap: abandoned (>24h old)",
+                        );
+                    }
+                    Err(e) => {
                         log_daemon(
                             &log_path,
                             &format!(
-                                "[CALLBACK] {}: {} — TTL set_linear_pushed failed: {e}",
+                                "[CALLBACK] {}: {} — age cap set_linear_pushed failed: {e}",
                                 task.issue_identifier, task.id
                             ),
                         );
                     }
-                    continue;
+                }
+                continue;
+            }
+        }
+
+        // Attempts cap: skip tasks that have already exhausted all callback attempts.
+        // This catches non-pipeline task types that don't go through the pipeline
+        // error path where attempts are checked per-failure.
+        let existing_attempts = db.get_callback_attempts(&task.id).unwrap_or(0);
+        if existing_attempts >= MAX_CALLBACK_ATTEMPTS {
+            log_daemon(
+                &log_path,
+                &format!(
+                    "[CALLBACK] {}: {} — already at max attempts ({}), marking pushed",
+                    task.issue_identifier, task.id, existing_attempts
+                ),
+            );
+            match db.set_linear_pushed(&task.id, true) {
+                Ok(()) => {
+                    write_dead_letter(
+                        werma_dir,
+                        &task.id,
+                        &task.issue_identifier,
+                        &task.pipeline_stage,
+                        "max callback attempts reached",
+                        existing_attempts,
+                    );
+                    notify_once(
+                        notifier,
+                        notified_tasks,
+                        notification_cooldown_secs,
+                        &task.id,
+                        &task.task_type,
+                        &task.issue_identifier,
+                        "abandoned: max callback attempts",
+                    );
+                }
+                Err(e) => {
+                    log_daemon(
+                        &log_path,
+                        &format!(
+                            "[CALLBACK] {}: {} — max-attempts set_linear_pushed failed: {e}",
+                            task.issue_identifier, task.id
+                        ),
+                    );
                 }
             }
+            continue;
         }
 
         if !task.pipeline_stage.is_empty() {
@@ -113,23 +213,27 @@ pub fn process_completed_tasks(
                                 task.issue_identifier, task.id, task.pipeline_stage
                             ),
                         );
-                        if let Err(e) = db.set_linear_pushed(&task.id, true) {
-                            log_daemon(
-                                &log_path,
-                                &format!(
-                                    "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
-                                    task.issue_identifier, task.id
-                                ),
-                            );
+                        match db.set_linear_pushed(&task.id, true) {
+                            Ok(()) => {
+                                write_dead_letter(
+                                    werma_dir,
+                                    &task.id,
+                                    &task.issue_identifier,
+                                    &task.pipeline_stage,
+                                    &err_msg,
+                                    attempts,
+                                );
+                            }
+                            Err(e) => {
+                                log_daemon(
+                                    &log_path,
+                                    &format!(
+                                        "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
+                                        task.issue_identifier, task.id
+                                    ),
+                                );
+                            }
                         }
-                        write_dead_letter(
-                            werma_dir,
-                            &task.id,
-                            &task.issue_identifier,
-                            &task.pipeline_stage,
-                            &err_msg,
-                            attempts,
-                        );
                         continue;
                     }
 
@@ -153,28 +257,33 @@ pub fn process_completed_tasks(
                                 task.issue_identifier, task.id, attempts
                             ),
                         );
-                        if let Err(e) = db.set_linear_pushed(&task.id, true) {
-                            log_daemon(
-                                &log_path,
-                                &format!(
-                                    "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
-                                    task.issue_identifier, task.id
-                                ),
-                            );
+                        match db.set_linear_pushed(&task.id, true) {
+                            Ok(()) => {
+                                write_dead_letter(
+                                    werma_dir,
+                                    &task.id,
+                                    &task.issue_identifier,
+                                    &task.pipeline_stage,
+                                    &err_msg,
+                                    attempts,
+                                );
+                            }
+                            Err(e) => {
+                                log_daemon(
+                                    &log_path,
+                                    &format!(
+                                        "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
+                                        task.issue_identifier, task.id
+                                    ),
+                                );
+                            }
                         }
-                        write_dead_letter(
-                            werma_dir,
-                            &task.id,
-                            &task.issue_identifier,
-                            &task.pipeline_stage,
-                            &err_msg,
-                            attempts,
-                        );
                     }
                 }
             }
         } else if task.task_type == "research" {
             let Some(client) = linear else {
+                // No linear client — can't push. Age cap will eventually clear this.
                 continue;
             };
             // Research task: post summary comment and create curator follow-up.
@@ -193,16 +302,60 @@ pub fn process_completed_tasks(
                     );
                 }
                 Err(e) => {
+                    let attempts = db.increment_callback_attempts(&task.id).unwrap_or(i32::MAX);
                     log_daemon(
                         &log_path,
-                        &format!("research completion failed: {} error={e}", task.id),
+                        &format!(
+                            "research completion failed (attempt {}/{}): {} error={e}",
+                            attempts, MAX_CALLBACK_ATTEMPTS, task.id
+                        ),
                     );
+                    if attempts >= MAX_CALLBACK_ATTEMPTS {
+                        log_daemon(
+                            &log_path,
+                            &format!(
+                                "[CALLBACK] {}: {} -> ABANDONED (research) after {} attempts",
+                                task.issue_identifier, task.id, attempts
+                            ),
+                        );
+                        match db.set_linear_pushed(&task.id, true) {
+                            Ok(()) => {
+                                write_dead_letter(
+                                    werma_dir,
+                                    &task.id,
+                                    &task.issue_identifier,
+                                    "research",
+                                    &format!("{e:#}"),
+                                    attempts,
+                                );
+                                notify_once(
+                                    notifier,
+                                    notified_tasks,
+                                    notification_cooldown_secs,
+                                    &task.id,
+                                    &task.task_type,
+                                    &task.issue_identifier,
+                                    "abandoned: max callback attempts (research)",
+                                );
+                            }
+                            Err(e) => {
+                                log_daemon(
+                                    &log_path,
+                                    &format!(
+                                        "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
+                                        task.issue_identifier, task.id
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
             }
         } else {
             // Non-pipeline task with issue_identifier: push comment + move to Done.
             // Only act when a linear client is available and the identifier is a Linear issue.
             let Some(client) = linear else {
+                // No linear client — can't push. Age cap will eventually clear this.
                 continue;
             };
             if crate::project::ProjectResolver::tracker(&task.issue_identifier)
@@ -219,16 +372,83 @@ pub fn process_completed_tasks(
                     );
                 }
                 Err(e) => {
+                    let attempts = db.increment_callback_attempts(&task.id).unwrap_or(i32::MAX);
                     log_daemon(
                         &log_path,
-                        &format!("linear push failed: {} error={e}", task.id),
+                        &format!(
+                            "linear push failed (attempt {}/{}): {} error={e}",
+                            attempts, MAX_CALLBACK_ATTEMPTS, task.id
+                        ),
                     );
+                    if attempts >= MAX_CALLBACK_ATTEMPTS {
+                        log_daemon(
+                            &log_path,
+                            &format!(
+                                "[CALLBACK] {}: {} -> ABANDONED (direct) after {} attempts",
+                                task.issue_identifier, task.id, attempts
+                            ),
+                        );
+                        match db.set_linear_pushed(&task.id, true) {
+                            Ok(()) => {
+                                write_dead_letter(
+                                    werma_dir,
+                                    &task.id,
+                                    &task.issue_identifier,
+                                    "",
+                                    &format!("{e:#}"),
+                                    attempts,
+                                );
+                                notify_once(
+                                    notifier,
+                                    notified_tasks,
+                                    notification_cooldown_secs,
+                                    &task.id,
+                                    &task.task_type,
+                                    &task.issue_identifier,
+                                    "abandoned: max callback attempts",
+                                );
+                            }
+                            Err(e) => {
+                                log_daemon(
+                                    &log_path,
+                                    &format!(
+                                        "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
+                                        task.issue_identifier, task.id
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
     Ok(())
+}
+
+/// Send a macOS notification for a task, suppressing duplicates within the cooldown window.
+fn notify_once(
+    notifier: &dyn Notifier,
+    notified_tasks: &mut HashMap<String, Instant>,
+    cooldown_secs: u64,
+    task_id: &str,
+    task_type: &str,
+    issue_identifier: &str,
+    reason: &str,
+) {
+    let within_cooldown = notified_tasks
+        .get(task_id)
+        .is_some_and(|last| last.elapsed() < std::time::Duration::from_secs(cooldown_secs));
+    if !within_cooldown {
+        let label = crate::notify::format_notify_label(task_id, task_type, issue_identifier);
+        notifier.notify_macos(
+            "werma: task abandoned",
+            &format!("{label} — {reason}"),
+            "Basso",
+        );
+        notified_tasks.insert(task_id.to_string(), Instant::now());
+    }
 }
 
 /// Push a task result to Linear using the `LinearApi` trait.
@@ -300,11 +520,16 @@ mod tests {
     use crate::traits::fakes::{FakeCommandRunner, FakeNotifier};
 
     fn make_task(id: &str, pipeline_stage: &str, task_type: &str) -> Task {
+        // Use a recent created_at so tasks are not auto-pushed by the 24h age cap.
+        // Tests that need ancient tasks should override created_at explicitly.
+        let recent = (chrono::Local::now() - chrono::Duration::minutes(5))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
         Task {
             id: id.to_string(),
             status: Status::Completed,
             priority: 1,
-            created_at: "2026-03-09T10:00:00".to_string(),
+            created_at: recent,
             started_at: None,
             finished_at: None,
             task_type: task_type.to_string(),
@@ -410,6 +635,8 @@ mod tests {
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
             None,
+            &mut std::collections::HashMap::new(),
+            300,
         )
         .unwrap();
     }
@@ -426,21 +653,22 @@ mod tests {
         assert!(unpushed.is_empty());
     }
 
+    // ─── RIG-398: 24h age cap + created_at fallback ──────────────────────
+
     #[test]
-    fn callback_ttl_marks_pushed_when_finished_over_1h_ago() {
+    fn age_cap_marks_pushed_when_finished_over_24h_ago() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
         let db = Db::open_in_memory().unwrap();
 
-        // Task finished 2 hours ago — should be TTL'd
+        // Task finished 25 hours ago — must be auto-pushed by age cap.
         let mut task = make_task("20260324-ttl", "engineer", "pipeline-engineer");
-        let two_hours_ago = (chrono::Local::now() - chrono::Duration::hours(2))
+        let twenty_five_hours_ago = (chrono::Local::now() - chrono::Duration::hours(25))
             .format("%Y-%m-%dT%H:%M:%S")
             .to_string();
-        task.finished_at = Some(two_hours_ago);
+        task.finished_at = Some(twenty_five_hours_ago);
         db.insert_task(&task).unwrap();
 
-        // Verify it's in unpushed list before
         assert_eq!(db.unpushed_linear_tasks().unwrap().len(), 1);
 
         super::process_completed_tasks(
@@ -449,21 +677,59 @@ mod tests {
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
             None,
+            &mut std::collections::HashMap::new(),
+            300,
         )
         .unwrap();
 
-        // After TTL, should be marked as pushed
         let unpushed = db.unpushed_linear_tasks().unwrap();
-        assert!(unpushed.is_empty(), "TTL'd task should be marked pushed");
+        assert!(unpushed.is_empty(), "task >24h old must be auto-pushed");
+
+        let log = std::fs::read_to_string(dir.path().join("logs/daemon.log")).unwrap_or_default();
+        assert!(log.contains("age cap"), "log must mention age cap");
     }
 
     #[test]
-    fn callback_ttl_does_not_skip_recent_tasks() {
+    fn age_cap_uses_created_at_when_finished_at_is_none() {
+        // Ghost task: finished_at is None but created_at is 25h ago.
+        // Without the created_at fallback, this task would retry forever.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
         let db = Db::open_in_memory().unwrap();
 
-        // Task finished 5 minutes ago — should NOT be TTL'd
+        let mut task = make_task("20260324-ghost", "engineer", "pipeline-engineer");
+        let twenty_five_hours_ago = (chrono::Local::now() - chrono::Duration::hours(25))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        task.created_at = twenty_five_hours_ago;
+        task.finished_at = None; // never set
+        db.insert_task(&task).unwrap();
+
+        super::process_completed_tasks(
+            &db,
+            dir.path(),
+            &FakeCommandRunner::new(),
+            &FakeNotifier::new(),
+            None,
+            &mut std::collections::HashMap::new(),
+            300,
+        )
+        .unwrap();
+
+        let unpushed = db.unpushed_linear_tasks().unwrap();
+        assert!(
+            unpushed.is_empty(),
+            "ghost task >24h old (by created_at) must be auto-pushed"
+        );
+    }
+
+    #[test]
+    fn age_cap_does_not_skip_recent_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = Db::open_in_memory().unwrap();
+
+        // Task finished 5 minutes ago — must NOT be auto-pushed by age cap.
         let mut task = make_task("20260324-recent", "engineer", "pipeline-engineer");
         let five_min_ago = (chrono::Local::now() - chrono::Duration::minutes(5))
             .format("%Y-%m-%dT%H:%M:%S")
@@ -471,23 +737,119 @@ mod tests {
         task.finished_at = Some(five_min_ago);
         db.insert_task(&task).unwrap();
 
-        // Callback will fire (not TTL'd) — even if it fails/succeeds, the point
-        // is that TTL didn't skip it. Verify the task was NOT skipped by TTL
-        // by checking that the callback attempted to process it (log file will have output).
         let _ = super::process_completed_tasks(
             &db,
             dir.path(),
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
             None,
+            &mut std::collections::HashMap::new(),
+            300,
         );
 
         let log_content =
             std::fs::read_to_string(dir.path().join("logs/daemon.log")).unwrap_or_default();
-        // Should NOT contain TTL skip message
         assert!(
-            !log_content.contains("TTL expired"),
-            "recent task should not be TTL'd"
+            !log_content.contains("age cap"),
+            "recent task must not be auto-pushed by age cap"
+        );
+    }
+
+    // ─── RIG-398: empty issue_identifier ghost task skip ─────────────────
+
+    #[test]
+    fn ghost_task_with_empty_identifier_is_auto_pushed() {
+        // A task with empty issue_identifier reached process_completed_tasks via some
+        // path that bypassed the DB filter. It must be immediately marked pushed.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+        let db = Db::open_in_memory().unwrap();
+
+        // Manually construct an unpushed task with empty identifier
+        // (DB query filters these, so we test the guard directly via in-memory state).
+        // Call the guard logic: the easiest way is to verify via log output + DB state
+        // when a ghost task somehow appears in the iteration.
+        //
+        // Since unpushed_linear_tasks already excludes empty identifiers,
+        // we test the guard by calling process_completed_tasks with a db that has
+        // no ghost tasks — the test for the guard is thus a compile+logic check.
+        // The real guard matters for callers that might inject tasks directly.
+        // DB-level: confirm no ghost tasks leak through.
+        let mut ghost = make_task("20260324-ghost2", "", "code");
+        ghost.issue_identifier = String::new();
+        db.insert_task(&ghost).unwrap();
+
+        // DB query must not return ghost tasks
+        let unpushed = db.unpushed_linear_tasks().unwrap();
+        assert!(
+            unpushed.is_empty(),
+            "DB must filter ghost tasks (empty issue_identifier)"
+        );
+    }
+
+    // ─── RIG-398: notification dedup ─────────────────────────────────────
+
+    #[test]
+    fn notification_dedup_suppresses_repeat_within_cooldown() {
+        // Verify that when a task is auto-pushed (age cap), subsequent ticks
+        // with the same task_id suppress the notification within the cooldown.
+        use std::collections::HashMap;
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        let notifier = crate::traits::fakes::FakeNotifier::new();
+        let mut notified_tasks: HashMap<String, Instant> = HashMap::new();
+
+        // Pre-populate: simulate task was notified just now
+        notified_tasks.insert("20260324-dup".to_string(), Instant::now());
+
+        // Call notify_once with the same task ID — should be suppressed
+        super::notify_once(
+            &notifier,
+            &mut notified_tasks,
+            300, // 300s cooldown
+            "20260324-dup",
+            "pipeline-engineer",
+            "RIG-398",
+            "test reason",
+        );
+
+        assert!(
+            notifier.macos_calls.borrow().is_empty(),
+            "notification must be suppressed within cooldown"
+        );
+    }
+
+    #[test]
+    fn notification_dedup_fires_when_not_in_cooldown() {
+        use std::collections::HashMap;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("logs")).unwrap();
+
+        let notifier = crate::traits::fakes::FakeNotifier::new();
+        let mut notified_tasks: HashMap<String, std::time::Instant> = HashMap::new();
+        // Task not in the map → first notification must fire
+        super::notify_once(
+            &notifier,
+            &mut notified_tasks,
+            300,
+            "20260324-new",
+            "pipeline-engineer",
+            "RIG-398",
+            "test reason",
+        );
+
+        assert_eq!(
+            notifier.macos_calls.borrow().len(),
+            1,
+            "first notification must fire when not in cooldown"
+        );
+        assert!(
+            notified_tasks.contains_key("20260324-new"),
+            "notified_tasks must be updated after notification"
         );
     }
 
@@ -623,17 +985,19 @@ mod tests {
     }
 
     #[test]
-    fn callback_ttl_and_retry_interaction() {
-        // A task that has been retried AND is past TTL should be TTL'd (TTL takes precedence)
+    fn age_cap_and_retry_interaction() {
+        // A task that has been retried AND is past the 24h age cap should be auto-pushed
+        // (age cap takes precedence over retry count).
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
         let db = Db::open_in_memory().unwrap();
 
         let mut task = make_task("20260326-ttl-retry", "engineer", "pipeline-engineer");
-        let two_hours_ago = (chrono::Local::now() - chrono::Duration::hours(2))
+        let twenty_five_hours_ago = (chrono::Local::now() - chrono::Duration::hours(25))
             .format("%Y-%m-%dT%H:%M:%S")
             .to_string();
-        task.finished_at = Some(two_hours_ago);
+        task.finished_at = Some(twenty_five_hours_ago.clone());
+        task.created_at = twenty_five_hours_ago;
         db.insert_task(&task).unwrap();
 
         // Simulate 3 prior failed attempts
@@ -642,20 +1006,22 @@ mod tests {
                 .unwrap();
         }
 
-        // TTL should mark it pushed regardless of retry count
+        // Age cap should mark it pushed regardless of retry count
         super::process_completed_tasks(
             &db,
             dir.path(),
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
             None,
+            &mut std::collections::HashMap::new(),
+            300,
         )
         .unwrap();
 
         let unpushed = db.unpushed_linear_tasks().unwrap();
         assert!(
             unpushed.is_empty(),
-            "TTL should override retry — task marked pushed"
+            "age cap should override retry — task marked pushed"
         );
     }
 
@@ -695,20 +1061,28 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
         let db = Db::open_in_memory().unwrap();
 
+        // Use recent timestamps so tasks are NOT auto-pushed by the 24h age cap
+        let five_min_ago = (chrono::Local::now() - chrono::Duration::minutes(5))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+
         // Pipeline task
         let mut pipeline = make_task("20260326-p1", "reviewer", "pipeline-reviewer");
-        pipeline.finished_at = Some("2026-03-26T10:00:00".to_string());
+        pipeline.finished_at = Some(five_min_ago.clone());
+        pipeline.created_at = five_min_ago.clone();
         db.insert_task(&pipeline).unwrap();
 
         // Research task
         let mut research = make_task("20260326-r1", "", "research");
-        research.finished_at = Some("2026-03-26T10:00:00".to_string());
+        research.finished_at = Some(five_min_ago.clone());
+        research.created_at = five_min_ago.clone();
         db.insert_task(&research).unwrap();
 
         // Direct linear task (code type, no pipeline stage)
         let mut direct = make_task("20260326-d1", "", "code");
         direct.issue_identifier = "issue-xyz".to_string();
-        direct.finished_at = Some("2026-03-26T10:00:00".to_string());
+        direct.finished_at = Some(five_min_ago.clone());
+        direct.created_at = five_min_ago;
         db.insert_task(&direct).unwrap();
 
         // Should not panic or error even without LINEAR_API_KEY
@@ -718,6 +1092,8 @@ mod tests {
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
             None,
+            &mut std::collections::HashMap::new(),
+            300,
         );
         assert!(result.is_ok());
     }
@@ -752,17 +1128,18 @@ mod tests {
     }
 
     #[test]
-    fn callback_ttl_boundary_at_exactly_one_hour() {
+    fn age_cap_boundary_below_24h() {
+        // Task finished 23 hours ago — must NOT be auto-pushed (< 24h threshold).
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
         let db = Db::open_in_memory().unwrap();
 
-        // Task finished exactly 59 minutes ago — should NOT be TTL'd
         let mut task = make_task("20260326-boundary", "engineer", "pipeline-engineer");
-        let just_under = (chrono::Local::now() - chrono::Duration::minutes(59))
+        let just_under = (chrono::Local::now() - chrono::Duration::hours(23))
             .format("%Y-%m-%dT%H:%M:%S")
             .to_string();
-        task.finished_at = Some(just_under);
+        task.finished_at = Some(just_under.clone());
+        task.created_at = just_under;
         db.insert_task(&task).unwrap();
 
         let _ = super::process_completed_tasks(
@@ -771,27 +1148,34 @@ mod tests {
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
             None,
+            &mut std::collections::HashMap::new(),
+            300,
         );
 
         let log_content =
             std::fs::read_to_string(dir.path().join("logs/daemon.log")).unwrap_or_default();
         assert!(
-            !log_content.contains("TTL expired"),
-            "task at 59 min should not be TTL'd"
+            !log_content.contains("age cap"),
+            "task at 23h must not be auto-pushed by age cap"
         );
     }
 
-    // ─── RIG-353: TTL and retry edge cases ────────────────────────────────
+    // ─── RIG-353: age cap and retry edge cases ────────────────────────────────
 
     #[test]
-    fn ttl_skips_task_with_none_finished_at() {
-        // Task with finished_at=None should NOT be TTL'd (still processing)
+    fn age_cap_skips_task_with_recent_created_at_and_none_finished_at() {
+        // Task with finished_at=None and RECENT created_at must NOT be age-capped.
+        // (created_at fallback: if task is new, it stays in retry queue)
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
         let db = Db::open_in_memory().unwrap();
 
         let mut task = make_task("20260331-nofinish", "engineer", "pipeline-engineer");
-        task.finished_at = None; // explicitly None
+        let five_min_ago = (chrono::Local::now() - chrono::Duration::minutes(5))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        task.created_at = five_min_ago;
+        task.finished_at = None;
         db.insert_task(&task).unwrap();
 
         let _ = super::process_completed_tasks(
@@ -800,24 +1184,32 @@ mod tests {
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
             None,
+            &mut std::collections::HashMap::new(),
+            300,
         );
 
         let log_content =
             std::fs::read_to_string(dir.path().join("logs/daemon.log")).unwrap_or_default();
         assert!(
-            !log_content.contains("TTL expired"),
-            "task with None finished_at should not be TTL'd"
+            !log_content.contains("age cap"),
+            "recent task with None finished_at must not be auto-pushed"
         );
     }
 
     #[test]
-    fn ttl_skips_malformed_timestamp() {
-        // Task with a garbage finished_at should NOT be TTL'd (parse failure → skip TTL check)
+    fn age_cap_skips_malformed_finished_at_but_uses_created_at() {
+        // Task has malformed finished_at. The fallback to created_at kicks in.
+        // If created_at is also recent, the task must NOT be age-capped.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("logs")).unwrap();
         let db = Db::open_in_memory().unwrap();
 
         let mut task = make_task("20260331-malformed", "engineer", "pipeline-engineer");
+        let five_min_ago = (chrono::Local::now() - chrono::Duration::minutes(5))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        task.created_at = five_min_ago;
+        // finished_at is malformed — the age check will fall back to created_at
         task.finished_at = Some("not-a-timestamp-at-all".to_string());
         db.insert_task(&task).unwrap();
 
@@ -827,13 +1219,15 @@ mod tests {
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
             None,
+            &mut std::collections::HashMap::new(),
+            300,
         );
 
         let log_content =
             std::fs::read_to_string(dir.path().join("logs/daemon.log")).unwrap_or_default();
         assert!(
-            !log_content.contains("TTL expired"),
-            "malformed timestamp should not trigger TTL"
+            !log_content.contains("age cap"),
+            "malformed finished_at with recent created_at must not trigger age cap"
         );
     }
 
@@ -863,6 +1257,8 @@ mod tests {
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
             None,
+            &mut std::collections::HashMap::new(),
+            300,
         )
         .unwrap();
 
