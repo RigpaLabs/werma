@@ -592,7 +592,7 @@ pub fn decide_callback(
             // Check review cycle limit.
             if stage == "reviewer" && next_stage == "engineer" {
                 let review_count =
-                    db.count_completed_tasks_for_issue_stage(issue_identifier, "reviewer")?;
+                    db.count_reviewer_tasks_since_latest_engineer(issue_identifier)?;
                 let max_rounds = stage_cfg
                     .review_round_limit()
                     .unwrap_or(DEFAULT_MAX_REVIEW_ROUNDS) as i64;
