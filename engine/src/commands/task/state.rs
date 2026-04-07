@@ -151,7 +151,8 @@ pub fn cmd_complete(
     };
     // Re-read task for up-to-date cost/turns/model for notification fields
     let updated_task = db.task(id)?.unwrap_or(task);
-    let notify_fields = super::super::display::format_notification_fields(&updated_task);
+    let cfg = UserConfig::load();
+    let notify_fields = super::super::display::format_notification_fields(&updated_task, &cfg);
     let notify_full = if notify_fields.is_empty() {
         notify_msg.clone()
     } else {

@@ -99,13 +99,10 @@ impl TrackerConfig {
         if let Some(hash_pos) = identifier.rfind('#') {
             let repo_part = &identifier[..hash_pos];
             let number_part = &identifier[hash_pos + 1..];
-            // Look up the repo in GitHub config entries
-            for entry in self.github.values() {
-                if entry.repo == repo_part {
-                    if let Some(prefix) = &entry.prefix {
-                        return format!("{prefix}-{number_part}");
-                    }
-                    break;
+            // Direct O(1) lookup — TOML key matches repo name by convention
+            if let Some(entry) = self.github.get(repo_part) {
+                if let Some(prefix) = &entry.prefix {
+                    return format!("{prefix}-{number_part}");
                 }
             }
         }

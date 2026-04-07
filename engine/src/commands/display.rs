@@ -1,6 +1,7 @@
 use chrono::Local;
 use colored::Colorize;
 
+use crate::config::UserConfig;
 use crate::models::{Status, Task};
 
 /// Status icon for display.
@@ -88,30 +89,26 @@ pub fn format_duration_secs(secs: i64) -> String {
 }
 
 /// Format task metadata fields using user-configured status fields.
-/// Loads config from `~/.werma/config.toml` (cached per call).
 /// Default: `["model", "turns"]` → `(opus/19t)`.
-pub fn format_cost_turns(task: &Task) -> String {
-    let cfg = crate::config::UserConfig::load();
+pub fn format_cost_turns(task: &Task, cfg: &UserConfig) -> String {
     let fields = cfg.status_fields();
     crate::notify::format_display_fields(task, &fields)
 }
 
 /// Format task metadata fields for notifications (uses notification config).
-pub fn format_notification_fields(task: &Task) -> String {
-    let cfg = crate::config::UserConfig::load();
+pub fn format_notification_fields(task: &Task, cfg: &UserConfig) -> String {
     let fields = cfg.notification_fields();
     crate::notify::format_display_fields(task, &fields)
 }
 
-pub fn format_task_line(task: &Task, time_str: &str) -> String {
+pub fn format_task_line(task: &Task, time_str: &str, cfg: &UserConfig) -> String {
     let linear = if task.issue_identifier.is_empty() {
         String::new()
     } else {
-        let cfg = crate::config::UserConfig::load();
         let display_id = cfg.tracker.display_identifier(&task.issue_identifier);
         format!("  [{}]", display_id.cyan())
     };
-    let cost_turns = format_cost_turns(task);
+    let cost_turns = format_cost_turns(task, cfg);
     let rt = runtime_suffix(task);
     let preview = truncate(&task.prompt, 45);
     format!(
@@ -149,11 +146,10 @@ pub fn runtime_suffix(task: &Task) -> String {
     }
 }
 
-pub fn compact_linear_label(issue_identifier: &str) -> String {
+pub fn compact_linear_label(issue_identifier: &str, cfg: &UserConfig) -> String {
     if issue_identifier.is_empty() {
         String::new()
     } else {
-        let cfg = crate::config::UserConfig::load();
         let display_id = cfg.tracker.display_identifier(issue_identifier);
         format!(" [{display_id}]")
     }
@@ -292,11 +288,13 @@ mod tests {
 
     #[test]
     fn compact_linear_label_empty() {
-        assert_eq!(compact_linear_label(""), "");
+        let cfg = UserConfig::default();
+        assert_eq!(compact_linear_label("", &cfg), "");
     }
 
     #[test]
     fn compact_linear_label_present() {
-        assert_eq!(compact_linear_label("RIG-42"), " [RIG-42]");
+        let cfg = UserConfig::default();
+        assert_eq!(compact_linear_label("RIG-42", &cfg), " [RIG-42]");
     }
 }
