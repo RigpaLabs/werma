@@ -152,10 +152,16 @@ fn display_model_name(task: &crate::models::Task) -> Option<String> {
             if task.model.is_empty() || matches!(task.model.as_str(), "opus" | "sonnet" | "haiku") {
                 Some("flash".to_string())
             } else if let Some(rest) = task.model.strip_prefix("gemini-") {
-                // "gemini-2.5-flash" → rest="2.5-flash" → rsplit last → "flash"
-                // "gemini-2.5-pro"   → rest="2.5-pro"   → rsplit last → "pro"
-                // "gemini-flash"     → rest="flash"      → no '-'     → "flash"
-                let name = rest.rsplit_once('-').map(|(_, last)| last).unwrap_or(rest);
+                // Skip version-like segments (digits/dots) to find the model
+                // family name:
+                //   "2.5-flash"              → skip "2.5"  → "flash"
+                //   "2.5-pro"                → skip "2.5"  → "pro"
+                //   "2.5-flash-preview-04-17"→ skip "2.5"  → "flash"
+                //   "flash"                  → no digits   → "flash"
+                let name = rest
+                    .split('-')
+                    .find(|s| !s.chars().all(|c| c.is_ascii_digit() || c == '.'))
+                    .unwrap_or(rest);
                 Some(name.to_string())
             } else {
                 Some(task.model.clone())
@@ -180,15 +186,10 @@ fn render_field(field: DisplayField, task: &crate::models::Task) -> Option<Strin
         DisplayField::Cost => task.cost_usd.map(|c| format!("${c:.2}")),
         DisplayField::Turns => {
             if task.runtime == crate::models::AgentRuntime::QwenCode {
-                // Qwen doesn't report turns; show duration for completed tasks instead
-                if let (Some(s), Some(e)) =
-                    (task.started_at.as_deref(), task.finished_at.as_deref())
-                {
-                    let dur = crate::format_duration_between(s, e);
-                    if dur.is_empty() { None } else { Some(dur) }
-                } else {
-                    None
-                }
+                // Qwen doesn't report turns; duration is already shown in the
+                // time column for completed tasks, so emit nothing here to
+                // avoid duplication (e.g. "3m  (qwen/3m)").
+                None
             } else if task.turns_used > 0 {
                 Some(format!("{}t", task.turns_used))
             } else {
@@ -423,9 +424,11 @@ mod tests {
         );
     }
 
-    /// Qwen completed tasks show duration in place of turns.
+    /// Qwen completed tasks do NOT show duration in display fields — duration is
+    /// already shown in the time column by the caller, so repeating it would
+    /// produce duplicate output like "3m  (qwen/3m)".
     #[test]
-    fn display_fields_qwen_completed_shows_duration() {
+    fn display_fields_qwen_completed_no_duplicate_duration() {
         let task = crate::models::Task {
             model: "sonnet".into(),
             runtime: crate::models::AgentRuntime::QwenCode,
@@ -434,7 +437,8 @@ mod tests {
             ..Default::default()
         };
         let result = format_display_fields(&task, DEFAULT_STATUS_FIELDS);
-        assert_eq!(result, "  (qwen/3m)");
+        // Only model, no duration — duration is in the time column
+        assert_eq!(result, "  (qwen)");
     }
 
     /// Claude-code runtime shows shorthand as-is with turns.
@@ -517,5 +521,32 @@ mod tests {
         let fields = &[DisplayField::Model];
         let result = format_display_fields(&task, fields);
         assert_eq!(result, "  (pro)");
+    }
+
+    /// Gemini preview/versioned models extract the family name, not a trailing
+    /// segment like "17" from "gemini-2.5-flash-preview-04-17".
+    #[test]
+    fn display_fields_gemini_preview_model_extracts_family() {
+        let task = crate::models::Task {
+            model: "gemini-2.5-flash-preview-04-17".into(),
+            runtime: crate::models::AgentRuntime::GeminiCli,
+            turns_used: 5,
+            ..Default::default()
+        };
+        let result = format_display_fields(&task, DEFAULT_STATUS_FIELDS);
+        assert_eq!(result, "  (flash/5t)");
+    }
+
+    #[test]
+    fn display_fields_gemini_preview_without_date() {
+        let task = crate::models::Task {
+            model: "gemini-3-flash-preview".into(),
+            runtime: crate::models::AgentRuntime::GeminiCli,
+            turns_used: 7,
+            ..Default::default()
+        };
+        let fields = &[DisplayField::Model];
+        let result = format_display_fields(&task, fields);
+        assert_eq!(result, "  (flash)");
     }
 }
