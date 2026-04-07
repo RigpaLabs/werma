@@ -58,7 +58,9 @@ pub fn format_notify_label(task_id: &str, task_type: &str, linear_issue_id: &str
     if linear_issue_id.is_empty() {
         format!("{short_num} {task_type}")
     } else {
-        format!("{linear_issue_id} {short_num} {task_type}")
+        let cfg = crate::config::UserConfig::load();
+        let display_id = cfg.tracker.display_identifier(linear_issue_id);
+        format!("{display_id} {short_num} {task_type}")
     }
 }
 

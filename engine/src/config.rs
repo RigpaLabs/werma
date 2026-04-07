@@ -21,12 +21,16 @@ const DEFAULT_REPO_BASE: &str = "~/projects";
 /// ```toml
 /// [tracker.github]
 /// my-oss-project = { owner = "arleyar", repo = "my-oss-project" }
+/// honeyjourney = { owner = "ArLeyar", repo = "honeyjourney", prefix = "HJ" }
 /// ```
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct GitHubTrackerEntry {
     pub owner: String,
     pub repo: String,
+    /// Optional short prefix for display (e.g. "HJ" → "HJ-20" instead of "honeyjourney#20").
+    /// Falls back to `repo#N` format if not set.
+    pub prefix: Option<String>,
 }
 
 /// Tracker selection config.
@@ -82,6 +86,30 @@ impl TrackerConfig {
     /// Called by GitHub Issues polling (RIG-384) to create per-repo `GitHubIssueClient`.
     pub fn github_entry(&self, repo: &str) -> Option<&GitHubTrackerEntry> {
         self.github.get(repo)
+    }
+
+    /// Format an identifier for display using configured short prefixes.
+    ///
+    /// Converts `repo#N` → `PREFIX-N` when a prefix is configured for that repo.
+    /// Non-GitHub identifiers (Linear `RIG-42`) and repos without prefixes pass through unchanged.
+    ///
+    /// Internal storage always uses canonical `repo#N` — this is display-only.
+    pub fn display_identifier(&self, identifier: &str) -> String {
+        // Only transform GitHub identifiers (contain '#')
+        if let Some(hash_pos) = identifier.rfind('#') {
+            let repo_part = &identifier[..hash_pos];
+            let number_part = &identifier[hash_pos + 1..];
+            // Look up the repo in GitHub config entries
+            for entry in self.github.values() {
+                if entry.repo == repo_part {
+                    if let Some(prefix) = &entry.prefix {
+                        return format!("{prefix}-{number_part}");
+                    }
+                    break;
+                }
+            }
+        }
+        identifier.to_string()
     }
 }
 
@@ -791,5 +819,146 @@ restricted = ["claude-code"]
         assert_eq!(cfg.pipeline_for_repo("werma"), "default");
         assert!(cfg.is_runtime_allowed("fathom", AgentRuntime::Codex));
         assert!(!cfg.is_runtime_allowed("restricted", AgentRuntime::Codex));
+    }
+
+    // ─── GitHubTrackerEntry prefix tests ──────────────────────────────────────
+
+    #[test]
+    fn github_entry_without_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[tracker.github]\nmy-oss = { owner = \"ArLeyar\", repo = \"my-oss\" }\n",
+        )
+        .unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        let entry = cfg.tracker.github_entry("my-oss").unwrap();
+        assert_eq!(entry.owner, "ArLeyar");
+        assert_eq!(entry.repo, "my-oss");
+        assert!(entry.prefix.is_none());
+    }
+
+    #[test]
+    fn github_entry_with_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[tracker.github]\nhoneyjourney = { owner = \"ArLeyar\", repo = \"honeyjourney\", prefix = \"HJ\" }\n",
+        )
+        .unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        let entry = cfg.tracker.github_entry("honeyjourney").unwrap();
+        assert_eq!(entry.owner, "ArLeyar");
+        assert_eq!(entry.repo, "honeyjourney");
+        assert_eq!(entry.prefix.as_deref(), Some("HJ"));
+    }
+
+    #[test]
+    fn github_entry_prefix_optional_backward_compat() {
+        // Existing configs without prefix field still parse correctly
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[tracker.github]
+project-a = { owner = "org", repo = "project-a" }
+project-b = { owner = "org", repo = "project-b", prefix = "PB" }
+"#,
+        )
+        .unwrap();
+
+        let cfg = UserConfig::load_from(&path);
+        assert!(
+            cfg.tracker
+                .github_entry("project-a")
+                .unwrap()
+                .prefix
+                .is_none()
+        );
+        assert_eq!(
+            cfg.tracker
+                .github_entry("project-b")
+                .unwrap()
+                .prefix
+                .as_deref(),
+            Some("PB")
+        );
+    }
+
+    #[test]
+    fn display_identifier_with_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[tracker.github]
+honeyjourney = { owner = "ArLeyar", repo = "honeyjourney", prefix = "HJ" }
+"#,
+        )
+        .unwrap();
+        let cfg = UserConfig::load_from(&path);
+
+        assert_eq!(cfg.tracker.display_identifier("honeyjourney#20"), "HJ-20");
+        assert_eq!(cfg.tracker.display_identifier("honeyjourney#1"), "HJ-1");
+    }
+
+    #[test]
+    fn display_identifier_without_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[tracker.github]
+myrepo = { owner = "org", repo = "myrepo" }
+"#,
+        )
+        .unwrap();
+        let cfg = UserConfig::load_from(&path);
+
+        // No prefix configured → pass through unchanged
+        assert_eq!(cfg.tracker.display_identifier("myrepo#42"), "myrepo#42");
+    }
+
+    #[test]
+    fn display_identifier_linear_passthrough() {
+        let cfg = UserConfig::default();
+
+        // Linear identifiers pass through unchanged
+        assert_eq!(cfg.tracker.display_identifier("RIG-42"), "RIG-42");
+        assert_eq!(cfg.tracker.display_identifier("FAT-100"), "FAT-100");
+    }
+
+    #[test]
+    fn display_identifier_empty() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.tracker.display_identifier(""), "");
+    }
+
+    #[test]
+    fn display_identifier_unknown_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[tracker.github]
+honeyjourney = { owner = "ArLeyar", repo = "honeyjourney", prefix = "HJ" }
+"#,
+        )
+        .unwrap();
+        let cfg = UserConfig::load_from(&path);
+
+        // Unknown repo → pass through unchanged
+        assert_eq!(
+            cfg.tracker.display_identifier("other-repo#5"),
+            "other-repo#5"
+        );
     }
 }

@@ -73,10 +73,11 @@ impl<'a> GitHubIssueClient<'a> {
     }
 
     /// Parse an issue number from an identifier.
-    /// Accepts: "42", "#42", "repo#42", "owner/repo#42"
+    /// Accepts: "42", "#42", "repo#42", "owner/repo#42", "PREFIX-42"
     fn parse_number(issue_id: &str) -> Result<u64> {
         let s = issue_id.trim();
 
+        // repo#42 / owner/repo#42 / #42
         if let Some(hash_pos) = s.rfind('#') {
             let num_str = &s[hash_pos + 1..];
             return num_str
@@ -84,11 +85,24 @@ impl<'a> GitHubIssueClient<'a> {
                 .with_context(|| format!("invalid issue number: {issue_id}"));
         }
 
+        // PREFIX-42 (short prefix format, e.g. "HJ-42")
+        if let Some(dash_pos) = s.rfind('-') {
+            let num_str = &s[dash_pos + 1..];
+            if let Ok(n) = num_str.parse::<u64>() {
+                return Ok(n);
+            }
+        }
+
         s.parse()
             .with_context(|| format!("invalid issue number: {issue_id}"))
     }
 
-    /// Build identifier in `repo#number` format.
+    /// Build canonical identifier for storage and internal logic.
+    ///
+    /// Always returns `repo#number` format (e.g. `"honeyjourney#20"`).
+    /// The `contains('#')` guard in `decision.rs` (RIG-388) depends on this
+    /// format to detect GitHub issues and suppress infinite poll loops.
+    /// Display formatting (prefix like `HJ-20`) is handled separately.
     fn make_identifier(&self, number: u64) -> String {
         format!("{}#{number}", self.repo)
     }
@@ -648,6 +662,53 @@ mod tests {
         assert!(GitHubIssueClient::parse_number("abc").is_err());
         assert!(GitHubIssueClient::parse_number("#").is_err());
         assert!(GitHubIssueClient::parse_number("").is_err());
+    }
+
+    #[test]
+    fn parse_number_prefix_format() {
+        // PREFIX-N short format (e.g. HJ-20)
+        assert_eq!(GitHubIssueClient::parse_number("HJ-20").unwrap(), 20);
+        assert_eq!(GitHubIssueClient::parse_number("AB-1").unwrap(), 1);
+        assert_eq!(GitHubIssueClient::parse_number("PREFIX-999").unwrap(), 999);
+    }
+
+    #[test]
+    fn make_identifier_without_prefix() {
+        let cmd = FakeCommandRunner::new();
+        let client = GitHubIssueClient::new(&cmd, "owner".to_string(), "myrepo".to_string());
+        assert_eq!(client.make_identifier(20), "myrepo#20");
+        assert_eq!(client.make_identifier(1), "myrepo#1");
+    }
+
+    #[test]
+    fn make_identifier_always_canonical() {
+        // make_identifier always returns repo#N regardless of any config.
+        // Display prefix is handled separately by TrackerConfig::display_identifier().
+        let cmd = FakeCommandRunner::new();
+        let client =
+            GitHubIssueClient::new(&cmd, "ArLeyar".to_string(), "honeyjourney".to_string());
+        assert_eq!(client.make_identifier(20), "honeyjourney#20");
+        assert_eq!(client.make_identifier(1), "honeyjourney#1");
+        assert_eq!(client.make_identifier(100), "honeyjourney#100");
+    }
+
+    #[test]
+    fn parse_number_roundtrip() {
+        let cmd = FakeCommandRunner::new();
+        let client =
+            GitHubIssueClient::new(&cmd, "ArLeyar".to_string(), "honeyjourney".to_string());
+        let id = client.make_identifier(42);
+        assert_eq!(id, "honeyjourney#42");
+        assert_eq!(GitHubIssueClient::parse_number(&id).unwrap(), 42);
+    }
+
+    #[test]
+    fn parse_number_roundtrip_different_repo() {
+        let cmd = FakeCommandRunner::new();
+        let client = GitHubIssueClient::new(&cmd, "owner".to_string(), "myrepo".to_string());
+        let id = client.make_identifier(7);
+        assert_eq!(id, "myrepo#7");
+        assert_eq!(GitHubIssueClient::parse_number(&id).unwrap(), 7);
     }
 
     #[test]
