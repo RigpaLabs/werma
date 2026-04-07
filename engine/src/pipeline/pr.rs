@@ -226,16 +226,7 @@ pub(crate) fn auto_create_pr(
     let output = cmd
         .run(
             "gh",
-            &[
-                "pr",
-                "create",
-                "--title",
-                &pr_title,
-                "--body",
-                &pr_body,
-                "--label",
-                "ai-generated",
-            ],
+            &["pr", "create", "--title", &pr_title, "--body", &pr_body],
             Some(&working_dir),
         )
         .context("gh pr create")?;
