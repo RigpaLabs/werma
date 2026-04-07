@@ -82,11 +82,15 @@ pub fn cmd_status(
 
         // Flicker-free watch: hide cursor, use cursor repositioning
         ui::hide_cursor();
-        // Initial clear
-        print!("\x1b[2J\x1b[H");
+        // Initial clear — \x1b[3J clears the scrollback buffer in addition to the
+        // visible screen (\x1b[2J), preventing old scrollback content from being
+        // reflowed into the visible area on terminal resize.
+        print!("\x1b[3J\x1b[2J\x1b[H");
         std::io::Write::flush(&mut std::io::stdout()).ok();
 
         let mut prev_lines = 0;
+        // Track terminal width across ticks to detect resize events.
+        let mut prev_term_width: usize = 0;
 
         // Ensure cursor is restored on exit (Ctrl+C, normal return, or panic)
         struct CursorGuard;
@@ -126,6 +130,17 @@ pub fn cmd_status(
             current_term_width = terminal_size::terminal_size()
                 .map(|(w, _)| w.0 as usize)
                 .unwrap_or(80);
+
+            // On terminal resize: full-clear including scrollback buffer.
+            // Without this, the terminal reflows old scrollback content into the visible
+            // area, causing the header to appear twice and leaving residual lines below
+            // the new render.
+            if prev_term_width != 0 && current_term_width != prev_term_width {
+                print!("\x1b[3J\x1b[2J\x1b[H");
+                std::io::Write::flush(&mut std::io::stdout()).ok();
+                prev_lines = 0;
+            }
+            prev_term_width = current_term_width;
 
             if tick_count >= ticks_per_refresh {
                 running = db.list_tasks(Some(Status::Running))?;
