@@ -107,7 +107,9 @@ pub fn format_task_line(task: &Task, time_str: &str) -> String {
     let linear = if task.linear_issue_id.is_empty() {
         String::new()
     } else {
-        format!("  [{}]", task.linear_issue_id.cyan())
+        let cfg = crate::config::UserConfig::load();
+        let display_id = cfg.tracker.display_identifier(&task.linear_issue_id);
+        format!("  [{}]", display_id.cyan())
     };
     let cost_turns = format_cost_turns(task);
     let rt = runtime_suffix(task);
@@ -151,7 +153,9 @@ pub fn compact_linear_label(linear_issue_id: &str) -> String {
     if linear_issue_id.is_empty() {
         String::new()
     } else {
-        format!(" [{linear_issue_id}]")
+        let cfg = crate::config::UserConfig::load();
+        let display_id = cfg.tracker.display_identifier(linear_issue_id);
+        format!(" [{display_id}]")
     }
 }
 

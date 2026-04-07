@@ -167,14 +167,7 @@ fn resolve_tracker_client<'a>(
     if let Some(parsed) = IssueIdentifier::parse(identifier) {
         match parsed {
             IssueIdentifier::GitHub { owner, repo, .. } => {
-                // Full owner/repo#N format: look up prefix from config if available
-                let prefix = user_cfg
-                    .tracker
-                    .github
-                    .values()
-                    .find(|e| e.repo == repo)
-                    .and_then(|e| e.prefix.clone());
-                return Ok(Box::new(GitHubIssueClient::new(cmd, owner, repo, prefix)));
+                return Ok(Box::new(GitHubIssueClient::new(cmd, owner, repo)));
             }
             IssueIdentifier::Linear { .. } => {
                 return tracker::try_linear_client();
@@ -191,7 +184,6 @@ fn resolve_tracker_client<'a>(
                 cmd,
                 entry.owner.clone(),
                 entry.repo.clone(),
-                entry.prefix.clone(),
             )));
         }
         // Also check if repo_part matches an entry's repo name
@@ -201,7 +193,6 @@ fn resolve_tracker_client<'a>(
                     cmd,
                     entry.owner.clone(),
                     entry.repo.clone(),
-                    entry.prefix.clone(),
                 )));
             }
         }

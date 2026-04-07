@@ -87,6 +87,30 @@ impl TrackerConfig {
     pub fn github_entry(&self, repo: &str) -> Option<&GitHubTrackerEntry> {
         self.github.get(repo)
     }
+
+    /// Format an identifier for display using configured short prefixes.
+    ///
+    /// Converts `repo#N` → `PREFIX-N` when a prefix is configured for that repo.
+    /// Non-GitHub identifiers (Linear `RIG-42`) and repos without prefixes pass through unchanged.
+    ///
+    /// Internal storage always uses canonical `repo#N` — this is display-only.
+    pub fn display_identifier(&self, identifier: &str) -> String {
+        // Only transform GitHub identifiers (contain '#')
+        if let Some(hash_pos) = identifier.rfind('#') {
+            let repo_part = &identifier[..hash_pos];
+            let number_part = &identifier[hash_pos + 1..];
+            // Look up the repo in GitHub config entries
+            for entry in self.github.values() {
+                if entry.repo == repo_part {
+                    if let Some(prefix) = &entry.prefix {
+                        return format!("{prefix}-{number_part}");
+                    }
+                    break;
+                }
+            }
+        }
+        identifier.to_string()
+    }
 }
 
 /// User-level configuration loaded from `~/.werma/config.toml`.
@@ -863,6 +887,78 @@ project-b = { owner = "org", repo = "project-b", prefix = "PB" }
                 .prefix
                 .as_deref(),
             Some("PB")
+        );
+    }
+
+    #[test]
+    fn display_identifier_with_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[tracker.github]
+honeyjourney = { owner = "ArLeyar", repo = "honeyjourney", prefix = "HJ" }
+"#,
+        )
+        .unwrap();
+        let cfg = UserConfig::load_from(&path);
+
+        assert_eq!(cfg.tracker.display_identifier("honeyjourney#20"), "HJ-20");
+        assert_eq!(cfg.tracker.display_identifier("honeyjourney#1"), "HJ-1");
+    }
+
+    #[test]
+    fn display_identifier_without_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[tracker.github]
+myrepo = { owner = "org", repo = "myrepo" }
+"#,
+        )
+        .unwrap();
+        let cfg = UserConfig::load_from(&path);
+
+        // No prefix configured → pass through unchanged
+        assert_eq!(cfg.tracker.display_identifier("myrepo#42"), "myrepo#42");
+    }
+
+    #[test]
+    fn display_identifier_linear_passthrough() {
+        let cfg = UserConfig::default();
+
+        // Linear identifiers pass through unchanged
+        assert_eq!(cfg.tracker.display_identifier("RIG-42"), "RIG-42");
+        assert_eq!(cfg.tracker.display_identifier("FAT-100"), "FAT-100");
+    }
+
+    #[test]
+    fn display_identifier_empty() {
+        let cfg = UserConfig::default();
+        assert_eq!(cfg.tracker.display_identifier(""), "");
+    }
+
+    #[test]
+    fn display_identifier_unknown_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[tracker.github]
+honeyjourney = { owner = "ArLeyar", repo = "honeyjourney", prefix = "HJ" }
+"#,
+        )
+        .unwrap();
+        let cfg = UserConfig::load_from(&path);
+
+        // Unknown repo → pass through unchanged
+        assert_eq!(
+            cfg.tracker.display_identifier("other-repo#5"),
+            "other-repo#5"
         );
     }
 }

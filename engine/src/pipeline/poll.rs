@@ -689,12 +689,7 @@ fn poll_github_repos(
     }
 
     for (repo_label, gh_entry) in &user_cfg.tracker.github {
-        let gh_client = GitHubIssueClient::new(
-            cmd,
-            gh_entry.owner.clone(),
-            gh_entry.repo.clone(),
-            gh_entry.prefix.clone(),
-        );
+        let gh_client = GitHubIssueClient::new(cmd, gh_entry.owner.clone(), gh_entry.repo.clone());
 
         // Determine which pipeline this repo uses
         let pipeline_name = user_cfg.pipeline_for_repo(repo_label);
@@ -2325,7 +2320,6 @@ stages:
             &cmd,
             "honeyjourney".to_string(),
             "honeyjourney".to_string(),
-            None,
         );
         let issues = gh_client.get_issues_by_status("in_progress").unwrap();
 
