@@ -1797,7 +1797,12 @@ fn github_client_get_issues_by_status_normalises_shape() {
         ]"#,
     );
 
-    let client = GitHubIssueClient::new(&cmd, "RigpaLabs".to_string(), "werma-test".to_string());
+    let client = GitHubIssueClient::new(
+        &cmd,
+        "RigpaLabs".to_string(),
+        "werma-test".to_string(),
+        None,
+    );
     let issues = client.get_issues_by_status("review").unwrap();
 
     assert_eq!(issues.len(), 1);
@@ -1890,7 +1895,12 @@ fn github_client_move_issue_by_name_correct_calls() {
     // Response to `gh issue edit` (mutation — stdout irrelevant)
     cmd.push_success("");
 
-    let client = GitHubIssueClient::new(&cmd, "RigpaLabs".to_string(), "werma-test".to_string());
+    let client = GitHubIssueClient::new(
+        &cmd,
+        "RigpaLabs".to_string(),
+        "werma-test".to_string(),
+        None,
+    );
     client.move_issue_by_name("42", "review").unwrap();
 
     let calls = cmd.calls.borrow();
