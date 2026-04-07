@@ -212,16 +212,16 @@ pub fn write_task_line(
     task: &Task,
     time_str: &str,
     max_prompt: usize,
-    tracker: &TrackerConfig,
+    cfg: &crate::config::UserConfig,
 ) {
     use std::fmt::Write;
     let linear = if task.issue_identifier.is_empty() {
         String::new()
     } else {
-        let display_id = tracker.display_identifier(&task.issue_identifier);
+        let display_id = cfg.tracker.display_identifier(&task.issue_identifier);
         format!("  [{}]", cyan(&display_id))
     };
-    let cost_turns = crate::commands::display::format_cost_turns(task);
+    let cost_turns = crate::commands::display::format_cost_turns(task, cfg);
     let preview = truncate_line(&task.prompt, max_prompt);
     let _ = writeln!(
         buf,
@@ -270,7 +270,6 @@ pub fn render_status_buf(
     } = buckets;
     let mut buf = String::new();
     let cfg = crate::config::UserConfig::load();
-    let tracker = &cfg.tracker;
 
     // Pixel art mascot header (opt-in via --art flag)
     if show_art {
@@ -296,7 +295,7 @@ pub fn render_status_buf(
             .as_deref()
             .map(crate::format_elapsed_since)
             .unwrap_or_default();
-        write_task_line(&mut buf, task, &elapsed, 45, tracker);
+        write_task_line(&mut buf, task, &elapsed, 45, &cfg);
     }
 
     // Pending
@@ -308,7 +307,7 @@ pub fn render_status_buf(
     );
     for task in pending.iter().take(5) {
         let prio = format!("p{}", task.priority);
-        write_task_line(&mut buf, task, &prio, 45, tracker);
+        write_task_line(&mut buf, task, &prio, 45, &cfg);
     }
     if pending.len() > 5 {
         let _ = writeln!(
@@ -337,7 +336,7 @@ pub fn render_status_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        write_task_line(&mut buf, task, &dur, 45, tracker);
+        write_task_line(&mut buf, task, &dur, 45, &cfg);
     }
 
     for task in *failed {
@@ -345,7 +344,7 @@ pub fn render_status_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        write_task_line(&mut buf, task, &dur, 45, tracker);
+        write_task_line(&mut buf, task, &dur, 45, &cfg);
     }
 
     for task in *canceled {
@@ -353,7 +352,7 @@ pub fn render_status_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        write_task_line(&mut buf, task, &dur, 45, tracker);
+        write_task_line(&mut buf, task, &dur, 45, &cfg);
     }
 
     if let Some(secs) = interval {
@@ -457,7 +456,7 @@ pub fn render_compact_buf(
             _ => String::new(),
         };
         let linear = compact_linear_label_dimmed(&task.issue_identifier, tracker);
-        let cost_turns = crate::commands::display::format_cost_turns(task);
+        let cost_turns = crate::commands::display::format_cost_turns(task, &cfg);
         let _ = writeln!(
             buf,
             " {} {} {}{} {}{}",
@@ -476,7 +475,7 @@ pub fn render_compact_buf(
             _ => String::new(),
         };
         let linear = compact_linear_label_dimmed(&task.issue_identifier, tracker);
-        let cost_turns = crate::commands::display::format_cost_turns(task);
+        let cost_turns = crate::commands::display::format_cost_turns(task, &cfg);
         let _ = writeln!(
             buf,
             " {} {} {}{} {}{}",
@@ -495,7 +494,7 @@ pub fn render_compact_buf(
             _ => String::new(),
         };
         let linear = compact_linear_label_dimmed(&task.issue_identifier, tracker);
-        let cost_turns = crate::commands::display::format_cost_turns(task);
+        let cost_turns = crate::commands::display::format_cost_turns(task, &cfg);
         let _ = writeln!(
             buf,
             " {} {} {}{} {}{}",

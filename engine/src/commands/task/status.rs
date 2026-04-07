@@ -3,6 +3,7 @@ use std::io::IsTerminal;
 use anyhow::{Result, bail};
 use colored::Colorize;
 
+use crate::config::UserConfig;
 use crate::db::Db;
 use crate::models::{Status, Task};
 use crate::ui;
@@ -180,6 +181,7 @@ pub fn cmd_status(
 }
 
 fn render_status(db: &Db, limit: Option<usize>, show_art: bool) -> Result<()> {
+    let cfg = UserConfig::load();
     let running = db.list_tasks(Some(Status::Running))?;
     let pending = db.list_tasks(Some(Status::Pending))?;
     let (completed, failed, canceled) = fetch_terminal_buckets(db, limit)?;
@@ -213,7 +215,7 @@ fn render_status(db: &Db, limit: Option<usize>, show_art: bool) -> Result<()> {
             .as_deref()
             .map(format_elapsed_since)
             .unwrap_or_default();
-        println!("{}", format_task_line(task, &elapsed));
+        println!("{}", format_task_line(task, &elapsed, &cfg));
     }
 
     // Pending
@@ -224,7 +226,7 @@ fn render_status(db: &Db, limit: Option<usize>, show_art: bool) -> Result<()> {
     );
     for task in pending.iter().take(5) {
         let prio = format!("p{}", task.priority);
-        println!("{}", format_task_line(task, &prio));
+        println!("{}", format_task_line(task, &prio, &cfg));
     }
     if pending.len() > 5 {
         println!("   {}", format!("... +{} more", pending.len() - 5).dimmed());
@@ -247,7 +249,7 @@ fn render_status(db: &Db, limit: Option<usize>, show_art: bool) -> Result<()> {
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
         };
-        println!("{}", format_task_line(task, &dur));
+        println!("{}", format_task_line(task, &dur, &cfg));
     }
 
     for task in &failed {
@@ -255,7 +257,7 @@ fn render_status(db: &Db, limit: Option<usize>, show_art: bool) -> Result<()> {
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
         };
-        println!("{}", format_task_line(task, &dur));
+        println!("{}", format_task_line(task, &dur, &cfg));
     }
 
     for task in &canceled {
@@ -263,7 +265,7 @@ fn render_status(db: &Db, limit: Option<usize>, show_art: bool) -> Result<()> {
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
         };
-        println!("{}", format_task_line(task, &dur));
+        println!("{}", format_task_line(task, &dur, &cfg));
     }
 
     println!();
@@ -276,6 +278,7 @@ fn render_compact(
     limit: Option<usize>,
     show_art: bool,
 ) -> Result<()> {
+    let cfg = UserConfig::load();
     let running = db.list_tasks(Some(Status::Running))?;
     let pending = db.list_tasks(Some(Status::Pending))?;
     let (completed, failed, canceled) = fetch_terminal_buckets(db, limit)?;
@@ -313,7 +316,7 @@ fn render_compact(
             .as_deref()
             .map(format_elapsed_since)
             .unwrap_or_default();
-        let linear = compact_linear_label(&task.issue_identifier);
+        let linear = compact_linear_label(&task.issue_identifier, &cfg);
         println!(
             " {} {} {}{} {}",
             "●".green().bold(),
@@ -325,7 +328,7 @@ fn render_compact(
     }
 
     for task in pending.iter().take(3) {
-        let linear = compact_linear_label(&task.issue_identifier);
+        let linear = compact_linear_label(&task.issue_identifier, &cfg);
         println!(
             " {} {} {}{}",
             "○".yellow(),
@@ -349,7 +352,7 @@ fn render_compact(
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label(&task.issue_identifier);
+        let linear = compact_linear_label(&task.issue_identifier, &cfg);
         println!(
             " {} {} {}{} {}",
             "✓".dimmed(),
@@ -366,7 +369,7 @@ fn render_compact(
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label(&task.issue_identifier);
+        let linear = compact_linear_label(&task.issue_identifier, &cfg);
         println!(
             " {} {} {}{} {}",
             "✗".red(),
@@ -383,7 +386,7 @@ fn render_compact(
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label(&task.issue_identifier);
+        let linear = compact_linear_label(&task.issue_identifier, &cfg);
         println!(
             " {} {} {}{} {}",
             "⊘".dimmed(),
