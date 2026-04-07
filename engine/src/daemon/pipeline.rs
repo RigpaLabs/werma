@@ -61,7 +61,15 @@ pub fn process_completed_tasks(
                     task.id
                 ),
             );
-            let _ = db.set_linear_pushed(&task.id, true);
+            if let Err(e) = db.set_linear_pushed(&task.id, true) {
+                log_daemon(
+                    &log_path,
+                    &format!(
+                        "[CALLBACK] {}: ghost task set_linear_pushed failed: {e}",
+                        task.id
+                    ),
+                );
+            }
             continue;
         }
 
@@ -85,24 +93,28 @@ pub fn process_completed_tasks(
                         task.issue_identifier, task.id
                     ),
                 );
-                if let Err(e) = db.set_linear_pushed(&task.id, true) {
-                    log_daemon(
-                        &log_path,
-                        &format!(
-                            "[CALLBACK] {}: {} — age cap set_linear_pushed failed: {e}",
-                            task.issue_identifier, task.id
-                        ),
-                    );
+                match db.set_linear_pushed(&task.id, true) {
+                    Ok(()) => {
+                        notify_once(
+                            notifier,
+                            notified_tasks,
+                            notification_cooldown_secs,
+                            &task.id,
+                            &task.task_type,
+                            &task.issue_identifier,
+                            "age cap: abandoned (>24h old)",
+                        );
+                    }
+                    Err(e) => {
+                        log_daemon(
+                            &log_path,
+                            &format!(
+                                "[CALLBACK] {}: {} — age cap set_linear_pushed failed: {e}",
+                                task.issue_identifier, task.id
+                            ),
+                        );
+                    }
                 }
-                notify_once(
-                    notifier,
-                    notified_tasks,
-                    notification_cooldown_secs,
-                    &task.id,
-                    &task.task_type,
-                    &task.issue_identifier,
-                    "age cap: abandoned (>24h old)",
-                );
                 continue;
             }
         }
@@ -119,32 +131,36 @@ pub fn process_completed_tasks(
                     task.issue_identifier, task.id, existing_attempts
                 ),
             );
-            if let Err(e) = db.set_linear_pushed(&task.id, true) {
-                log_daemon(
-                    &log_path,
-                    &format!(
-                        "[CALLBACK] {}: {} — max-attempts set_linear_pushed failed: {e}",
-                        task.issue_identifier, task.id
-                    ),
-                );
+            match db.set_linear_pushed(&task.id, true) {
+                Ok(()) => {
+                    write_dead_letter(
+                        werma_dir,
+                        &task.id,
+                        &task.issue_identifier,
+                        &task.pipeline_stage,
+                        "max callback attempts reached",
+                        existing_attempts,
+                    );
+                    notify_once(
+                        notifier,
+                        notified_tasks,
+                        notification_cooldown_secs,
+                        &task.id,
+                        &task.task_type,
+                        &task.issue_identifier,
+                        "abandoned: max callback attempts",
+                    );
+                }
+                Err(e) => {
+                    log_daemon(
+                        &log_path,
+                        &format!(
+                            "[CALLBACK] {}: {} — max-attempts set_linear_pushed failed: {e}",
+                            task.issue_identifier, task.id
+                        ),
+                    );
+                }
             }
-            write_dead_letter(
-                werma_dir,
-                &task.id,
-                &task.issue_identifier,
-                &task.pipeline_stage,
-                "max callback attempts reached",
-                existing_attempts,
-            );
-            notify_once(
-                notifier,
-                notified_tasks,
-                notification_cooldown_secs,
-                &task.id,
-                &task.task_type,
-                &task.issue_identifier,
-                "abandoned: max callback attempts",
-            );
             continue;
         }
 
@@ -197,23 +213,27 @@ pub fn process_completed_tasks(
                                 task.issue_identifier, task.id, task.pipeline_stage
                             ),
                         );
-                        if let Err(e) = db.set_linear_pushed(&task.id, true) {
-                            log_daemon(
-                                &log_path,
-                                &format!(
-                                    "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
-                                    task.issue_identifier, task.id
-                                ),
-                            );
+                        match db.set_linear_pushed(&task.id, true) {
+                            Ok(()) => {
+                                write_dead_letter(
+                                    werma_dir,
+                                    &task.id,
+                                    &task.issue_identifier,
+                                    &task.pipeline_stage,
+                                    &err_msg,
+                                    attempts,
+                                );
+                            }
+                            Err(e) => {
+                                log_daemon(
+                                    &log_path,
+                                    &format!(
+                                        "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
+                                        task.issue_identifier, task.id
+                                    ),
+                                );
+                            }
                         }
-                        write_dead_letter(
-                            werma_dir,
-                            &task.id,
-                            &task.issue_identifier,
-                            &task.pipeline_stage,
-                            &err_msg,
-                            attempts,
-                        );
                         continue;
                     }
 
@@ -237,23 +257,27 @@ pub fn process_completed_tasks(
                                 task.issue_identifier, task.id, attempts
                             ),
                         );
-                        if let Err(e) = db.set_linear_pushed(&task.id, true) {
-                            log_daemon(
-                                &log_path,
-                                &format!(
-                                    "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
-                                    task.issue_identifier, task.id
-                                ),
-                            );
+                        match db.set_linear_pushed(&task.id, true) {
+                            Ok(()) => {
+                                write_dead_letter(
+                                    werma_dir,
+                                    &task.id,
+                                    &task.issue_identifier,
+                                    &task.pipeline_stage,
+                                    &err_msg,
+                                    attempts,
+                                );
+                            }
+                            Err(e) => {
+                                log_daemon(
+                                    &log_path,
+                                    &format!(
+                                        "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
+                                        task.issue_identifier, task.id
+                                    ),
+                                );
+                            }
                         }
-                        write_dead_letter(
-                            werma_dir,
-                            &task.id,
-                            &task.issue_identifier,
-                            &task.pipeline_stage,
-                            &err_msg,
-                            attempts,
-                        );
                     }
                 }
             }
@@ -294,32 +318,36 @@ pub fn process_completed_tasks(
                                 task.issue_identifier, task.id, attempts
                             ),
                         );
-                        if let Err(e) = db.set_linear_pushed(&task.id, true) {
-                            log_daemon(
-                                &log_path,
-                                &format!(
-                                    "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
-                                    task.issue_identifier, task.id
-                                ),
-                            );
+                        match db.set_linear_pushed(&task.id, true) {
+                            Ok(()) => {
+                                write_dead_letter(
+                                    werma_dir,
+                                    &task.id,
+                                    &task.issue_identifier,
+                                    "research",
+                                    &format!("{e:#}"),
+                                    attempts,
+                                );
+                                notify_once(
+                                    notifier,
+                                    notified_tasks,
+                                    notification_cooldown_secs,
+                                    &task.id,
+                                    &task.task_type,
+                                    &task.issue_identifier,
+                                    "abandoned: max callback attempts (research)",
+                                );
+                            }
+                            Err(e) => {
+                                log_daemon(
+                                    &log_path,
+                                    &format!(
+                                        "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
+                                        task.issue_identifier, task.id
+                                    ),
+                                );
+                            }
                         }
-                        write_dead_letter(
-                            werma_dir,
-                            &task.id,
-                            &task.issue_identifier,
-                            "research",
-                            &format!("{e:#}"),
-                            attempts,
-                        );
-                        notify_once(
-                            notifier,
-                            notified_tasks,
-                            notification_cooldown_secs,
-                            &task.id,
-                            &task.task_type,
-                            &task.issue_identifier,
-                            "abandoned: max callback attempts (research)",
-                        );
                     }
                 }
             }
@@ -360,32 +388,36 @@ pub fn process_completed_tasks(
                                 task.issue_identifier, task.id, attempts
                             ),
                         );
-                        if let Err(e) = db.set_linear_pushed(&task.id, true) {
-                            log_daemon(
-                                &log_path,
-                                &format!(
-                                    "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
-                                    task.issue_identifier, task.id
-                                ),
-                            );
+                        match db.set_linear_pushed(&task.id, true) {
+                            Ok(()) => {
+                                write_dead_letter(
+                                    werma_dir,
+                                    &task.id,
+                                    &task.issue_identifier,
+                                    "",
+                                    &format!("{e:#}"),
+                                    attempts,
+                                );
+                                notify_once(
+                                    notifier,
+                                    notified_tasks,
+                                    notification_cooldown_secs,
+                                    &task.id,
+                                    &task.task_type,
+                                    &task.issue_identifier,
+                                    "abandoned: max callback attempts",
+                                );
+                            }
+                            Err(e) => {
+                                log_daemon(
+                                    &log_path,
+                                    &format!(
+                                        "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
+                                        task.issue_identifier, task.id
+                                    ),
+                                );
+                            }
                         }
-                        write_dead_letter(
-                            werma_dir,
-                            &task.id,
-                            &task.issue_identifier,
-                            "",
-                            &format!("{e:#}"),
-                            attempts,
-                        );
-                        notify_once(
-                            notifier,
-                            notified_tasks,
-                            notification_cooldown_secs,
-                            &task.id,
-                            &task.task_type,
-                            &task.issue_identifier,
-                            "abandoned: max callback attempts",
-                        );
                     }
                 }
             }
