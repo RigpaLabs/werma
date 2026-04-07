@@ -494,14 +494,20 @@ pub fn render_compact_buf(
         } else {
             String::new()
         };
+        let cost_turns = if show_cost_turns {
+            crate::commands::display::format_cost_turns(task, &cfg)
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             buf,
-            " {} {} {}{} {}",
+            " {} {} {}{} {}{}",
             green_bold(spinner),
             compact_task_id(&task.id),
             blue(compact_task_type(&task.task_type)),
             linear,
             dimmed(&elapsed),
+            dimmed(&cost_turns),
         );
     }
 
