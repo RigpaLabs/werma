@@ -123,6 +123,27 @@ impl super::Db {
         )?)
     }
 
+    /// Count completed reviewer tasks created after the latest completed engineer task
+    /// for the given issue. Used to enforce per-cycle review limits (RIG-400): all-time
+    /// counts inflate after escalation+re-launch, causing the limit to hit immediately.
+    pub fn count_reviewer_tasks_since_latest_engineer(&self, issue_id: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM tasks
+             WHERE issue_identifier = ?1
+               AND pipeline_stage = 'reviewer'
+               AND status = 'completed'
+               AND created_at > COALESCE(
+                 (SELECT MAX(created_at) FROM tasks
+                  WHERE issue_identifier = ?1
+                    AND pipeline_stage = 'engineer'
+                    AND status = 'completed'),
+                 '1970-01-01'
+               )",
+            params![issue_id],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Get the most recent `finished_at` timestamp for any completed task
     /// on the given Linear issue, excluding the current stage.
     /// Used to filter Linear comments to only those posted after the previous stage completed.
@@ -910,6 +931,107 @@ mod tests {
             db.count_completed_tasks_for_issue_stage("issue-999", "reviewer")
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn count_reviewer_tasks_since_latest_engineer_resets_per_cycle() {
+        // Simulates: review-cycle hit limit → escalated → re-launched.
+        // Old all-time count would immediately hit max_rounds=3 on re-launch.
+        // New per-cycle count must only see reviews after the latest engineer task.
+        let db = Db::open_in_memory().unwrap();
+
+        // Cycle 1: reviewer(T1) → engineer(T2) → reviewer(T3) → engineer(T4, latest)
+        let mut rev1 = make_test_task("rig400-rev1");
+        rev1.issue_identifier = "RIG-400".to_string();
+        rev1.pipeline_stage = "reviewer".to_string();
+        rev1.created_at = "2026-01-01T01:00:00Z".to_string();
+        db.insert_task(&rev1).unwrap();
+        db.set_task_status("rig400-rev1", Status::Completed)
+            .unwrap();
+
+        let mut eng1 = make_test_task("rig400-eng1");
+        eng1.issue_identifier = "RIG-400".to_string();
+        eng1.pipeline_stage = "engineer".to_string();
+        eng1.created_at = "2026-01-01T02:00:00Z".to_string();
+        db.insert_task(&eng1).unwrap();
+        db.set_task_status("rig400-eng1", Status::Completed)
+            .unwrap();
+
+        let mut rev2 = make_test_task("rig400-rev2");
+        rev2.issue_identifier = "RIG-400".to_string();
+        rev2.pipeline_stage = "reviewer".to_string();
+        rev2.created_at = "2026-01-01T03:00:00Z".to_string();
+        db.insert_task(&rev2).unwrap();
+        db.set_task_status("rig400-rev2", Status::Completed)
+            .unwrap();
+
+        // Latest engineer task (re-launch after escalation)
+        let mut eng2 = make_test_task("rig400-eng2");
+        eng2.issue_identifier = "RIG-400".to_string();
+        eng2.pipeline_stage = "engineer".to_string();
+        eng2.created_at = "2026-01-01T04:00:00Z".to_string();
+        db.insert_task(&eng2).unwrap();
+        db.set_task_status("rig400-eng2", Status::Completed)
+            .unwrap();
+
+        // Before any new reviewer tasks: count should be 0 (fresh cycle)
+        assert_eq!(
+            db.count_reviewer_tasks_since_latest_engineer("RIG-400")
+                .unwrap(),
+            0,
+            "no reviewer tasks after latest engineer → fresh cycle"
+        );
+
+        // Add a reviewer task in the new cycle
+        let mut rev3 = make_test_task("rig400-rev3");
+        rev3.issue_identifier = "RIG-400".to_string();
+        rev3.pipeline_stage = "reviewer".to_string();
+        rev3.created_at = "2026-01-01T05:00:00Z".to_string();
+        db.insert_task(&rev3).unwrap();
+        db.set_task_status("rig400-rev3", Status::Completed)
+            .unwrap();
+
+        assert_eq!(
+            db.count_reviewer_tasks_since_latest_engineer("RIG-400")
+                .unwrap(),
+            1,
+            "only the new-cycle reviewer counts, not historical ones"
+        );
+
+        // All-time count would return 3 — proving the bug was real
+        assert_eq!(
+            db.count_completed_tasks_for_issue_stage("RIG-400", "reviewer")
+                .unwrap(),
+            3,
+            "all-time count still sees all 3 reviewers"
+        );
+    }
+
+    #[test]
+    fn count_reviewer_tasks_since_latest_engineer_no_engineer() {
+        // When no engineer task exists yet, fall back to all reviewer tasks
+        let db = Db::open_in_memory().unwrap();
+
+        let mut rev1 = make_test_task("rig400b-rev1");
+        rev1.issue_identifier = "RIG-401".to_string();
+        rev1.pipeline_stage = "reviewer".to_string();
+        db.insert_task(&rev1).unwrap();
+        db.set_task_status("rig400b-rev1", Status::Completed)
+            .unwrap();
+
+        assert_eq!(
+            db.count_reviewer_tasks_since_latest_engineer("RIG-401")
+                .unwrap(),
+            1,
+            "with no engineer task, all reviewers are counted (safe default)"
+        );
+
+        assert_eq!(
+            db.count_reviewer_tasks_since_latest_engineer("RIG-999")
+                .unwrap(),
+            0,
+            "unknown issue returns 0"
         );
     }
 
