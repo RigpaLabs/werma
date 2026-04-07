@@ -247,10 +247,12 @@ impl super::Db {
         Ok(out)
     }
 
-    /// Returns true if all blocking effects for a task are done (no pending/failed/running/dead).
+    /// Returns true if all blocking effects for a task are resolved (done or dead).
     ///
-    /// A `dead` blocking effect (permanently failed, e.g. MoveIssue after max retries) keeps
-    /// this returning false — a task with a permanently failed move should NOT be marked pushed.
+    /// Both `done` and `dead` are treated as terminal states — a `dead` blocking effect
+    /// (permanently failed after max retries) is resolved: the effect won't be retried,
+    /// so the task should not be held back indefinitely. Without this, a dead effect would
+    /// leave `linear_pushed=0` forever, causing the daemon to re-process the task every tick.
     ///
     /// A task with no blocking effects at all is considered "done" (returns true).
     pub fn blocking_effects_done(&self, task_id: &str) -> Result<bool> {
@@ -258,7 +260,7 @@ impl super::Db {
             "SELECT COUNT(*) FROM effects
              WHERE task_id = ?1
                AND blocking = 1
-               AND status NOT IN ('done')",
+               AND status NOT IN ('done', 'dead')",
             params![task_id],
             |row| row.get(0),
         )?;
@@ -413,10 +415,10 @@ mod tests {
     }
 
     #[test]
-    fn blocking_effects_dead_blocks_pushed() {
-        // A dead blocking effect (permanently failed, e.g. MoveIssue after max retries)
-        // must keep blocking_effects_done() returning false. A task with a permanently
-        // failed MoveIssue should NOT be marked linear_pushed — it needs human attention.
+    fn dead_blocking_effects_count_as_terminal() {
+        // A dead blocking effect (permanently failed after max retries) is a terminal state.
+        // blocking_effects_done() must return true so the task can be marked linear_pushed.
+        // Without this, dead effects leave linear_pushed=0 forever → daemon spam every tick.
         let db = setup_db_with_task("t6d");
 
         let mut e = make_effect("t6d", "t6d:move", EffectType::MoveIssue);
@@ -438,10 +440,24 @@ mod tests {
             .unwrap();
         assert_eq!(status, "dead");
 
-        // blocking_effects_done must return false — dead != done
+        // blocking_effects_done must return true — dead is terminal, same as done
         assert!(
-            !db.blocking_effects_done("t6d").unwrap(),
-            "dead blocking effect should keep blocking_effects_done() returning false"
+            db.blocking_effects_done("t6d").unwrap(),
+            "dead blocking effect should count as resolved in blocking_effects_done()"
+        );
+    }
+
+    #[test]
+    fn blocking_effects_done_false_when_pending() {
+        // Sanity check: a pending blocking effect keeps blocking_effects_done() returning false.
+        let db = setup_db_with_task("t6e");
+
+        let e = make_effect("t6e", "t6e:move", EffectType::MoveIssue);
+        db.insert_effects(&[e]).unwrap();
+
+        assert!(
+            !db.blocking_effects_done("t6e").unwrap(),
+            "pending blocking effect should keep blocking_effects_done() returning false"
         );
     }
 
