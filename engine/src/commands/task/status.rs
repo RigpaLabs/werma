@@ -117,10 +117,16 @@ pub fn cmd_status(
         let mut failed: Vec<Task> = vec![];
         let mut canceled: Vec<Task> = vec![];
         let mut terminal_counts: Option<(usize, usize, usize)> = None;
-        // Track current term width for resize handling
-        let mut current_term_width = term_width;
+        // Declared without an initial value; assigned at the top of every loop tick.
+        let mut current_term_width: usize;
 
         loop {
+            // Re-read terminal size on every tick so resizes are reflected within 100ms
+            // (no SIGWINCH handler needed — polling at render frequency is sufficient).
+            current_term_width = terminal_size::terminal_size()
+                .map(|(w, _)| w.0 as usize)
+                .unwrap_or(80);
+
             if tick_count >= ticks_per_refresh {
                 running = db.list_tasks(Some(Status::Running))?;
                 pending = db.list_tasks(Some(Status::Pending))?;
@@ -130,12 +136,12 @@ pub fn cmd_status(
                 } else {
                     Some(db.terminal_task_counts()?)
                 };
-                // Re-read terminal size on each DB refresh to handle resizes
-                current_term_width = terminal_size::terminal_size()
-                    .map(|(w, _)| w.0 as usize)
-                    .unwrap_or(80);
                 tick_count = 0;
             }
+
+            // Recalculate compact mode on every render so a terminal resize switches
+            // modes immediately (within one tick) rather than at the next DB refresh.
+            let current_use_compact = compact || current_term_width < 60;
 
             let buckets = ui::StatusBuckets {
                 running: &running,
@@ -145,7 +151,7 @@ pub fn cmd_status(
                 canceled: &canceled,
                 terminal_counts,
             };
-            let content = if use_compact {
+            let content = if current_use_compact {
                 ui::render_compact_buf(
                     &buckets,
                     Some(interval),
@@ -163,7 +169,7 @@ pub fn cmd_status(
                 )
             };
 
-            ui::refresh_screen(&content, prev_lines);
+            ui::refresh_screen(&content, prev_lines, current_term_width);
             prev_lines = content.lines().count();
 
             std::thread::sleep(std::time::Duration::from_millis(RENDER_TICK_MS));

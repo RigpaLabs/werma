@@ -171,16 +171,86 @@ fn status_icon_cell(status: Status) -> Cell {
 
 // ─── Watch mode (flicker-free) ────────────────────────────────────────────────
 
+/// Count visible (non-ANSI) characters in a string.
+///
+/// ANSI escape sequences (`\x1b[...m`, `\x1b[...{letter}`) are skipped so that
+/// only the characters that occupy terminal columns are counted.
+fn ansi_visual_len(s: &str) -> usize {
+    let mut len = 0;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            // Consume until the terminating ASCII letter (e.g. 'm', 'K', 'J', 'H')
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            len += 1;
+        }
+    }
+    len
+}
+
+/// Truncate a string that may contain ANSI escape codes to `max_width` visible columns.
+///
+/// If the visible length exceeds `max_width`, the output is clipped to
+/// `max_width - 1` visible chars followed by `…`, then a color-reset sequence
+/// (`\x1b[0m`) to prevent color bleed into adjacent lines.
+pub fn ansi_truncate(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if ansi_visual_len(s) <= max_width {
+        return s.to_string();
+    }
+    // Reserve one column for the ellipsis character.
+    let target = max_width.saturating_sub(1);
+    let mut visible = 0usize;
+    let mut result = String::with_capacity(s.len());
+    let mut in_escape = false;
+
+    for ch in s.chars() {
+        if ch == '\x1b' {
+            in_escape = true;
+            result.push(ch);
+        } else if in_escape {
+            result.push(ch);
+            if ch.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+        } else if visible < target {
+            result.push(ch);
+            visible += 1;
+        } else {
+            // Reached the visible limit — append ellipsis and stop.
+            break;
+        }
+    }
+    result.push('…');
+    result.push_str("\x1b[0m");
+    result
+}
+
 /// Write content to stdout with flicker-free refresh.
-/// Uses cursor home + line-by-line overwrite + clear remaining lines.
-pub fn refresh_screen(content: &str, prev_lines: usize) {
+///
+/// Each line is truncated to `term_width` visible columns before writing so that
+/// long lines never wrap in the terminal — wrapping breaks the cursor-home
+/// refresh strategy and makes the layout explode on narrow panels.
+pub fn refresh_screen(content: &str, prev_lines: usize, term_width: usize) {
     let mut stdout = std::io::stdout();
     // Move cursor to home position (top-left)
     let _ = write!(stdout, "\x1b[H");
-    // Write content
+    // Write content, truncating each line to the terminal width
     for line in content.lines() {
+        let safe = if term_width > 0 {
+            ansi_truncate(line, term_width)
+        } else {
+            line.to_string()
+        };
         // Write line + clear to end of line + newline
-        let _ = writeln!(stdout, "{line}\x1b[K");
+        let _ = writeln!(stdout, "{safe}\x1b[K");
     }
     // Clear any remaining lines from previous render
     let current_lines = content.lines().count();
@@ -394,6 +464,12 @@ pub fn render_compact_buf(
         }
     }
 
+    // Width-aware field visibility:
+    //   < 40 cols → hide identifier (too narrow for [honeyjourney#20] etc.)
+    //   < 60 cols → hide model/turns metadata
+    let show_identifier = term_width >= 40;
+    let show_cost_turns = term_width >= 60;
+
     let sep = "───────────────────────────────────";
     let spinner = braille_frame();
 
@@ -413,7 +489,11 @@ pub fn render_compact_buf(
             .as_deref()
             .map(crate::format_elapsed_since)
             .unwrap_or_default();
-        let linear = compact_linear_label_colored(&task.issue_identifier, tracker);
+        let linear = if show_identifier {
+            compact_linear_label_colored(&task.issue_identifier, tracker)
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             buf,
             " {} {} {}{} {}",
@@ -426,7 +506,11 @@ pub fn render_compact_buf(
     }
 
     for task in pending.iter().take(3) {
-        let linear = compact_linear_label_colored(&task.issue_identifier, tracker);
+        let linear = if show_identifier {
+            compact_linear_label_colored(&task.issue_identifier, tracker)
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             buf,
             " {} {} {}{}",
@@ -455,8 +539,16 @@ pub fn render_compact_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label_dimmed(&task.issue_identifier, tracker);
-        let cost_turns = crate::commands::display::format_cost_turns(task, &cfg);
+        let linear = if show_identifier {
+            compact_linear_label_dimmed(&task.issue_identifier, tracker)
+        } else {
+            String::new()
+        };
+        let cost_turns = if show_cost_turns {
+            crate::commands::display::format_cost_turns(task, &cfg)
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             buf,
             " {} {} {}{} {}{}",
@@ -474,8 +566,16 @@ pub fn render_compact_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label_dimmed(&task.issue_identifier, tracker);
-        let cost_turns = crate::commands::display::format_cost_turns(task, &cfg);
+        let linear = if show_identifier {
+            compact_linear_label_dimmed(&task.issue_identifier, tracker)
+        } else {
+            String::new()
+        };
+        let cost_turns = if show_cost_turns {
+            crate::commands::display::format_cost_turns(task, &cfg)
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             buf,
             " {} {} {}{} {}{}",
@@ -493,8 +593,16 @@ pub fn render_compact_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label_dimmed(&task.issue_identifier, tracker);
-        let cost_turns = crate::commands::display::format_cost_turns(task, &cfg);
+        let linear = if show_identifier {
+            compact_linear_label_dimmed(&task.issue_identifier, tracker)
+        } else {
+            String::new()
+        };
+        let cost_turns = if show_cost_turns {
+            crate::commands::display::format_cost_turns(task, &cfg)
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             buf,
             " {} {} {}{} {}{}",
@@ -572,6 +680,50 @@ fn compact_linear_label_dimmed(issue_identifier: &str, tracker: &TrackerConfig) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ansi_visual_len_plain() {
+        assert_eq!(ansi_visual_len("hello"), 5);
+    }
+
+    #[test]
+    fn ansi_visual_len_with_ansi() {
+        // "\x1b[1;32mfoo\x1b[0m" → 3 visible chars
+        assert_eq!(ansi_visual_len("\x1b[1;32mfoo\x1b[0m"), 3);
+    }
+
+    #[test]
+    fn ansi_visual_len_empty() {
+        assert_eq!(ansi_visual_len(""), 0);
+    }
+
+    #[test]
+    fn ansi_truncate_no_truncation_needed() {
+        let s = "hello";
+        assert_eq!(ansi_truncate(s, 10), s);
+    }
+
+    #[test]
+    fn ansi_truncate_plain_string() {
+        let result = ansi_truncate("abcdefghij", 5);
+        // 4 visible chars + '…' + reset
+        assert!(result.starts_with("abcd…"));
+        assert!(result.contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn ansi_truncate_with_ansi_codes() {
+        // colored "hello world" = 11 visible chars, truncate to 6 → "hello…" (5+1)
+        let colored = format!("\x1b[32mhello world\x1b[0m");
+        let result = ansi_truncate(&colored, 6);
+        assert_eq!(ansi_visual_len(&result), 6); // 5 chars + '…'
+        assert!(result.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn ansi_truncate_zero_width() {
+        assert_eq!(ansi_truncate("anything", 0), "");
+    }
 
     #[test]
     fn braille_frame_returns_valid() {
