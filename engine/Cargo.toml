@@ -1,6 +1,6 @@
 [package]
 name = "werma"
-version = "0.71.0"
+version = "0.72.0"
 edition = "2024"
 rust-version = "1.88"
 description = "CLI for orchestrating AI coding agents in tmux"
