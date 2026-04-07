@@ -413,6 +413,9 @@ fn render_compact(
 }
 
 fn render_plain(db: &Db, limit: Option<usize>) -> Result<()> {
+    let cfg = crate::config::UserConfig::load();
+    let tracker = &cfg.tracker;
+
     // Emit running + pending first, then terminal tasks (combined, limited).
     let live_statuses = [Status::Running, Status::Pending];
     for status in live_statuses {
@@ -426,11 +429,10 @@ fn render_plain(db: &Db, limit: Option<usize>) -> Result<()> {
                 (Some(s), None, Status::Running) => format_elapsed_since(s),
                 _ => String::new(),
             };
-            let cfg = crate::config::UserConfig::load();
             let linear = if task.issue_identifier.is_empty() {
                 "-".to_string()
             } else {
-                cfg.tracker.display_identifier(&task.issue_identifier)
+                tracker.display_identifier(&task.issue_identifier)
             };
             let description = task.prompt.lines().next().unwrap_or(&task.prompt);
             println!(
@@ -447,11 +449,10 @@ fn render_plain(db: &Db, limit: Option<usize>) -> Result<()> {
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
         };
-        let cfg = crate::config::UserConfig::load();
         let linear = if task.issue_identifier.is_empty() {
             "-".to_string()
         } else {
-            cfg.tracker.display_identifier(&task.issue_identifier)
+            tracker.display_identifier(&task.issue_identifier)
         };
         let description = task.prompt.lines().next().unwrap_or(&task.prompt);
         println!(

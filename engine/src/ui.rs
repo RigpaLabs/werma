@@ -3,6 +3,7 @@ use std::io::Write;
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table};
 use indicatif::{ProgressBar, ProgressStyle};
 
+use crate::config::TrackerConfig;
 use crate::dashboard::truncate_line;
 use crate::models::{Status, Task};
 
@@ -102,6 +103,9 @@ pub fn task_list_table(tasks: &[Task], term_width: u16) -> Table {
         .set_width(term_width)
         .load_preset(comfy_table::presets::NOTHING);
 
+    let cfg = crate::config::UserConfig::load();
+    let tracker = &cfg.tracker;
+
     for task in tasks {
         let icon = status_icon_cell(task.status);
         let id = Cell::new(&task.id);
@@ -112,7 +116,8 @@ pub fn task_list_table(tasks: &[Task], term_width: u16) -> Table {
         let linear = if task.issue_identifier.is_empty() {
             Cell::new("")
         } else {
-            Cell::new(&task.issue_identifier).fg(Color::Cyan)
+            let display_id = tracker.display_identifier(&task.issue_identifier);
+            Cell::new(display_id).fg(Color::Cyan)
         };
 
         let max_prompt = (term_width as usize).saturating_sub(55);
@@ -202,13 +207,18 @@ pub fn show_cursor() {
 }
 
 /// Format a task line into a buffer (reusable by both status and compact renderers).
-pub fn write_task_line(buf: &mut String, task: &Task, time_str: &str, max_prompt: usize) {
+pub fn write_task_line(
+    buf: &mut String,
+    task: &Task,
+    time_str: &str,
+    max_prompt: usize,
+    tracker: &TrackerConfig,
+) {
     use std::fmt::Write;
     let linear = if task.issue_identifier.is_empty() {
         String::new()
     } else {
-        let cfg = crate::config::UserConfig::load();
-        let display_id = cfg.tracker.display_identifier(&task.issue_identifier);
+        let display_id = tracker.display_identifier(&task.issue_identifier);
         format!("  [{}]", cyan(&display_id))
     };
     let cost_turns = crate::commands::display::format_cost_turns(task);
@@ -259,6 +269,8 @@ pub fn render_status_buf(
         ..
     } = buckets;
     let mut buf = String::new();
+    let cfg = crate::config::UserConfig::load();
+    let tracker = &cfg.tracker;
 
     // Pixel art mascot header (opt-in via --art flag)
     if show_art {
@@ -284,7 +296,7 @@ pub fn render_status_buf(
             .as_deref()
             .map(crate::format_elapsed_since)
             .unwrap_or_default();
-        write_task_line(&mut buf, task, &elapsed, 45);
+        write_task_line(&mut buf, task, &elapsed, 45, tracker);
     }
 
     // Pending
@@ -296,7 +308,7 @@ pub fn render_status_buf(
     );
     for task in pending.iter().take(5) {
         let prio = format!("p{}", task.priority);
-        write_task_line(&mut buf, task, &prio, 45);
+        write_task_line(&mut buf, task, &prio, 45, tracker);
     }
     if pending.len() > 5 {
         let _ = writeln!(
@@ -325,7 +337,7 @@ pub fn render_status_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        write_task_line(&mut buf, task, &dur, 45);
+        write_task_line(&mut buf, task, &dur, 45, tracker);
     }
 
     for task in *failed {
@@ -333,7 +345,7 @@ pub fn render_status_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        write_task_line(&mut buf, task, &dur, 45);
+        write_task_line(&mut buf, task, &dur, 45, tracker);
     }
 
     for task in *canceled {
@@ -341,7 +353,7 @@ pub fn render_status_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        write_task_line(&mut buf, task, &dur, 45);
+        write_task_line(&mut buf, task, &dur, 45, tracker);
     }
 
     if let Some(secs) = interval {
@@ -372,6 +384,8 @@ pub fn render_compact_buf(
         ..
     } = buckets;
     let mut buf = String::new();
+    let cfg = crate::config::UserConfig::load();
+    let tracker = &cfg.tracker;
 
     // Pixel art mascot header (opt-in via --art flag)
     if show_art {
@@ -400,7 +414,7 @@ pub fn render_compact_buf(
             .as_deref()
             .map(crate::format_elapsed_since)
             .unwrap_or_default();
-        let linear = compact_linear_label_colored(&task.issue_identifier);
+        let linear = compact_linear_label_colored(&task.issue_identifier, tracker);
         let _ = writeln!(
             buf,
             " {} {} {}{} {}",
@@ -413,7 +427,7 @@ pub fn render_compact_buf(
     }
 
     for task in pending.iter().take(3) {
-        let linear = compact_linear_label_colored(&task.issue_identifier);
+        let linear = compact_linear_label_colored(&task.issue_identifier, tracker);
         let _ = writeln!(
             buf,
             " {} {} {}{}",
@@ -442,7 +456,7 @@ pub fn render_compact_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label_dimmed(&task.issue_identifier);
+        let linear = compact_linear_label_dimmed(&task.issue_identifier, tracker);
         let cost_turns = crate::commands::display::format_cost_turns(task);
         let _ = writeln!(
             buf,
@@ -461,7 +475,7 @@ pub fn render_compact_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label_dimmed(&task.issue_identifier);
+        let linear = compact_linear_label_dimmed(&task.issue_identifier, tracker);
         let cost_turns = crate::commands::display::format_cost_turns(task);
         let _ = writeln!(
             buf,
@@ -480,7 +494,7 @@ pub fn render_compact_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label_dimmed(&task.issue_identifier);
+        let linear = compact_linear_label_dimmed(&task.issue_identifier, tracker);
         let cost_turns = crate::commands::display::format_cost_turns(task);
         let _ = writeln!(
             buf,
@@ -529,32 +543,29 @@ fn compact_task_id(id: &str) -> &str {
 }
 
 #[allow(dead_code)]
-fn compact_linear_label(issue_identifier: &str) -> String {
+fn compact_linear_label(issue_identifier: &str, tracker: &TrackerConfig) -> String {
     if issue_identifier.is_empty() {
         String::new()
     } else {
-        let cfg = crate::config::UserConfig::load();
-        let display_id = cfg.tracker.display_identifier(issue_identifier);
+        let display_id = tracker.display_identifier(issue_identifier);
         format!(" [{display_id}]")
     }
 }
 
-fn compact_linear_label_colored(issue_identifier: &str) -> String {
+fn compact_linear_label_colored(issue_identifier: &str, tracker: &TrackerConfig) -> String {
     if issue_identifier.is_empty() {
         String::new()
     } else {
-        let cfg = crate::config::UserConfig::load();
-        let display_id = cfg.tracker.display_identifier(issue_identifier);
+        let display_id = tracker.display_identifier(issue_identifier);
         format!(" {}", cyan(&format!("[{display_id}]")))
     }
 }
 
-fn compact_linear_label_dimmed(issue_identifier: &str) -> String {
+fn compact_linear_label_dimmed(issue_identifier: &str, tracker: &TrackerConfig) -> String {
     if issue_identifier.is_empty() {
         String::new()
     } else {
-        let cfg = crate::config::UserConfig::load();
-        let display_id = cfg.tracker.display_identifier(issue_identifier);
+        let display_id = tracker.display_identifier(issue_identifier);
         format!(" {}", dimmed(&format!("[{display_id}]")))
     }
 }
@@ -571,11 +582,12 @@ mod tests {
 
     #[test]
     fn compact_helpers() {
+        let tracker = TrackerConfig::default();
         assert_eq!(compact_task_id("20260312-035"), "035");
         assert_eq!(compact_task_type("pipeline-engineer"), "engineer");
         assert_eq!(compact_task_type("research"), "research");
-        assert_eq!(compact_linear_label(""), "");
-        assert_eq!(compact_linear_label("RIG-179"), " [RIG-179]");
+        assert_eq!(compact_linear_label("", &tracker), "");
+        assert_eq!(compact_linear_label("RIG-179", &tracker), " [RIG-179]");
     }
 
     #[test]
