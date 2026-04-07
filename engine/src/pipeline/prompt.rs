@@ -135,24 +135,33 @@ fn compute_derived_vars(vars: &mut HashMap<String, String>) {
         .or_insert(reviewer_skill);
 
     // RIG-401: skill_section — runtime × language → skill invocation or inline guidance.
+    // Only invoke skills for languages with a known installed Claude Code skill.
+    // Others get inline guidance to read CLAUDE.md instead.
+    const KNOWN_SKILLS: &[&str] = &["rust"];
     let language = vars.get("language").cloned().unwrap_or_default();
-    let skill_section = match (is_claude, is_codex, language.is_empty()) {
-        (true, _, false) => format!(
+    let has_skill = KNOWN_SKILLS.contains(&language.as_str());
+    let skill_section = match (is_claude, is_codex, language.is_empty(), has_skill) {
+        (true, _, false, true) => format!(
             "### FIRST: Invoke the {language} skill\n\
              Before writing any code, invoke the `/{language}` skill using the Skill tool \
              (skill: \"{language}\"). This loads {language}-specific patterns, testing workflow, \
              and quality standards that you MUST follow throughout implementation."
         ),
-        (_, true, false) => format!(
+        (true, _, false, false) => format!(
+            "### Project Language: {language}\n\
+             Read the project's CLAUDE.md for {language} conventions, testing commands, \
+             and quality standards that you MUST follow throughout implementation."
+        ),
+        (_, true, false, _) => format!(
             "### Project Language: {language}\n\
              Read the project's CLAUDE.md and AGENTS.md for {language} conventions, \
              testing commands, and quality standards."
         ),
-        (_, _, false) => format!(
+        (_, _, false, _) => format!(
             "### Project Language: {language}\n\
              Read the project's CLAUDE.md for {language} conventions and quality standards."
         ),
-        (_, _, true) => "### Project Conventions\n\
+        (_, _, true, _) => "### Project Conventions\n\
              Read the project's CLAUDE.md for language conventions, testing commands, \
              and quality standards."
             .to_string(),
@@ -538,19 +547,24 @@ mod tests {
     }
 
     #[test]
-    fn skill_section_claude_python_invokes_python_skill() {
+    fn skill_section_claude_python_no_skill_invocation() {
+        // Python has no known Claude Code skill → inline CLAUDE.md guidance, not /python.
         let mut templates = IndexMap::new();
         templates.insert("language".to_string(), "python".to_string());
         let runtime = vars(&[("agent_runtime", "claude-code")]);
         let result = build_vars(&templates, &runtime);
         let section = &result["skill_section"];
         assert!(
-            section.contains("/python"),
-            "claude-code + python should invoke /python skill, got:\n{section}"
+            !section.contains("/python"),
+            "claude-code + python should NOT invoke /python (no such skill), got:\n{section}"
         );
         assert!(
-            !section.contains("/rust"),
-            "claude-code + python should NOT mention /rust, got:\n{section}"
+            section.contains("CLAUDE.md"),
+            "claude-code + python should reference CLAUDE.md, got:\n{section}"
+        );
+        assert!(
+            section.contains("python"),
+            "should still mention python as the language, got:\n{section}"
         );
     }
 
@@ -624,6 +638,28 @@ mod tests {
         assert!(
             section.contains("/rust"),
             "absent agent_runtime should default to claude-code behavior, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn skill_section_claude_unknown_language_no_skill() {
+        // Unknown language (e.g. "go") with no known skill → CLAUDE.md guidance, not /go.
+        let mut templates = IndexMap::new();
+        templates.insert("language".to_string(), "go".to_string());
+        let runtime = vars(&[("agent_runtime", "claude-code")]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["skill_section"];
+        assert!(
+            !section.contains("/go"),
+            "claude-code + go (no known skill) should NOT invoke /go, got:\n{section}"
+        );
+        assert!(
+            section.contains("CLAUDE.md"),
+            "should fall back to CLAUDE.md guidance, got:\n{section}"
+        );
+        assert!(
+            !section.contains("Skill tool"),
+            "should NOT reference Skill tool for unknown language, got:\n{section}"
         );
     }
 
@@ -795,6 +831,33 @@ mod tests {
         assert!(
             rendered.contains("python") || rendered.contains("Python"),
             "honeyjourney pipeline should reference python, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn rendered_honeyjourney_default_runtime_no_python_skill() {
+        // Stages without explicit runtime default to claude-code.
+        // language=python + claude-code should NOT produce /python (no such skill).
+        use crate::pipeline::loader::load_from_str;
+        let config =
+            load_from_str(include_str!("../../pipelines/honeyjourney.yaml"), "<test>").unwrap();
+        let stage_cfg = config.stage("engineer").unwrap();
+        let prompt_source =
+            crate::pipeline::loader::resolve_prompt(stage_cfg.prompt.as_ref().unwrap());
+        // Simulate default runtime (no explicit agent_runtime → defaults to claude-code)
+        let mut runtime = HashMap::new();
+        runtime.insert("issue_id".to_string(), "honeyjourney#20".to_string());
+        runtime.insert("issue_title".to_string(), "Test".to_string());
+        runtime.insert("issue_description".to_string(), "Desc".to_string());
+        let vars = build_vars(&config.templates, &runtime);
+        let rendered = render_prompt(&prompt_source, &vars);
+        assert!(
+            !rendered.contains("/python"),
+            "honeyjourney with default runtime (claude-code) should NOT invoke /python skill, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("CLAUDE.md"),
+            "should reference CLAUDE.md instead, got:\n{rendered}"
         );
     }
 }
