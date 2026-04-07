@@ -238,7 +238,12 @@ pub fn ansi_truncate(s: &str, max_width: usize) -> String {
 /// Each line is truncated to `term_width` visible columns before writing so that
 /// long lines never wrap in the terminal — wrapping breaks the cursor-home
 /// refresh strategy and makes the layout explode on narrow panels.
-pub fn refresh_screen(content: &str, prev_lines: usize, term_width: usize) {
+///
+/// After writing all content lines, `\x1b[J` (erase from cursor to bottom) clears
+/// any residual lines from previous renders. This is more robust than the old
+/// prev_lines counting approach, which could not account for wrapped lines
+/// introduced by a terminal resize.
+pub fn refresh_screen(content: &str, _prev_lines: usize, term_width: usize) {
     let mut stdout = std::io::stdout();
     // Move cursor to home position (top-left)
     let _ = write!(stdout, "\x1b[H");
@@ -252,13 +257,10 @@ pub fn refresh_screen(content: &str, prev_lines: usize, term_width: usize) {
         // Write line + clear to end of line + newline
         let _ = writeln!(stdout, "{safe}\x1b[K");
     }
-    // Clear any remaining lines from previous render
-    let current_lines = content.lines().count();
-    if current_lines < prev_lines {
-        for _ in 0..(prev_lines - current_lines) {
-            let _ = writeln!(stdout, "\x1b[K");
-        }
-    }
+    // Erase from cursor to end of screen.
+    // Clears residual lines from any previous render that was taller than the
+    // current one, including phantom lines left by terminal resize reflow.
+    let _ = write!(stdout, "\x1b[J");
     let _ = stdout.flush();
 }
 
