@@ -122,7 +122,7 @@ pub struct Task {
     pub max_turns: i32,
     pub allowed_tools: String,
     pub session_id: String,
-    pub linear_issue_id: String,
+    pub issue_identifier: String,
     pub linear_pushed: bool,
     pub pipeline_stage: String,
     pub depends_on: Vec<String>,

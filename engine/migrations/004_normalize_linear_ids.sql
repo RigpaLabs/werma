@@ -1,4 +1,4 @@
--- 004: Normalize linear_issue_id from UUIDs to identifiers (RIG-XX).
+-- 004: Normalize issue_identifier from UUIDs to identifiers (RIG-XX).
 -- Old pipeline tasks stored Linear UUIDs; new code uses identifiers.
 -- Clear UUIDs from completed/failed tasks to prevent dedup false negatives.
 -- Active tasks (pending/running) with UUIDs are also cleared since they'll
@@ -12,7 +12,7 @@
 -- Previously only [A-Z]*-[0-9]* was preserved (Linear TEAM-N).
 -- Now also preserves *#[0-9]* (e.g. honeyjourney#20).
 UPDATE tasks
-SET linear_issue_id = ''
-WHERE linear_issue_id <> ''
-  AND linear_issue_id NOT GLOB '[A-Z]*-[0-9]*'
-  AND linear_issue_id NOT GLOB '*#[0-9]*';
+SET issue_identifier = ''
+WHERE issue_identifier <> ''
+  AND issue_identifier NOT GLOB '[A-Z]*-[0-9]*'
+  AND issue_identifier NOT GLOB '*#[0-9]*';

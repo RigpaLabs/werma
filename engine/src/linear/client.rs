@@ -449,7 +449,7 @@ impl LinearClient {
                 max_turns,
                 allowed_tools,
                 session_id: String::new(),
-                linear_issue_id: identifier.to_string(),
+                issue_identifier: identifier.to_string(),
                 linear_pushed: false,
                 pipeline_stage: String::new(),
                 depends_on: vec![],
@@ -487,8 +487,8 @@ impl LinearClient {
             .task(task_id)?
             .context(format!("task not found: {task_id}"))?;
 
-        if task.linear_issue_id.is_empty() {
-            bail!("task {task_id} has no linear_issue_id");
+        if task.issue_identifier.is_empty() {
+            bail!("task {task_id} has no issue_identifier");
         }
 
         // Read output file if exists (first 100 lines)
@@ -514,24 +514,24 @@ impl LinearClient {
             ));
         }
 
-        self.comment(&task.linear_issue_id, &comment)?;
+        self.comment(&task.issue_identifier, &comment)?;
 
         // If completed, move to Done (uses move_issue_by_name which resolves
         // the correct team's status ID from the issue's team context).
         if task.status == Status::Completed {
-            self.move_issue_by_name(&task.linear_issue_id, "done")?;
+            self.move_issue_by_name(&task.issue_identifier, "done")?;
         }
 
         db.set_linear_pushed(task_id, true)?;
         println!(
             "pushed: {} -> Linear issue {}",
-            task_id, task.linear_issue_id
+            task_id, task.issue_identifier
         );
 
         Ok(())
     }
 
-    /// Push all completed tasks with linear_issue_id where linear_pushed=false.
+    /// Push all completed tasks with issue_identifier where linear_pushed=false.
     pub fn push_all(&self, db: &Db) -> Result<()> {
         let tasks = db.unpushed_linear_tasks()?;
 

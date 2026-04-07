@@ -262,7 +262,7 @@ mod tests {
     fn insert_task(db: &Db, task_id: &str, issue_id: &str) {
         let mut t = crate::db::make_test_task(task_id);
         t.status = Status::Completed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "analyst".to_string();
         db.insert_task(&t).unwrap();
     }
@@ -772,7 +772,7 @@ mod tests {
         // Insert task with worktree path in DB (simulates RIG-351 runner update)
         let mut t = crate::db::make_test_task("rig355-eng-t");
         t.status = Status::Completed;
-        t.linear_issue_id = "RIG-355-TEST".to_string();
+        t.issue_identifier = "RIG-355-TEST".to_string();
         t.pipeline_stage = "engineer".to_string();
         t.working_dir =
             "/home/user/projects/repo/.trees/feat--RIG-355-pipeline-engineer-stage".to_string();
@@ -863,7 +863,7 @@ mod tests {
         // Insert engineer task with worktree path
         let mut eng = crate::db::make_test_task("rig355-eng");
         eng.status = Status::Completed;
-        eng.linear_issue_id = issue_id.to_string();
+        eng.issue_identifier = issue_id.to_string();
         eng.pipeline_stage = "engineer".to_string();
         eng.working_dir =
             "/home/user/projects/repo/.trees/feat--RIG-355-pipeline-engineer-stage".to_string();
@@ -872,7 +872,7 @@ mod tests {
         // Insert reviewer task with base repo path (no worktree)
         let mut rev = crate::db::make_test_task("rig355-rev");
         rev.status = Status::Completed;
-        rev.linear_issue_id = issue_id.to_string();
+        rev.issue_identifier = issue_id.to_string();
         rev.pipeline_stage = "reviewer".to_string();
         rev.working_dir = "~/projects/repo".to_string();
         db.insert_task(&rev).unwrap();

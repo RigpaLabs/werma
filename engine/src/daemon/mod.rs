@@ -548,7 +548,7 @@ mod tests {
             max_turns: 15,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: "RIG-293".to_string(),
+            issue_identifier: "RIG-293".to_string(),
             linear_pushed: false,
             pipeline_stage: "engineer".to_string(),
             depends_on: vec![],

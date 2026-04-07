@@ -16,7 +16,7 @@ mod regression {
     /// Migration 004 must preserve FAT-XX identifiers, not just RIG-XX.
     ///
     /// Bug: the original UPDATE used `NOT LIKE 'RIG-%'` which wiped FAT-42,
-    /// clearing the `linear_issue_id` on every DB open. Ghost tasks resulted —
+    /// clearing the `issue_identifier` on every DB open. Ghost tasks resulted —
     /// pipeline poll could no longer find tasks by their Linear issue.
     ///
     /// Fix: migration 004 now uses `NOT GLOB '[A-Z]*-[0-9]*'` to preserve any
@@ -27,7 +27,7 @@ mod regression {
 
         // Insert a FAT-42 task before migration.
         let mut task = crate::db::make_test_task("20260326-rig310");
-        task.linear_issue_id = "FAT-42".to_string();
+        task.issue_identifier = "FAT-42".to_string();
         task.pipeline_stage = "analyst".to_string();
         db.insert_task(&task).unwrap();
 
@@ -43,7 +43,7 @@ mod regression {
             .expect("task must still exist");
 
         assert_eq!(
-            read_back.linear_issue_id, "FAT-42",
+            read_back.issue_identifier, "FAT-42",
             "RIG-310 regression: migration 004 must preserve FAT-XX identifiers; \
              if 'FAT-42' was cleared the bug has returned"
         );
@@ -98,7 +98,7 @@ mod regression {
 
         let mut task = crate::db::make_test_task("20260326-rig309");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-309".to_string();
+        task.issue_identifier = "RIG-309".to_string();
         task.pipeline_stage = "reviewer".to_string();
         db.insert_task(&task).unwrap();
 
@@ -160,7 +160,7 @@ mod regression {
 
         let mut task = crate::db::make_test_task("20260326-rig308");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-308".to_string();
+        task.issue_identifier = "RIG-308".to_string();
         task.pipeline_stage = "reviewer".to_string();
         db.insert_task(&task).unwrap();
 
@@ -212,7 +212,7 @@ mod regression {
 
         let mut task = crate::db::make_test_task("20260326-rig168");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-168".to_string();
+        task.issue_identifier = "RIG-168".to_string();
         task.pipeline_stage = "analyst".to_string();
         db.insert_task(&task).unwrap();
 
@@ -277,7 +277,7 @@ mod regression {
         // ── Engineer DONE with PR_URL ──────────────────────────────────────
         let mut eng_task = crate::db::make_test_task("20260326-rig281-eng");
         eng_task.status = Status::Completed;
-        eng_task.linear_issue_id = "RIG-281".to_string();
+        eng_task.issue_identifier = "RIG-281".to_string();
         eng_task.pipeline_stage = "engineer".to_string();
         db.insert_task(&eng_task).unwrap();
 
@@ -320,7 +320,7 @@ mod regression {
 
         let mut rev_task = crate::db::make_test_task("20260326-rig281-rev");
         rev_task.status = Status::Completed;
-        rev_task.linear_issue_id = "RIG-281".to_string();
+        rev_task.issue_identifier = "RIG-281".to_string();
         rev_task.pipeline_stage = "reviewer".to_string();
         db2.insert_task(&rev_task).unwrap();
 
@@ -371,7 +371,7 @@ mod regression {
 
         let mut task = crate::db::make_test_task("20260326-rig312");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-312".to_string();
+        task.issue_identifier = "RIG-312".to_string();
         task.pipeline_stage = "analyst".to_string();
         db.insert_task(&task).unwrap();
 
@@ -463,7 +463,7 @@ mod regression {
 
         let mut task = crate::db::make_test_task("20260329-rig318-rev-approve");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-318".to_string();
+        task.issue_identifier = "RIG-318".to_string();
         task.pipeline_stage = "reviewer".to_string();
         db.insert_task(&task).unwrap();
 
@@ -497,7 +497,7 @@ mod regression {
 
         let mut task = crate::db::make_test_task("20260329-rig318-rev-reject");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-318".to_string();
+        task.issue_identifier = "RIG-318".to_string();
         task.pipeline_stage = "reviewer".to_string();
         db.insert_task(&task).unwrap();
 
@@ -741,7 +741,7 @@ mod regression {
 
         let mut task = crate::db::make_test_task(task_id);
         task.status = Status::Completed;
-        task.linear_issue_id = issue_id.to_string();
+        task.issue_identifier = issue_id.to_string();
         task.pipeline_stage = "engineer".to_string();
         task.task_type = "pipeline-engineer".to_string();
         task.working_dir = "~/projects/rigpa/werma".to_string();
@@ -800,7 +800,7 @@ mod regression {
 
         let mut task = crate::db::make_test_task(task_id);
         task.status = Status::Completed;
-        task.linear_issue_id = issue_id.to_string();
+        task.issue_identifier = issue_id.to_string();
         task.pipeline_stage = "engineer".to_string();
         task.task_type = "pipeline-engineer".to_string();
         task.working_dir = "~/projects/rigpa/werma".to_string();
@@ -864,7 +864,7 @@ mod regression {
 
         let mut task = crate::db::make_test_task(task_id);
         task.status = Status::Completed;
-        task.linear_issue_id = issue_id.to_string();
+        task.issue_identifier = issue_id.to_string();
         task.pipeline_stage = "reviewer".to_string();
         task.task_type = "pipeline-reviewer".to_string();
         task.working_dir = "~/projects/rigpa/werma".to_string();
@@ -918,7 +918,7 @@ mod regression {
 
         let mut task = crate::db::make_test_task(task_id);
         task.status = Status::Completed;
-        task.linear_issue_id = issue_id.to_string();
+        task.issue_identifier = issue_id.to_string();
         task.pipeline_stage = "reviewer".to_string();
         task.task_type = "pipeline-reviewer".to_string();
         task.working_dir = "~/projects/rigpa/werma".to_string();
@@ -967,7 +967,7 @@ mod regression {
 
         let mut task = crate::db::make_test_task(task_id);
         task.status = Status::Completed;
-        task.linear_issue_id = issue_id.to_string();
+        task.issue_identifier = issue_id.to_string();
         task.pipeline_stage = "engineer".to_string();
         db.insert_task(&task).unwrap();
         linear.set_issue_status(issue_id, "in_progress");
@@ -1151,7 +1151,7 @@ mod regression {
         // Simulate 3 completed reviewer rounds (the default limit).
         for i in 0..3 {
             let mut t = crate::db::make_test_task(&format!("cycle-rev-{i}"));
-            t.linear_issue_id = issue_id.to_string();
+            t.issue_identifier = issue_id.to_string();
             t.pipeline_stage = "reviewer".to_string();
             t.task_type = "pipeline-reviewer".to_string();
             t.status = Status::Completed;
@@ -1160,7 +1160,7 @@ mod regression {
 
         // Insert the current (4th) reviewer task that will reject again.
         let mut current = crate::db::make_test_task("cycle-rev-current");
-        current.linear_issue_id = issue_id.to_string();
+        current.issue_identifier = issue_id.to_string();
         current.pipeline_stage = "reviewer".to_string();
         current.task_type = "pipeline-reviewer".to_string();
         current.status = Status::Completed;
@@ -1227,7 +1227,7 @@ mod regression {
 
         // Only 1 prior completed reviewer (well below default limit of 3).
         let mut prev = crate::db::make_test_task("below-rev-0");
-        prev.linear_issue_id = issue_id.to_string();
+        prev.issue_identifier = issue_id.to_string();
         prev.pipeline_stage = "reviewer".to_string();
         prev.task_type = "pipeline-reviewer".to_string();
         prev.status = Status::Completed;
@@ -1235,7 +1235,7 @@ mod regression {
 
         // Current reviewer rejects.
         let mut current = crate::db::make_test_task("below-rev-current");
-        current.linear_issue_id = issue_id.to_string();
+        current.issue_identifier = issue_id.to_string();
         current.pipeline_stage = "reviewer".to_string();
         current.task_type = "pipeline-reviewer".to_string();
         current.status = Status::Completed;
@@ -1273,15 +1273,15 @@ mod regression {
 
     // ─── RIG-387 ─────────────────────────────────────────────────────────────
 
-    /// GitHub poll must not create pipeline tasks with empty linear_issue_id.
+    /// GitHub poll must not create pipeline tasks with empty issue_identifier.
     ///
     /// Bug: `insert_task_with_conn()` (callback spawn path) had no guard against
-    /// empty `linear_issue_id`. The dedup query
+    /// empty `issue_identifier`. The dedup query
     /// `has_any_nonfailed_task_for_issue_stage("", stage)` then matched nothing,
     /// causing the poll loop to spawn a new ghost task on every tick (41+ per session).
     ///
     /// Fix: `insert_task_with_conn()` now applies the same guard as `Db::insert_task()`:
-    /// pipeline tasks with empty `linear_issue_id` are rejected with an error.
+    /// pipeline tasks with empty `issue_identifier` are rejected with an error.
     #[test]
     fn regression_rig387_callback_spawn_rejects_empty_identifier() {
         use crate::pipeline::callback::callback;
@@ -1292,7 +1292,7 @@ mod regression {
         // Insert a completed engineer task with a valid identifier (simulates a real task).
         let mut task = crate::db::make_test_task("20260403-387-eng");
         task.status = Status::Completed;
-        task.linear_issue_id = "werma-test#42".to_string();
+        task.issue_identifier = "werma-test#42".to_string();
         task.pipeline_stage = "engineer".to_string();
         db.insert_task(&task).unwrap();
 
@@ -1309,13 +1309,13 @@ mod regression {
         )
         .unwrap();
 
-        // Any spawned task must have a non-empty linear_issue_id.
+        // Any spawned task must have a non-empty issue_identifier.
         let all_tasks = db.list_tasks(None).unwrap();
         for t in &all_tasks {
             if !t.pipeline_stage.is_empty() {
                 assert!(
-                    !t.linear_issue_id.is_empty(),
-                    "RIG-387 regression: pipeline task {} (stage={}) has empty linear_issue_id — \
+                    !t.issue_identifier.is_empty(),
+                    "RIG-387 regression: pipeline task {} (stage={}) has empty issue_identifier — \
                      ghost task spawn loop would result",
                     t.id,
                     t.pipeline_stage
@@ -1343,7 +1343,7 @@ mod regression {
         // Engineer task with QwenCode runtime completes — reviewer should be spawned.
         let mut task = crate::db::make_test_task("20260403-387-rt");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-387b".to_string();
+        task.issue_identifier = "RIG-387b".to_string();
         task.pipeline_stage = "engineer".to_string();
         task.runtime = crate::models::AgentRuntime::QwenCode;
         db.insert_task(&task).unwrap();

@@ -22,7 +22,7 @@ use crate::linear::LinearApi;
 pub(super) fn build_next_stage_task(
     db: &Db,
     config: &PipelineConfig,
-    linear_issue_id: &str,
+    issue_identifier: &str,
     next_stage: &str,
     previous_output: &str,
     prev_task_id: &str,
@@ -32,10 +32,10 @@ pub(super) fn build_next_stage_task(
     pr_url: Option<&str>,
 ) -> Result<Option<crate::models::Task>> {
     // Guard: don't spawn if an active task already exists for this issue + stage.
-    let existing = db.tasks_by_linear_issue(linear_issue_id, Some(next_stage), true)?;
+    let existing = db.tasks_by_linear_issue(issue_identifier, Some(next_stage), true)?;
     if !existing.is_empty() {
         eprintln!(
-            "skip spawn: active task already exists for {linear_issue_id} stage={next_stage}"
+            "skip spawn: active task already exists for {issue_identifier} stage={next_stage}"
         );
         return Ok(None);
     }
@@ -48,7 +48,7 @@ pub(super) fn build_next_stage_task(
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
 
     let review_round = if next_stage == "reviewer" {
-        db.count_completed_tasks_for_issue_stage(linear_issue_id, "reviewer")?
+        db.count_completed_tasks_for_issue_stage(issue_identifier, "reviewer")?
     } else {
         0
     };
@@ -68,7 +68,7 @@ pub(super) fn build_next_stage_task(
     // RIG-333: For reviewer stage, look up previous reviewer's handoff_content
     // to inject context about what was flagged in prior review rounds.
     let previous_review = if next_stage == "reviewer" {
-        lookup_previous_reviewer_handoff(db, linear_issue_id)
+        lookup_previous_reviewer_handoff(db, issue_identifier)
     } else {
         None
     };
@@ -78,7 +78,7 @@ pub(super) fn build_next_stage_task(
         config,
         next_stage,
         prev_stage,
-        linear_issue_id,
+        issue_identifier,
         "", // issue_title: unknown without Linear API call
         "", // issue_description: unknown without Linear API call
         previous_output,
@@ -96,14 +96,14 @@ pub(super) fn build_next_stage_task(
         prev_stage,
         task_id,
         next_stage,
-        linear_issue_id,
+        issue_identifier,
         truncate_lines(previous_output, 200),
     );
 
     let user_cfg = UserConfig::load();
     let default_dir = user_cfg.repo_dir("werma");
     let effective_working_dir = if working_dir.is_empty() || working_dir == default_dir {
-        infer_working_dir_from_issue(db, linear_issue_id, &user_cfg)
+        infer_working_dir_from_issue(db, issue_identifier, &user_cfg)
     } else {
         crate::worktree::resolve_base_repo(std::path::Path::new(working_dir))
             .to_string_lossy()
@@ -126,7 +126,7 @@ pub(super) fn build_next_stage_task(
         max_turns,
         allowed_tools,
         session_id: String::new(),
-        linear_issue_id: linear_issue_id.to_string(),
+        issue_identifier: issue_identifier.to_string(),
         linear_pushed: false,
         pipeline_stage: next_stage.to_string(),
         depends_on: vec![],
@@ -151,7 +151,7 @@ pub(crate) struct NextStageParams<'a> {
     pub db: &'a Db,
     pub config: &'a PipelineConfig,
     pub linear: Option<&'a dyn LinearApi>,
-    pub linear_issue_id: &'a str,
+    pub issue_identifier: &'a str,
     pub next_stage: &'a str,
     pub previous_output: &'a str,
     pub prev_task_id: &'a str,
@@ -171,7 +171,7 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         db,
         config,
         linear,
-        linear_issue_id,
+        issue_identifier,
         next_stage,
         previous_output,
         prev_task_id,
@@ -183,10 +183,10 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
     } = p;
 
     // Guard: don't spawn if an active task already exists for this issue + stage.
-    let existing = db.tasks_by_linear_issue(linear_issue_id, Some(next_stage), true)?;
+    let existing = db.tasks_by_linear_issue(issue_identifier, Some(next_stage), true)?;
     if !existing.is_empty() {
         eprintln!(
-            "skip spawn: active task already exists for {linear_issue_id} stage={next_stage}"
+            "skip spawn: active task already exists for {issue_identifier} stage={next_stage}"
         );
         return Ok(());
     }
@@ -199,7 +199,7 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
     let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
 
     let review_round = if *next_stage == "reviewer" {
-        db.count_completed_tasks_for_issue_stage(linear_issue_id, "reviewer")?
+        db.count_completed_tasks_for_issue_stage(issue_identifier, "reviewer")?
     } else {
         0
     };
@@ -217,14 +217,14 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         .to_string();
 
     let (issue_title, issue_description) = linear
-        .and_then(|l| l.get_issue(linear_issue_id).ok())
+        .and_then(|l| l.get_issue(issue_identifier).ok())
         .unwrap_or_default();
 
     let prompt = build_handoff_prompt(
         config,
         next_stage,
         prev_stage,
-        linear_issue_id,
+        issue_identifier,
         &issue_title,
         &issue_description,
         previous_output,
@@ -255,7 +255,7 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         prev_stage,
         task_id,
         next_stage,
-        linear_issue_id,
+        issue_identifier,
         truncate_lines(previous_output, 200),
     );
     std::fs::write(&handoff_path, &handoff_content)?;
@@ -263,7 +263,7 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
     let user_cfg = UserConfig::load();
     let default_dir = user_cfg.repo_dir("werma");
     let effective_working_dir = if working_dir.is_empty() || *working_dir == default_dir {
-        infer_working_dir_from_issue(db, linear_issue_id, &user_cfg)
+        infer_working_dir_from_issue(db, issue_identifier, &user_cfg)
     } else {
         working_dir.to_string()
     };
@@ -284,7 +284,7 @@ pub(crate) fn create_next_stage_task(p: &NextStageParams<'_>) -> Result<()> {
         max_turns,
         allowed_tools,
         session_id: String::new(),
-        linear_issue_id: linear_issue_id.to_string(),
+        issue_identifier: issue_identifier.to_string(),
         linear_pushed: false,
         pipeline_stage: next_stage.to_string(),
         depends_on: vec![],
@@ -314,7 +314,7 @@ pub(super) fn build_handoff_prompt(
     config: &PipelineConfig,
     next_stage: &str,
     prev_stage: &str,
-    linear_issue_id: &str,
+    issue_identifier: &str,
     issue_title: &str,
     issue_description: &str,
     previous_output: &str,
@@ -324,7 +324,7 @@ pub(super) fn build_handoff_prompt(
         Some(s) => s,
         None => {
             return format!(
-                "Continue pipeline for Linear issue {linear_issue_id}. Stage: {next_stage}\n\n\
+                "Continue pipeline for Linear issue {issue_identifier}. Stage: {next_stage}\n\n\
                  Previous stage ({prev_stage}) output is in the handoff context file."
             );
         }
@@ -340,14 +340,14 @@ pub(super) fn build_handoff_prompt(
         Some(p) => resolve_prompt(p),
         None => {
             return format!(
-                "Continue pipeline for Linear issue {linear_issue_id}. Stage: {next_stage}\n\n\
+                "Continue pipeline for Linear issue {issue_identifier}. Stage: {next_stage}\n\n\
                  Previous stage ({prev_stage}) output is in the handoff context file."
             );
         }
     };
 
     let mut runtime: HashMap<String, String> = HashMap::new();
-    runtime.insert("issue_id".to_string(), linear_issue_id.to_string());
+    runtime.insert("issue_id".to_string(), issue_identifier.to_string());
     runtime.insert("issue_title".to_string(), issue_title.to_string());
     runtime.insert(
         "issue_description".to_string(),
@@ -383,7 +383,7 @@ pub(super) fn build_handoff_prompt(
         };
         rendered = format!(
             "# Pipeline: Engineer Stage ({stage_kind})\n\
-             Linear issue: {linear_issue_id}\n\n\
+             Linear issue: {issue_identifier}\n\n\
              ## {from_label}\n{fb}\n\n{rendered}"
         );
     }
@@ -394,9 +394,9 @@ pub(super) fn build_handoff_prompt(
 /// RIG-333: Look up the most recent completed reviewer task for an issue
 /// and return its handoff_content (which contains the review summary)
 /// wrapped with re-review instructions.
-pub(crate) fn lookup_previous_reviewer_handoff(db: &Db, linear_issue_id: &str) -> Option<String> {
+pub(crate) fn lookup_previous_reviewer_handoff(db: &Db, issue_identifier: &str) -> Option<String> {
     let reviewer_tasks = db
-        .tasks_by_linear_issue(linear_issue_id, Some("reviewer"), false)
+        .tasks_by_linear_issue(issue_identifier, Some("reviewer"), false)
         .ok()?;
 
     // tasks_by_linear_issue returns ordered by created_at DESC.
@@ -446,7 +446,7 @@ mod tests {
             max_turns: 20,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: "test-issue-abc".to_string(),
+            issue_identifier: "test-issue-abc".to_string(),
             linear_pushed: false,
             pipeline_stage: "analyst".to_string(),
             depends_on: vec![],
@@ -470,7 +470,7 @@ mod tests {
             db: &db,
             config: &config,
             linear: None,
-            linear_issue_id: "test-issue-abc",
+            issue_identifier: "test-issue-abc",
             next_stage: "engineer",
             previous_output: analyst_output,
             prev_task_id: "20260310-001",
@@ -506,7 +506,7 @@ mod tests {
             db: &db,
             config: &config,
             linear: None,
-            linear_issue_id: "test-issue-def",
+            issue_identifier: "test-issue-def",
             next_stage: "engineer",
             previous_output: reviewer_output,
             prev_task_id: "20260310-002",
@@ -540,7 +540,7 @@ mod tests {
         let existing = Task {
             id: "20260313-050".to_string(),
             status: Status::Pending,
-            linear_issue_id: "RIG-300".to_string(),
+            issue_identifier: "RIG-300".to_string(),
             pipeline_stage: "engineer".to_string(),
             task_type: "pipeline-engineer".to_string(),
             ..Default::default()
@@ -552,7 +552,7 @@ mod tests {
             db: &db,
             config: &config,
             linear: None,
-            linear_issue_id: "RIG-300",
+            issue_identifier: "RIG-300",
             next_stage: "engineer",
             previous_output: "spec output",
             prev_task_id: "20260313-001",
@@ -677,7 +677,7 @@ stages:
             db: &db,
             config: &config,
             linear: None,
-            linear_issue_id: "test-issue-pr",
+            issue_identifier: "test-issue-pr",
             next_stage: "reviewer",
             previous_output: engineer_output,
             prev_task_id: "20260312-001",
@@ -724,7 +724,7 @@ stages:
             db: &db,
             config: &config,
             linear: None,
-            linear_issue_id: issue_id,
+            issue_identifier: issue_id,
             next_stage: "engineer",
             previous_output: analyst_output,
             prev_task_id: "20260310-001",
@@ -750,7 +750,7 @@ stages:
             db: &db,
             config: &config,
             linear: None,
-            linear_issue_id: issue_id,
+            issue_identifier: issue_id,
             next_stage: "engineer",
             previous_output: reviewer_output,
             prev_task_id: "20260310-002",
@@ -794,7 +794,7 @@ stages:
             db: &db,
             config: &config,
             linear: None,
-            linear_issue_id: "RIG-232",
+            issue_identifier: "RIG-232",
             next_stage: "reviewer",
             previous_output: "Implementation complete.\nVERDICT=DONE",
             prev_task_id: "20260314-232",
@@ -816,7 +816,7 @@ stages:
 
         let reviewer = &reviewer_tasks[0];
         assert_eq!(reviewer.pipeline_stage, "reviewer");
-        assert_eq!(reviewer.linear_issue_id, "RIG-232");
+        assert_eq!(reviewer.issue_identifier, "RIG-232");
         assert_eq!(reviewer.status, Status::Pending);
     }
 
@@ -882,7 +882,7 @@ stages:
         // Insert a completed reviewer task with handoff_content
         let mut t = crate::db::make_test_task("333-rev-1");
         t.status = Status::Completed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "reviewer".to_string();
         t.task_type = "pipeline-reviewer".to_string();
         t.handoff_content =
@@ -911,7 +911,7 @@ stages:
         // Completed reviewer with empty handoff (e.g. approved on first try)
         let mut t = crate::db::make_test_task("333-rev-empty");
         t.status = Status::Completed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "reviewer".to_string();
         t.task_type = "pipeline-reviewer".to_string();
         t.handoff_content = String::new();
@@ -936,7 +936,7 @@ stages:
         // Insert a completed engineer task
         let mut eng = crate::db::make_test_task("353-eng-wd");
         eng.status = Status::Completed;
-        eng.linear_issue_id = issue_id.to_string();
+        eng.issue_identifier = issue_id.to_string();
         eng.pipeline_stage = "engineer".to_string();
         eng.working_dir = "/Users/dev/projects/werma/.trees/feat--RIG-353".to_string();
         db.insert_task(&eng).unwrap();
@@ -1020,7 +1020,7 @@ stages:
         // Insert an active (pending) reviewer task
         let mut existing = crate::db::make_test_task("353-rev-active");
         existing.status = Status::Pending;
-        existing.linear_issue_id = issue_id.to_string();
+        existing.issue_identifier = issue_id.to_string();
         existing.pipeline_stage = "reviewer".to_string();
         existing.task_type = "pipeline-reviewer".to_string();
         db.insert_task(&existing).unwrap();

@@ -132,7 +132,7 @@ pub fn cmd_continue(db: &Db, id: &str, prompt: Option<String>) -> Result<()> {
 
     std::fs::write(&prompt_file, &prepared.follow_up)?;
 
-    let notify_label = notify::format_notify_label(id, &task.task_type, &task.linear_issue_id);
+    let notify_label = notify::format_notify_label(id, &task.task_type, &task.issue_identifier);
 
     let script = generate_continue_script(&ContinueScriptParams {
         effective_dir: &prepared.effective_dir,
@@ -366,7 +366,7 @@ mod tests {
         let mut task = make_continue_task("007");
         task.task_type = "code".to_string();
         task.working_dir = tmp.path().to_string_lossy().to_string();
-        task.linear_issue_id = "RIG-999".to_string();
+        task.issue_identifier = "RIG-999".to_string();
 
         // Create the exact directory that generate_branch_name would produce
         let branch = worktree::generate_branch_name(&task);
@@ -387,7 +387,7 @@ mod tests {
         let mut task = make_continue_task("008");
         task.task_type = "code".to_string();
         task.working_dir = "/tmp".to_string();
-        task.linear_issue_id = "RIG-999".to_string();
+        task.issue_identifier = "RIG-999".to_string();
 
         let prepared = prepare_continue(&task, "008", None).unwrap();
         assert_eq!(prepared.effective_dir, "/tmp");

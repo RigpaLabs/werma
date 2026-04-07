@@ -109,10 +109,10 @@ pub fn task_list_table(tasks: &[Task], term_width: u16) -> Table {
         let priority = Cell::new(format!("p{}", task.priority));
         let model = Cell::new(&task.model);
 
-        let linear = if task.linear_issue_id.is_empty() {
+        let linear = if task.issue_identifier.is_empty() {
             Cell::new("")
         } else {
-            Cell::new(&task.linear_issue_id).fg(Color::Cyan)
+            Cell::new(&task.issue_identifier).fg(Color::Cyan)
         };
 
         let max_prompt = (term_width as usize).saturating_sub(55);
@@ -204,10 +204,10 @@ pub fn show_cursor() {
 /// Format a task line into a buffer (reusable by both status and compact renderers).
 pub fn write_task_line(buf: &mut String, task: &Task, time_str: &str, max_prompt: usize) {
     use std::fmt::Write;
-    let linear = if task.linear_issue_id.is_empty() {
+    let linear = if task.issue_identifier.is_empty() {
         String::new()
     } else {
-        format!("  [{}]", cyan(&task.linear_issue_id))
+        format!("  [{}]", cyan(&task.issue_identifier))
     };
     let cost_turns = crate::commands::display::format_cost_turns(task);
     let preview = truncate_line(&task.prompt, max_prompt);
@@ -398,7 +398,7 @@ pub fn render_compact_buf(
             .as_deref()
             .map(crate::format_elapsed_since)
             .unwrap_or_default();
-        let linear = compact_linear_label_colored(&task.linear_issue_id);
+        let linear = compact_linear_label_colored(&task.issue_identifier);
         let _ = writeln!(
             buf,
             " {} {} {}{} {}",
@@ -411,7 +411,7 @@ pub fn render_compact_buf(
     }
 
     for task in pending.iter().take(3) {
-        let linear = compact_linear_label_colored(&task.linear_issue_id);
+        let linear = compact_linear_label_colored(&task.issue_identifier);
         let _ = writeln!(
             buf,
             " {} {} {}{}",
@@ -440,7 +440,7 @@ pub fn render_compact_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label_dimmed(&task.linear_issue_id);
+        let linear = compact_linear_label_dimmed(&task.issue_identifier);
         let cost_turns = crate::commands::display::format_cost_turns(task);
         let _ = writeln!(
             buf,
@@ -459,7 +459,7 @@ pub fn render_compact_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label_dimmed(&task.linear_issue_id);
+        let linear = compact_linear_label_dimmed(&task.issue_identifier);
         let cost_turns = crate::commands::display::format_cost_turns(task);
         let _ = writeln!(
             buf,
@@ -478,7 +478,7 @@ pub fn render_compact_buf(
             (Some(s), Some(e)) => crate::format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label_dimmed(&task.linear_issue_id);
+        let linear = compact_linear_label_dimmed(&task.issue_identifier);
         let cost_turns = crate::commands::display::format_cost_turns(task);
         let _ = writeln!(
             buf,
@@ -527,27 +527,27 @@ fn compact_task_id(id: &str) -> &str {
 }
 
 #[allow(dead_code)]
-fn compact_linear_label(linear_issue_id: &str) -> String {
-    if linear_issue_id.is_empty() {
+fn compact_linear_label(issue_identifier: &str) -> String {
+    if issue_identifier.is_empty() {
         String::new()
     } else {
-        format!(" [{linear_issue_id}]")
+        format!(" [{issue_identifier}]")
     }
 }
 
-fn compact_linear_label_colored(linear_issue_id: &str) -> String {
-    if linear_issue_id.is_empty() {
+fn compact_linear_label_colored(issue_identifier: &str) -> String {
+    if issue_identifier.is_empty() {
         String::new()
     } else {
-        format!(" {}", cyan(&format!("[{linear_issue_id}]")))
+        format!(" {}", cyan(&format!("[{issue_identifier}]")))
     }
 }
 
-fn compact_linear_label_dimmed(linear_issue_id: &str) -> String {
-    if linear_issue_id.is_empty() {
+fn compact_linear_label_dimmed(issue_identifier: &str) -> String {
+    if issue_identifier.is_empty() {
         String::new()
     } else {
-        format!(" {}", dimmed(&format!("[{linear_issue_id}]")))
+        format!(" {}", dimmed(&format!("[{issue_identifier}]")))
     }
 }
 
@@ -587,7 +587,7 @@ mod tests {
             max_turns: 15,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: String::new(),
+            issue_identifier: String::new(),
             linear_pushed: false,
             pipeline_stage: String::new(),
             depends_on: vec![],

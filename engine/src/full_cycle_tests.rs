@@ -430,14 +430,14 @@ mod tests {
         for i in 0..3 {
             let mut task = make_test_task(&format!("20260314-231c-{i:03}"));
             task.status = Status::Completed;
-            task.linear_issue_id = "RIG-231c".to_string();
+            task.issue_identifier = "RIG-231c".to_string();
             task.pipeline_stage = "reviewer".to_string();
             db.insert_task(&task).unwrap();
         }
 
         let mut reviewer_task = make_test_task("20260314-231c-004");
         reviewer_task.status = Status::Completed;
-        reviewer_task.linear_issue_id = "RIG-231c".to_string();
+        reviewer_task.issue_identifier = "RIG-231c".to_string();
         reviewer_task.pipeline_stage = "reviewer".to_string();
         db.insert_task(&reviewer_task).unwrap();
 
@@ -497,7 +497,7 @@ mod tests {
         // Insert an existing active reviewer task
         let mut existing = make_test_task("20260314-231d-001");
         existing.status = Status::Pending;
-        existing.linear_issue_id = "RIG-231d".to_string();
+        existing.issue_identifier = "RIG-231d".to_string();
         existing.pipeline_stage = "reviewer".to_string();
         db.insert_task(&existing).unwrap();
 
@@ -824,7 +824,7 @@ mod tests {
         // Seed a completed reviewer task with EMPTY handoff_content.
         let mut old_reviewer = make_test_task("20260401-356b-001");
         old_reviewer.status = Status::Completed;
-        old_reviewer.linear_issue_id = "RIG-356b".to_string();
+        old_reviewer.issue_identifier = "RIG-356b".to_string();
         old_reviewer.pipeline_stage = "reviewer".to_string();
         old_reviewer.handoff_content = String::new(); // Empty — should be skipped
         db.insert_task(&old_reviewer).unwrap();

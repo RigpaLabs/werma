@@ -58,7 +58,7 @@ pub fn cmd_add(db: &Db, p: AddParams) -> Result<()> {
         max_turns,
         allowed_tools,
         session_id: String::new(),
-        linear_issue_id: p
+        issue_identifier: p
             .linear
             .unwrap_or_else(|| worktree::extract_linear_id_prefix(&p.prompt).unwrap_or_default()),
         linear_pushed: false,
@@ -157,8 +157,8 @@ pub fn cmd_view(db: &Db, id: &str) -> Result<()> {
     if !task.session_id.is_empty() {
         println!("  session_id:  {}", task.session_id);
     }
-    if !task.linear_issue_id.is_empty() {
-        println!("  linear:      {}", task.linear_issue_id);
+    if !task.issue_identifier.is_empty() {
+        println!("  linear:      {}", task.issue_identifier);
     }
     if !task.pipeline_stage.is_empty() {
         println!("  stage:       {}", task.pipeline_stage);
@@ -313,7 +313,7 @@ mod tests {
         let t = &tasks[0];
         assert_eq!(t.depends_on, vec!["dep1", "dep2"]);
         assert_eq!(t.context_files, vec!["file1.md", "file2.md"]);
-        assert_eq!(t.linear_issue_id, "RIG-42");
+        assert_eq!(t.issue_identifier, "RIG-42");
         assert_eq!(t.pipeline_stage, "engineer");
         assert_eq!(t.max_turns, 30); // default for "code"
     }

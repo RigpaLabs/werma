@@ -162,7 +162,7 @@ fn parse_task(v: &serde_json::Value) -> Task {
         max_turns: v["max_turns"].as_i64().unwrap_or(15) as i32,
         allowed_tools: v["allowed_tools"].as_str().unwrap_or("").to_string(),
         session_id: v["session_id"].as_str().unwrap_or("").to_string(),
-        linear_issue_id: v["linear_issue_id"].as_str().unwrap_or("").to_string(),
+        issue_identifier: v["issue_identifier"].as_str().unwrap_or("").to_string(),
         linear_pushed: v["linear_pushed"].as_bool().unwrap_or(false),
         pipeline_stage: v["pipeline_stage"].as_str().unwrap_or("").to_string(),
         depends_on: parse_string_array(&v["depends_on"]),

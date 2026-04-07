@@ -54,7 +54,7 @@ pub fn decide_callback(
     task_id: &str,
     stage: &str,
     result: &str,
-    linear_issue_id: &str,
+    issue_identifier: &str,
     working_dir: &str,
     cmd: &dyn CommandRunner,
 ) -> Result<CallbackDecision> {
@@ -84,9 +84,9 @@ pub fn decide_callback(
         // even though the final text result was empty. Claude Code --output-format json
         // only captures the final assistant text — tool calls are not in `result`.
         if stage == "reviewer" {
-            if let Some(gh_verdict) = get_pr_review_verdict(cmd, working_dir, linear_issue_id) {
+            if let Some(gh_verdict) = get_pr_review_verdict(cmd, working_dir, issue_identifier) {
                 eprintln!(
-                    "[CALLBACK] {linear_issue_id}: empty result but GitHub PR has review \
+                    "[CALLBACK] {issue_identifier}: empty result but GitHub PR has review \
                      decision={gh_verdict} — using as fallback verdict (task {task_id})"
                 );
                 let synthesized_result = format!(
@@ -100,20 +100,20 @@ pub fn decide_callback(
                     task_id,
                     stage,
                     &synthesized_result,
-                    linear_issue_id,
+                    issue_identifier,
                     working_dir,
                     cmd,
                 );
             }
             eprintln!(
-                "[CALLBACK] {linear_issue_id}: reviewer empty result and no GitHub review \
+                "[CALLBACK] {issue_identifier}: reviewer empty result and no GitHub review \
                  decision found — treating as failed (task {task_id})"
             );
         }
 
         effects.push(make_effect(
             task_id,
-            linear_issue_id,
+            issue_identifier,
             EffectType::PostComment,
             "empty_output_comment",
             serde_json::json!({
@@ -131,7 +131,7 @@ pub fn decide_callback(
     // to prevent infinite retry loops (observed: RIG-186 had 5 consecutive reviewer failures).
     if is_max_turns_exit(result) {
         let failed_count = db
-            .count_failed_tasks_for_issue_stage(linear_issue_id, stage)
+            .count_failed_tasks_for_issue_stage(issue_identifier, stage)
             .unwrap_or(0);
         let max_soft_failures = config
             .stage(stage)
@@ -147,19 +147,19 @@ pub fn decide_callback(
                 .unwrap_or("backlog")
                 .to_string();
             eprintln!(
-                "[CALLBACK] {linear_issue_id}: task {task_id} (stage={stage}) hit max_turns — \
+                "[CALLBACK] {issue_identifier}: task {task_id} (stage={stage}) hit max_turns — \
                  {failed_count} prior failures >= limit {max_soft_failures}, escalating to {escalation_status}"
             );
             effects.push(make_effect(
                 task_id,
-                linear_issue_id,
+                issue_identifier,
                 EffectType::MoveIssue,
                 &format!("max_turns_escalate:{escalation_status}"),
                 serde_json::json!({ "target_status": escalation_status }),
             ));
             effects.push(make_effect(
                 task_id,
-                linear_issue_id,
+                issue_identifier,
                 EffectType::PostComment,
                 "max_turns_escalation_comment",
                 serde_json::json!({
@@ -172,12 +172,12 @@ pub fn decide_callback(
             ));
         } else {
             eprintln!(
-                "[CALLBACK] {linear_issue_id}: task {task_id} (stage={stage}) hit max_turns — \
+                "[CALLBACK] {issue_identifier}: task {task_id} (stage={stage}) hit max_turns — \
                  soft failure ({failed_count}/{max_soft_failures}), no transition"
             );
             effects.push(make_effect(
                 task_id,
-                linear_issue_id,
+                issue_identifier,
                 EffectType::PostComment,
                 "max_turns_soft_comment",
                 serde_json::json!({
@@ -203,7 +203,7 @@ pub fn decide_callback(
     for (idx, comment_body) in comments.iter().enumerate() {
         effects.push(make_effect(
             task_id,
-            linear_issue_id,
+            issue_identifier,
             EffectType::PostComment,
             &format!("comment_block:{idx}"),
             serde_json::json!({ "body": comment_body }),
@@ -221,7 +221,7 @@ pub fn decide_callback(
         );
         effects.push(make_effect(
             task_id,
-            linear_issue_id,
+            issue_identifier,
             EffectType::PostComment,
             "no_verdict_comment",
             serde_json::json!({
@@ -252,7 +252,7 @@ pub fn decide_callback(
             let truncated = truncate_lines(&spec_body, 200);
             effects.push(make_effect(
                 task_id,
-                linear_issue_id,
+                issue_identifier,
                 EffectType::PostComment,
                 "analyst_spec_comment",
                 serde_json::json!({ "body": truncated }),
@@ -270,12 +270,12 @@ pub fn decide_callback(
                 .collect::<Vec<_>>()
                 .join("\n");
             eprintln!(
-                "[CALLBACK] {linear_issue_id}: analyst spec missing required sections: {}",
+                "[CALLBACK] {issue_identifier}: analyst spec missing required sections: {}",
                 missing.join(", ")
             );
             effects.push(make_effect(
                 task_id,
-                linear_issue_id,
+                issue_identifier,
                 EffectType::PostComment,
                 "spec_validation_failed",
                 serde_json::json!({
@@ -297,7 +297,7 @@ pub fn decide_callback(
         if est > 0 {
             effects.push(make_effect(
                 task_id,
-                linear_issue_id,
+                issue_identifier,
                 EffectType::UpdateEstimate,
                 &format!("update_estimate:{est}"),
                 serde_json::json!({ "estimate": est }),
@@ -323,7 +323,7 @@ pub fn decide_callback(
                 (stage_cfg.attempt_limit(), &stage_cfg.on_max_rounds)
             {
                 let attempt_count =
-                    db.count_failed_tasks_for_issue_stage(linear_issue_id, stage)?;
+                    db.count_failed_tasks_for_issue_stage(issue_identifier, stage)?;
                 if attempt_count >= max_attempts as i64 {
                     let escalation_status = stage_cfg
                         .transition_for(on_max_verdict)
@@ -331,14 +331,14 @@ pub fn decide_callback(
                         .unwrap_or("backlog")
                         .to_string();
                     eprintln!(
-                        "[CALLBACK] {linear_issue_id}: stage {stage} retry cap reached — \
+                        "[CALLBACK] {issue_identifier}: stage {stage} retry cap reached — \
                          {attempt_count} failed attempts >= limit {max_attempts}, \
                          escalating via on_max_rounds={on_max_verdict} to {escalation_status}"
                     );
                     // RIG-388: For GH issues, suppress MoveIssue if the escalation
                     // target matches the stage's own polling status — re-adding the
                     // same label triggers an infinite poll loop.
-                    let is_gh = linear_issue_id.contains('#');
+                    let is_gh = issue_identifier.contains('#');
                     let targets_self = stage_cfg
                         .linear_status
                         .as_ref()
@@ -346,20 +346,20 @@ pub fn decide_callback(
                     if !(is_gh && targets_self) {
                         effects.push(make_effect(
                             task_id,
-                            linear_issue_id,
+                            issue_identifier,
                             EffectType::MoveIssue,
                             &format!("retry_cap_escalate:{escalation_status}"),
                             serde_json::json!({ "target_status": escalation_status }),
                         ));
                     } else {
                         eprintln!(
-                            "[CALLBACK] {linear_issue_id}: suppressing MoveIssue→{escalation_status} \
+                            "[CALLBACK] {issue_identifier}: suppressing MoveIssue→{escalation_status} \
                              for GH retry-cap escalation — target matches stage polling status (RIG-388)"
                         );
                     }
                     effects.push(make_effect(
                         task_id,
-                        linear_issue_id,
+                        issue_identifier,
                         EffectType::PostComment,
                         "retry_cap_comment",
                         serde_json::json!({
@@ -378,14 +378,14 @@ pub fn decide_callback(
         // Guard: never move to "done" via ALREADY_DONE if there's an open PR.
         if verdict_str == "already_done"
             && t.status == "done"
-            && has_open_pr_for_issue(cmd, working_dir, linear_issue_id)
+            && has_open_pr_for_issue(cmd, working_dir, issue_identifier)
         {
             eprintln!(
-                "callback: blocking ALREADY_DONE→done for {linear_issue_id} — open PR exists."
+                "callback: blocking ALREADY_DONE→done for {issue_identifier} — open PR exists."
             );
             effects.push(make_effect(
                 task_id,
-                linear_issue_id,
+                issue_identifier,
                 EffectType::PostComment,
                 "already_done_blocked_comment",
                 serde_json::json!({
@@ -399,7 +399,7 @@ pub fn decide_callback(
             if stage == "analyst" {
                 effects.push(make_effect(
                     task_id,
-                    linear_issue_id,
+                    issue_identifier,
                     EffectType::AddLabel,
                     "add_label:spec:done",
                     serde_json::json!({ "label": "spec:done" }),
@@ -413,13 +413,13 @@ pub fn decide_callback(
         // status label (that's how it was polled), and re-adding it via move_issue_by_name
         // triggers an infinite poll loop: poll → task → callback → re-add label → poll → ...
         // The spawned task handles the next step; no label change needed.
-        let is_gh_issue = linear_issue_id.contains('#');
+        let is_gh_issue = issue_identifier.contains('#');
         let is_rejection_with_spawn = !is_forward_verdict(&verdict_str) && t.spawn.is_some();
         let suppress_move = is_gh_issue && is_rejection_with_spawn;
 
         if suppress_move {
             eprintln!(
-                "[CALLBACK] {linear_issue_id}: suppressing MoveIssue→{} for GH rejection \
+                "[CALLBACK] {issue_identifier}: suppressing MoveIssue→{} for GH rejection \
                  cycle (verdict={verdict_str}, spawn={:?}) — label already present, \
                  spawned task handles next step (RIG-388)",
                 t.status,
@@ -429,7 +429,7 @@ pub fn decide_callback(
             // Queue the issue move as an effect — processor calls move_with_retry.
             effects.push(make_effect(
                 task_id,
-                linear_issue_id,
+                issue_identifier,
                 EffectType::MoveIssue,
                 &format!("move_issue:{}", t.status),
                 serde_json::json!({
@@ -445,7 +445,7 @@ pub fn decide_callback(
             if let Some(ref label) = stage_cfg.linear_label {
                 effects.push(make_effect(
                     task_id,
-                    linear_issue_id,
+                    issue_identifier,
                     EffectType::RemoveLabel,
                     &format!("remove_label:{label}"),
                     serde_json::json!({ "label": label }),
@@ -458,7 +458,7 @@ pub fn decide_callback(
                 let result_label = format!("{label}:{suffix}");
                 effects.push(make_effect(
                     task_id,
-                    linear_issue_id,
+                    issue_identifier,
                     EffectType::AddLabel,
                     &format!("add_label:{result_label}"),
                     serde_json::json!({ "label": result_label }),
@@ -468,7 +468,7 @@ pub fn decide_callback(
             if verdict_str == "done" || verdict_str == "already_done" {
                 effects.push(make_effect(
                     task_id,
-                    linear_issue_id,
+                    issue_identifier,
                     EffectType::AddLabel,
                     "add_label:spec:done",
                     serde_json::json!({ "label": "spec:done" }),
@@ -486,7 +486,7 @@ pub fn decide_callback(
                 let pr_title = pr_title_from_url(pr);
                 effects.push(make_effect(
                     task_id,
-                    linear_issue_id,
+                    issue_identifier,
                     EffectType::AttachUrl,
                     &format!("attach_url:{pr}"),
                     serde_json::json!({ "url": pr, "title": pr_title }),
@@ -498,23 +498,23 @@ pub fn decide_callback(
                 // there is no PR artifact yet. The poller will create the reviewer task
                 // after CreatePr succeeds and the issue moves to Review status.
                 eprintln!(
-                    "callback: engineer DONE but no PR_URL in output for {linear_issue_id} \
+                    "callback: engineer DONE but no PR_URL in output for {issue_identifier} \
                      (task {task_id}) — queuing CreatePr effect, deferring reviewer spawn."
                 );
                 effects.push(make_effect(
                     task_id,
-                    linear_issue_id,
+                    issue_identifier,
                     EffectType::CreatePr,
                     "create_pr",
                     serde_json::json!({
                         "working_dir": working_dir,
-                        "issue_id": linear_issue_id,
+                        "issue_id": issue_identifier,
                         "task_id": task_id,
                     }),
                 ));
                 effects.push(make_effect(
                     task_id,
-                    linear_issue_id,
+                    issue_identifier,
                     EffectType::PostComment,
                     "no_pr_comment",
                     serde_json::json!({
@@ -544,7 +544,7 @@ pub fn decide_callback(
                 };
                 effects.push(make_effect(
                     task_id,
-                    linear_issue_id,
+                    issue_identifier,
                     EffectType::PostPrComment,
                     "reviewer_pr_comment",
                     serde_json::json!({
@@ -581,7 +581,7 @@ pub fn decide_callback(
         );
         effects.push(make_effect(
             task_id,
-            linear_issue_id,
+            issue_identifier,
             EffectType::PostComment,
             "callback_summary_comment",
             serde_json::json!({ "body": comment }),
@@ -592,7 +592,7 @@ pub fn decide_callback(
             // Check review cycle limit.
             if stage == "reviewer" && next_stage == "engineer" {
                 let review_count =
-                    db.count_completed_tasks_for_issue_stage(linear_issue_id, "reviewer")?;
+                    db.count_completed_tasks_for_issue_stage(issue_identifier, "reviewer")?;
                 let max_rounds = stage_cfg
                     .review_round_limit()
                     .unwrap_or(DEFAULT_MAX_REVIEW_ROUNDS) as i64;
@@ -603,13 +603,13 @@ pub fn decide_callback(
                         .unwrap_or("backlog")
                         .to_string();
                     eprintln!(
-                        "review cycle limit ({max_rounds}) reached for issue {linear_issue_id}, \
+                        "review cycle limit ({max_rounds}) reached for issue {issue_identifier}, \
                          escalating to {escalation_status}"
                     );
                     // RIG-388: For GH issues, suppress MoveIssue if the escalation
                     // target matches the stage's own polling status — same loop-prevention
                     // as the retry-cap path above.
-                    let is_gh = linear_issue_id.contains('#');
+                    let is_gh = issue_identifier.contains('#');
                     let targets_self = stage_cfg
                         .linear_status
                         .as_ref()
@@ -617,20 +617,20 @@ pub fn decide_callback(
                     if !(is_gh && targets_self) {
                         effects.push(make_effect(
                             task_id,
-                            linear_issue_id,
+                            issue_identifier,
                             EffectType::MoveIssue,
                             &format!("cycle_limit_escalate:{escalation_status}"),
                             serde_json::json!({ "target_status": escalation_status }),
                         ));
                     } else {
                         eprintln!(
-                            "[CALLBACK] {linear_issue_id}: suppressing MoveIssue→{escalation_status} \
+                            "[CALLBACK] {issue_identifier}: suppressing MoveIssue→{escalation_status} \
                              for GH review-cycle-limit — target matches stage polling status (RIG-388)"
                         );
                     }
                     effects.push(make_effect(
                         task_id,
-                        linear_issue_id,
+                        issue_identifier,
                         EffectType::PostComment,
                         "cycle_limit_comment",
                         serde_json::json!({
@@ -649,7 +649,7 @@ pub fn decide_callback(
             // create the reviewer task when it sees the issue in Review.
             if stage == "engineer" && next_stage == "reviewer" && pr_url.is_none() {
                 eprintln!(
-                    "callback: skipping reviewer spawn for {linear_issue_id} — \
+                    "callback: skipping reviewer spawn for {issue_identifier} — \
                      no PR_URL from engineer output, deferring to poller after CreatePr"
                 );
             } else {
@@ -657,7 +657,7 @@ pub fn decide_callback(
                 let spawn = build_next_stage_task(
                     db,
                     &config,
-                    linear_issue_id,
+                    issue_identifier,
                     next_stage,
                     result,
                     task_id,
@@ -685,7 +685,7 @@ mod tests {
     fn insert_analyst_task(db: &crate::db::Db, task_id: &str, issue_id: &str) -> String {
         let mut t = crate::db::make_test_task(task_id);
         t.status = Status::Completed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "analyst".to_string();
         t.task_type = "pipeline-analyst".to_string();
         t.working_dir = "~/projects/werma".to_string();
@@ -707,7 +707,7 @@ mod tests {
     fn insert_reviewer_task(db: &crate::db::Db, task_id: &str, issue_id: &str) {
         let mut t = crate::db::make_test_task(task_id);
         t.status = Status::Completed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "reviewer".to_string();
         t.task_type = "pipeline-reviewer".to_string();
         t.working_dir = "~/projects/werma".to_string();
@@ -825,7 +825,7 @@ mod tests {
         let cmd = crate::traits::fakes::FakeCommandRunner::new();
         let mut t = crate::db::make_test_task("decide-unk-1");
         t.status = Status::Completed;
-        t.linear_issue_id = "DECIDE-UNK".to_string();
+        t.issue_identifier = "DECIDE-UNK".to_string();
         t.pipeline_stage = "unicorn".to_string();
         db.insert_task(&t).unwrap();
 
@@ -893,7 +893,7 @@ mod tests {
 
         for i in 0..3 {
             let mut t = crate::db::make_test_task(&format!("decide-max-prev-{i}"));
-            t.linear_issue_id = issue_id.to_string();
+            t.issue_identifier = issue_id.to_string();
             t.pipeline_stage = "reviewer".to_string();
             t.task_type = "pipeline-reviewer".to_string();
             db.insert_task(&t).unwrap();
@@ -1032,7 +1032,7 @@ mod tests {
 
         let mut t = crate::db::make_test_task(task_id);
         t.status = crate::models::Status::Completed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "engineer".to_string();
         t.task_type = "pipeline-engineer".to_string();
         t.working_dir = "~/projects/werma".to_string();
@@ -1091,7 +1091,7 @@ mod tests {
 
         let mut t = crate::db::make_test_task(task_id);
         t.status = crate::models::Status::Completed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "engineer".to_string();
         t.task_type = "pipeline-engineer".to_string();
         t.working_dir = "~/projects/werma".to_string();
@@ -1143,7 +1143,7 @@ mod tests {
 
         let mut t = crate::db::make_test_task(task_id);
         t.status = crate::models::Status::Completed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "engineer".to_string();
         t.task_type = "pipeline-engineer".to_string();
         t.working_dir = "~/projects/rigpa/werma".to_string();
@@ -1189,7 +1189,7 @@ mod tests {
 
         let mut t = crate::db::make_test_task(task_id);
         t.status = crate::models::Status::Completed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "engineer".to_string();
         t.task_type = "pipeline-engineer".to_string();
         t.working_dir = "~/projects/rigpa/werma".to_string();
@@ -1209,7 +1209,7 @@ mod tests {
             "engineer DONE with PR_URL must spawn reviewer (RIG-334)"
         );
         assert_eq!(spawned.unwrap().pipeline_stage, "reviewer");
-        assert_eq!(spawned.unwrap().linear_issue_id, issue_id);
+        assert_eq!(spawned.unwrap().issue_identifier, issue_id);
 
         // No CreatePr effect (PR already exists)
         assert!(
@@ -1234,7 +1234,7 @@ mod tests {
 
         let mut t = crate::db::make_test_task(task_id);
         t.status = Status::Completed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "engineer".to_string();
         t.task_type = "pipeline-engineer".to_string();
         t.working_dir = "~/projects/werma".to_string();
@@ -1279,7 +1279,7 @@ mod tests {
 
         let mut t = crate::db::make_test_task(task_id);
         t.status = Status::Completed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "engineer".to_string();
         t.task_type = "pipeline-engineer".to_string();
         t.working_dir = "~/projects/werma".to_string();
@@ -1316,7 +1316,7 @@ mod tests {
 
         let mut t = crate::db::make_test_task(task_id);
         t.status = Status::Completed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "reviewer".to_string();
         t.task_type = "pipeline-reviewer".to_string();
         t.working_dir = "~/projects/werma".to_string();
@@ -1363,7 +1363,7 @@ mod tests {
 
         let mut t = crate::db::make_test_task(task_id);
         t.status = Status::Completed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "reviewer".to_string();
         t.task_type = "pipeline-reviewer".to_string();
         t.working_dir = "~/projects/werma".to_string();
@@ -1430,7 +1430,7 @@ mod tests {
     fn insert_deployer_task(db: &crate::db::Db, task_id: &str, issue_id: &str) {
         let mut t = crate::db::make_test_task(task_id);
         t.status = Status::Completed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "deployer".to_string();
         t.task_type = "pipeline-deployer".to_string();
         t.working_dir = "~/projects/werma".to_string();
@@ -1441,7 +1441,7 @@ mod tests {
     fn insert_failed_deployer_task(db: &crate::db::Db, task_id: &str, issue_id: &str) {
         let mut t = crate::db::make_test_task(task_id);
         t.status = Status::Failed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "deployer".to_string();
         t.task_type = "pipeline-deployer".to_string();
         t.working_dir = "~/projects/werma".to_string();
@@ -1452,7 +1452,7 @@ mod tests {
     fn insert_failed_reviewer_task(db: &crate::db::Db, task_id: &str, issue_id: &str) {
         let mut t = crate::db::make_test_task(task_id);
         t.status = Status::Failed;
-        t.linear_issue_id = issue_id.to_string();
+        t.issue_identifier = issue_id.to_string();
         t.pipeline_stage = "reviewer".to_string();
         t.task_type = "pipeline-reviewer".to_string();
         t.working_dir = "~/projects/werma".to_string();
@@ -2066,7 +2066,7 @@ mod tests {
             let tid = format!("353-cycle-r{i}");
             let mut t = crate::db::make_test_task(&tid);
             t.status = Status::Completed;
-            t.linear_issue_id = issue_id.to_string();
+            t.issue_identifier = issue_id.to_string();
             t.pipeline_stage = "reviewer".to_string();
             t.task_type = "pipeline-reviewer".to_string();
             t.working_dir = "~/projects/werma".to_string();

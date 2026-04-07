@@ -34,11 +34,11 @@ pub(crate) fn truncate_lines(text: &str, max: usize) -> String {
 /// nested worktree creation on retry. The runner will create a fresh worktree from the base repo.
 pub(crate) fn infer_working_dir_from_issue(
     db: &Db,
-    linear_issue_id: &str,
+    issue_identifier: &str,
     config: &UserConfig,
 ) -> String {
     let default_dir = config.repo_dir("werma");
-    if let Ok(tasks) = db.tasks_by_linear_issue(linear_issue_id, None, false) {
+    if let Ok(tasks) = db.tasks_by_linear_issue(issue_identifier, None, false) {
         for task in &tasks {
             if !task.working_dir.is_empty() && task.working_dir != default_dir {
                 // Strip worktree paths to base repo — runner creates worktrees fresh
@@ -122,7 +122,7 @@ mod tests {
             max_turns: 20,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: "issue-xyz".to_string(),
+            issue_identifier: "issue-xyz".to_string(),
             linear_pushed: false,
             pipeline_stage: "analyst".to_string(),
             depends_on: vec![],
@@ -157,7 +157,7 @@ mod tests {
             status: Status::Completed,
             working_dir: "/home/user/project/.trees/feat--RIG-356-pipeline-engineer-stage"
                 .to_string(),
-            linear_issue_id: "issue-372".to_string(),
+            issue_identifier: "issue-372".to_string(),
             task_type: "pipeline-engineer".to_string(),
             ..Default::default()
         };
@@ -187,7 +187,7 @@ mod tests {
             id: "20260310-011".to_string(),
             status: Status::Completed,
             working_dir: "/custom/path/werma".to_string(),
-            linear_issue_id: "issue-abc".to_string(),
+            issue_identifier: "issue-abc".to_string(),
             task_type: "pipeline-analyst".to_string(),
             ..Default::default()
         };
@@ -200,7 +200,7 @@ mod tests {
             id: "20260310-012".to_string(),
             status: Status::Completed,
             working_dir: "~/projects/fathom".to_string(),
-            linear_issue_id: "issue-abc".to_string(),
+            issue_identifier: "issue-abc".to_string(),
             task_type: "pipeline-engineer".to_string(),
             ..Default::default()
         };

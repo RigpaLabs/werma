@@ -63,7 +63,7 @@ pub fn handle_research_completion(
     let summary = extract_tldr(output);
     if !summary.is_empty() {
         linear.comment(
-            &task.linear_issue_id,
+            &task.issue_identifier,
             &format!(
                 "**Research completed** (task: `{}`)\n\n{}\n\n{}",
                 task.id,
@@ -89,7 +89,7 @@ pub fn handle_research_completion(
              3. Search for related research files in docs/research/\n\
              4. Check if findings update any existing memory files in ~/.claude/projects/*/memory/\n\
              5. Output: CURATOR_VERDICT=DONE or CURATOR_VERDICT=SKIPPED (nothing to link)",
-            output_file, task.linear_issue_id
+            output_file, task.issue_identifier
         );
 
         let curator_id = db.next_task_id()?;
@@ -110,7 +110,7 @@ pub fn handle_research_completion(
             max_turns: crate::default_turns("research-curator"),
             allowed_tools: crate::runner::tools_for_type("research-curator", false),
             session_id: String::new(),
-            linear_issue_id: task.linear_issue_id.clone(),
+            issue_identifier: task.issue_identifier.clone(),
             linear_pushed: false,
             pipeline_stage: String::new(),
             depends_on: vec![task.id.clone()],
@@ -129,10 +129,10 @@ pub fn handle_research_completion(
         println!("  + curator task: {} for research {}", curator_id, task.id);
     }
 
-    if let Err(e) = linear.move_issue_by_name(&task.linear_issue_id, "done") {
+    if let Err(e) = linear.move_issue_by_name(&task.issue_identifier, "done") {
         eprintln!(
             "warn: failed to move {} to done after research: {e}",
-            task.linear_issue_id
+            task.issue_identifier
         );
     }
 

@@ -48,18 +48,18 @@ pub fn notify_slack(channel: &str, text: &str) {
 ///
 /// Format: `#NNN task_type` or `RIG-XX #NNN task_type` (with Linear issue).
 /// The short number is extracted from the task ID suffix (e.g. `20260309-001` → `#001`).
-pub fn format_notify_label(task_id: &str, task_type: &str, linear_issue_id: &str) -> String {
+pub fn format_notify_label(task_id: &str, task_type: &str, issue_identifier: &str) -> String {
     let short_num = task_id
         .rsplit('-')
         .next()
         .map(|n| format!("#{n}"))
         .unwrap_or_else(|| task_id.to_string());
 
-    if linear_issue_id.is_empty() {
+    if issue_identifier.is_empty() {
         format!("{short_num} {task_type}")
     } else {
         let cfg = crate::config::UserConfig::load();
-        let display_id = cfg.tracker.display_identifier(linear_issue_id);
+        let display_id = cfg.tracker.display_identifier(issue_identifier);
         format!("{display_id} {short_num} {task_type}")
     }
 }
