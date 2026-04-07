@@ -436,6 +436,52 @@ mod tests {
     }
 
     #[test]
+    fn process_effects_sets_linear_pushed_when_blocking_effect_goes_dead() {
+        // Regression test for RIG-403: when a blocking effect exhausts all retries and
+        // goes `dead`, the task must still be marked linear_pushed=true. Before the fix,
+        // dead effects were counted as "not done" → linear_pushed stayed 0 forever →
+        // daemon re-processed the task every tick → notification spam.
+        let db = Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+        let notifier = FakeNotifier::new();
+        let issue_id = "EFF-104D";
+        let task_id = "eff-104d-t";
+
+        insert_task(&db, task_id, issue_id);
+        linear.set_issue_status(issue_id, "Todo");
+        // All move attempts will fail → effect will exhaust max_attempts and go dead.
+        linear.fail_next_n_moves(99);
+
+        let mut effect = make_effect(
+            task_id,
+            issue_id,
+            EffectType::MoveIssue,
+            serde_json::json!({ "target_status": "in_progress" }),
+        );
+        effect.max_attempts = 1; // one attempt → goes dead immediately on first failure
+
+        db.insert_effects(&[effect]).unwrap();
+
+        // First process_effects call: the effect fails and goes dead.
+        let result = process_effects(&db, &linear, &cmd, &notifier).unwrap();
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.processed, 0);
+
+        // The effect should now be dead.
+        let effects = db.effects_for_task(task_id).unwrap();
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].status, crate::models::EffectStatus::Dead);
+
+        // linear_pushed must be true — dead blocking effects are terminal.
+        let task = db.task(task_id).unwrap().unwrap();
+        assert!(
+            task.linear_pushed,
+            "task.linear_pushed should be true when all blocking effects are dead (RIG-403)"
+        );
+    }
+
+    #[test]
     fn execute_effect_move_issue_uses_move_with_retry() {
         let db = Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
