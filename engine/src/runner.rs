@@ -887,6 +887,9 @@ RESULT_FILE="${{LOG_FILE%.log}}-output.md"
 # Redirect all stderr to log from the start
 exec 2>> "$LOG_FILE"
 
+# Trap unexpected exits so nothing silently disappears under set -e
+trap 'echo "$(date): UNEXPECTED_EXIT code=$?" >> "$LOG_FILE"; werma fail "$TASK_ID" 2>/dev/null || true' ERR
+
 echo "$(date): EXEC_START task=$TASK_ID runtime=qwen-code model={model} approval={approval_mode}" >> "$LOG_FILE"
 
 cd "$WORKING_DIR" || {{
@@ -912,17 +915,21 @@ RESULT_JSON=$(qwen --approval-mode {approval_mode} $MODEL_FLAG --max-session-tur
     exit 1
 }}
 
+# Write to temp file to handle large outputs (avoids ARG_MAX on macOS)
+printf '%s' "$RESULT_JSON" > "$RESULT_FILE.tmp"
+
 # Qwen JSON: array — last element has .result field
-RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.[-1].result // empty' 2>/dev/null)
+RESULT_TEXT=$(jq -r '.[-1].result // empty' "$RESULT_FILE.tmp" 2>/dev/null || true)
 
 if [ -z "$RESULT_TEXT" ]; then
     RESULT_TEXT="$RESULT_JSON"
 fi
 
-SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.[0].session_id // empty' 2>/dev/null || echo "")
+SESSION_ID=$(jq -r '.[0].session_id // empty' "$RESULT_FILE.tmp" 2>/dev/null || true)
 
 # Detect errors in Qwen output
-IS_ERROR=$(echo "$RESULT_JSON" | jq -r '.[-1].is_error // empty' 2>/dev/null || echo "")
+IS_ERROR=$(jq -r '.[-1].is_error // empty' "$RESULT_FILE.tmp" 2>/dev/null || true)
+rm -f "$RESULT_FILE.tmp"
 if [ "$IS_ERROR" = "true" ]; then
     echo "$(date): QWEN returned is_error=true" >> "$LOG_FILE"
     echo "$RESULT_TEXT" > "$RESULT_FILE"
@@ -998,6 +1005,9 @@ RESULT_FILE="${{LOG_FILE%.log}}-output.md"
 # Redirect all stderr to log from the start, so setup errors are captured
 exec 2>> "$LOG_FILE"
 
+# Trap unexpected exits so nothing silently disappears under set -e
+trap 'echo "$(date): UNEXPECTED_EXIT code=$?" >> "$LOG_FILE"; werma fail "$TASK_ID" 2>/dev/null || true' ERR
+
 echo "$(date): EXEC_START task=$TASK_ID model=$MODEL tools=$ALLOWED_TOOLS" >> "$LOG_FILE"
 
 cd "$WORKING_DIR" || {{
@@ -1062,12 +1072,15 @@ RESULT_JSON=$(run_claude "$MODEL") || {{
     fi
 }}
 
+# Write to temp file to handle large outputs (avoids ARG_MAX on macOS)
+printf '%s' "$RESULT_JSON" > "$RESULT_FILE.tmp"
+
 # Strategy 1: extract .result from JSON
-RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.result // empty' 2>/dev/null)
+RESULT_TEXT=$(jq -r '.result // empty' "$RESULT_FILE.tmp" 2>/dev/null || true)
 
 # Strategy 2: if .result is empty/null, try alternative fields
 if [ -z "$RESULT_TEXT" ]; then
-    RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.content // .message // .text // empty' 2>/dev/null)
+    RESULT_TEXT=$(jq -r '.content // .message // .text // empty' "$RESULT_FILE.tmp" 2>/dev/null || true)
 fi
 
 # Strategy 3: if still empty, use raw JSON (better than losing everything)
@@ -1075,17 +1088,18 @@ if [ -z "$RESULT_TEXT" ]; then
     RESULT_TEXT="$RESULT_JSON"
 fi
 
-SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+SESSION_ID=$(jq -r '.session_id // empty' "$RESULT_FILE.tmp" 2>/dev/null || true)
 
 # RIG-291: Extract cost and turns from Claude JSON output
-COST_USD=$(echo "$RESULT_JSON" | jq -r '.total_cost_usd // empty' 2>/dev/null || echo "")
-NUM_TURNS=$(echo "$RESULT_JSON" | jq -r '.num_turns // empty' 2>/dev/null || echo "")
+COST_USD=$(jq -r '.total_cost_usd // empty' "$RESULT_FILE.tmp" 2>/dev/null || true)
+NUM_TURNS=$(jq -r '.num_turns // empty' "$RESULT_FILE.tmp" 2>/dev/null || true)
 
 # RIG-252: Detect error_max_turns — agent ran out of turns without completing.
 # Claude returns is_error=false for this, but the work is incomplete.
-SUBTYPE=$(echo "$RESULT_JSON" | jq -r '.subtype // empty' 2>/dev/null || echo "")
+SUBTYPE=$(jq -r '.subtype // empty' "$RESULT_FILE.tmp" 2>/dev/null || true)
 if [ "$SUBTYPE" = "error_max_turns" ]; then
     echo "$(date): MAX_TURNS_EXIT — agent hit max_turns (subtype=$SUBTYPE), marking failed" >> "$LOG_FILE"
+    rm -f "$RESULT_FILE.tmp"
     # Still save output for inspection
     if [ -n "$RESULT_TEXT" ]; then
         echo "$RESULT_TEXT" > "$RESULT_FILE"
@@ -1096,7 +1110,8 @@ fi
 
 # RIG-299: Detect rate-limit errors in successful JSON responses (exit 0 but API error).
 # Claude CLI may return exit 0 with an error JSON body on overload/rate-limit.
-IS_ERROR=$(echo "$RESULT_JSON" | jq -r '.is_error // empty' 2>/dev/null || echo "")
+IS_ERROR=$(jq -r '.is_error // empty' "$RESULT_FILE.tmp" 2>/dev/null || true)
+rm -f "$RESULT_FILE.tmp"
 if [ "$IS_ERROR" = "true" ] && is_rate_limit 0 "$RESULT_JSON"; then
     if [ -n "$FALLBACK_MODEL" ]; then
         echo "$(date): WARNING: $MODEL returned rate-limit error in JSON, falling back to $FALLBACK_MODEL for task $TASK_ID" >> "$LOG_FILE"
@@ -1107,15 +1122,17 @@ if [ "$IS_ERROR" = "true" ] && is_rate_limit 0 "$RESULT_JSON"; then
             exit 1
         }}
         MODEL="$FALLBACK_MODEL"
-        # Re-extract result fields from fallback response
-        RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.result // empty' 2>/dev/null)
+        # Write fallback response to temp file and re-extract fields
+        printf '%s' "$RESULT_JSON" > "$RESULT_FILE.tmp"
+        RESULT_TEXT=$(jq -r '.result // empty' "$RESULT_FILE.tmp" 2>/dev/null || true)
         if [ -z "$RESULT_TEXT" ]; then
-            RESULT_TEXT=$(echo "$RESULT_JSON" | jq -r '.content // .message // .text // empty' 2>/dev/null)
+            RESULT_TEXT=$(jq -r '.content // .message // .text // empty' "$RESULT_FILE.tmp" 2>/dev/null || true)
         fi
         if [ -z "$RESULT_TEXT" ]; then
             RESULT_TEXT="$RESULT_JSON"
         fi
-        SESSION_ID=$(echo "$RESULT_JSON" | jq -r '.session_id // empty' 2>/dev/null || echo "")
+        SESSION_ID=$(jq -r '.session_id // empty' "$RESULT_FILE.tmp" 2>/dev/null || true)
+        rm -f "$RESULT_FILE.tmp"
     else
         emit_rate_limit_warning "$ORIGINAL_MODEL"
         echo "$(date): FAILED — rate-limit error in JSON, no fallback configured" >> "$LOG_FILE"
@@ -2651,6 +2668,216 @@ mod tests {
         assert!(
             script.contains("is_error"),
             "qwen script should check is_error: {script}"
+        );
+    }
+
+    // ─── RIG-397: Qwen exec script robustness tests ──────────────────────
+
+    #[test]
+    fn generate_qwen_exec_script_result_text_jq_has_or_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-qwen-guard",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "qwen3-coder",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: false,
+            runtime: AgentRuntime::QwenCode,
+            task_type: "research",
+        });
+
+        // RESULT_TEXT jq extraction must have || true guard (not bare 2>/dev/null))
+        assert!(
+            !script.contains("'.[-1].result // empty' 2>/dev/null)"),
+            "RESULT_TEXT jq must not be bare (missing || true): {script}"
+        );
+        assert!(
+            script.contains("'.[-1].result // empty'") && script.contains("|| true"),
+            "RESULT_TEXT jq must have || true guard: {script}"
+        );
+    }
+
+    #[test]
+    fn generate_qwen_exec_script_uses_printf_not_echo_for_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-qwen-printf",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "qwen3-coder",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: false,
+            runtime: AgentRuntime::QwenCode,
+            task_type: "research",
+        });
+
+        // Must not pipe RESULT_JSON through echo to jq (ARG_MAX risk on macOS)
+        assert!(
+            !script.contains("echo \"$RESULT_JSON\" | jq"),
+            "should not use echo RESULT_JSON | jq (ARG_MAX risk): {script}"
+        );
+        // Must use printf or temp file to handle large outputs
+        assert!(
+            script.contains("printf '%s' \"$RESULT_JSON\"") || script.contains("$RESULT_FILE.tmp"),
+            "should use printf or temp file for large JSON: {script}"
+        );
+    }
+
+    #[test]
+    fn generate_qwen_exec_script_has_err_trap() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-qwen-trap",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "qwen3-coder",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: false,
+            runtime: AgentRuntime::QwenCode,
+            task_type: "research",
+        });
+
+        assert!(
+            script.contains("trap '"),
+            "qwen script must have ERR trap for unexpected exits: {script}"
+        );
+        assert!(
+            script.contains("UNEXPECTED_EXIT"),
+            "ERR trap must log UNEXPECTED_EXIT: {script}"
+        );
+        assert!(
+            script.contains("werma fail") && script.contains("ERR"),
+            "ERR trap must call werma fail on unexpected exit: {script}"
+        );
+    }
+
+    // ─── RIG-397: Claude exec script robustness tests ────────────────────
+
+    #[test]
+    fn generate_claude_exec_script_result_text_jq_has_or_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-claude-guard",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "sonnet",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
+        });
+
+        // RESULT_TEXT jq extraction must not be bare (missing || true)
+        assert!(
+            !script.contains("'.result // empty' 2>/dev/null)"),
+            "Claude RESULT_TEXT jq must not be bare (missing || true): {script}"
+        );
+        assert!(
+            !script.contains("'.content // .message // .text // empty' 2>/dev/null)"),
+            "Claude fallback RESULT_TEXT jq must not be bare (missing || true): {script}"
+        );
+    }
+
+    #[test]
+    fn generate_claude_exec_script_uses_printf_not_echo_for_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-claude-printf",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "sonnet",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
+        });
+
+        // Must not pipe RESULT_JSON through echo to jq (ARG_MAX risk on macOS)
+        assert!(
+            !script.contains("echo \"$RESULT_JSON\" | jq"),
+            "should not use echo RESULT_JSON | jq (ARG_MAX risk): {script}"
+        );
+        // Must use printf or temp file to handle large outputs
+        assert!(
+            script.contains("printf '%s' \"$RESULT_JSON\"") || script.contains("$RESULT_FILE.tmp"),
+            "should use printf or temp file for large JSON: {script}"
+        );
+    }
+
+    #[test]
+    fn generate_claude_exec_script_has_err_trap() {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_file = dir.path().join("prompt.txt");
+        let log_file = dir.path().join("test.log");
+        std::fs::write(&prompt_file, "test").unwrap();
+
+        let script = generate_exec_script(&ExecScriptParams {
+            task_id: "test-claude-trap",
+            prompt_file: &prompt_file,
+            output: "",
+            working_dir: dir.path(),
+            tools: "Read,Grep",
+            max_turns: 10,
+            model: "sonnet",
+            fallback_model: None,
+            log_file: &log_file,
+            is_write_task: false,
+            runtime: AgentRuntime::ClaudeCode,
+            task_type: "research",
+        });
+
+        assert!(
+            script.contains("trap '"),
+            "claude script must have ERR trap for unexpected exits: {script}"
+        );
+        assert!(
+            script.contains("UNEXPECTED_EXIT"),
+            "ERR trap must log UNEXPECTED_EXIT: {script}"
+        );
+        assert!(
+            script.contains("werma fail") && script.contains("ERR"),
+            "ERR trap must call werma fail on unexpected exit: {script}"
         );
     }
 
