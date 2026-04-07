@@ -305,6 +305,17 @@ impl super::Db {
         Ok(count)
     }
 
+    /// Read the current callback_attempts counter for a task without incrementing.
+    /// Returns 0 if the task has no recorded attempts yet.
+    pub fn get_callback_attempts(&self, id: &str) -> Result<i32> {
+        let count: i32 = self.conn.query_row(
+            "SELECT COALESCE(callback_attempts, 0) FROM tasks WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     /// Get the `finished_at` timestamp of the most recently failed task for an issue+stage.
     /// Returns `None` if no failed tasks exist or if `finished_at` is NULL.
     /// Used by the poller to impose a cooldown between rapid failure retries (RIG-357).

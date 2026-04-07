@@ -148,6 +148,8 @@ pub fn run(werma_dir: &Path) -> Result<()> {
                 &cmd_runner,
                 &notifier,
                 linear_poll.as_deref(),
+                &mut notified_tasks,
+                NOTIFICATION_COOLDOWN_SECS,
             ) {
                 log_daemon(&log_path, &format!("pipeline callback error: {e}"));
             }
@@ -629,6 +631,8 @@ mod tests {
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
             None,
+            &mut std::collections::HashMap::new(),
+            300,
         );
         assert!(result.is_ok());
     }
@@ -653,6 +657,8 @@ mod tests {
             &FakeCommandRunner::new(),
             &FakeNotifier::new(),
             None,
+            &mut std::collections::HashMap::new(),
+            300,
         )
         .unwrap();
     }
@@ -688,8 +694,15 @@ mod tests {
         assert!(result.is_ok());
 
         // 2. Pipeline callbacks (no tasks — no-op)
-        let result =
-            pipeline::process_completed_tasks(&db, werma_dir.path(), &cmd_runner, &notifier, None);
+        let result = pipeline::process_completed_tasks(
+            &db,
+            werma_dir.path(),
+            &cmd_runner,
+            &notifier,
+            None,
+            &mut std::collections::HashMap::new(),
+            300,
+        );
         assert!(result.is_ok());
 
         // 3. Zombie check (no running tasks — no-op)
