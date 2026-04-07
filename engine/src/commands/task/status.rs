@@ -426,10 +426,11 @@ fn render_plain(db: &Db, limit: Option<usize>) -> Result<()> {
                 (Some(s), None, Status::Running) => format_elapsed_since(s),
                 _ => String::new(),
             };
+            let cfg = crate::config::UserConfig::load();
             let linear = if task.issue_identifier.is_empty() {
-                "-"
+                "-".to_string()
             } else {
-                &task.issue_identifier
+                cfg.tracker.display_identifier(&task.issue_identifier)
             };
             let description = task.prompt.lines().next().unwrap_or(&task.prompt);
             println!(
@@ -446,10 +447,11 @@ fn render_plain(db: &Db, limit: Option<usize>) -> Result<()> {
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
         };
+        let cfg = crate::config::UserConfig::load();
         let linear = if task.issue_identifier.is_empty() {
-            "-"
+            "-".to_string()
         } else {
-            &task.issue_identifier
+            cfg.tracker.display_identifier(&task.issue_identifier)
         };
         let description = task.prompt.lines().next().unwrap_or(&task.prompt);
         println!(

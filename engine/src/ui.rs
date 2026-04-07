@@ -207,7 +207,9 @@ pub fn write_task_line(buf: &mut String, task: &Task, time_str: &str, max_prompt
     let linear = if task.issue_identifier.is_empty() {
         String::new()
     } else {
-        format!("  [{}]", cyan(&task.issue_identifier))
+        let cfg = crate::config::UserConfig::load();
+        let display_id = cfg.tracker.display_identifier(&task.issue_identifier);
+        format!("  [{}]", cyan(&display_id))
     };
     let cost_turns = crate::commands::display::format_cost_turns(task);
     let preview = truncate_line(&task.prompt, max_prompt);
@@ -531,7 +533,9 @@ fn compact_linear_label(issue_identifier: &str) -> String {
     if issue_identifier.is_empty() {
         String::new()
     } else {
-        format!(" [{issue_identifier}]")
+        let cfg = crate::config::UserConfig::load();
+        let display_id = cfg.tracker.display_identifier(issue_identifier);
+        format!(" [{display_id}]")
     }
 }
 
@@ -539,7 +543,9 @@ fn compact_linear_label_colored(issue_identifier: &str) -> String {
     if issue_identifier.is_empty() {
         String::new()
     } else {
-        format!(" {}", cyan(&format!("[{issue_identifier}]")))
+        let cfg = crate::config::UserConfig::load();
+        let display_id = cfg.tracker.display_identifier(issue_identifier);
+        format!(" {}", cyan(&format!("[{display_id}]")))
     }
 }
 
@@ -547,7 +553,9 @@ fn compact_linear_label_dimmed(issue_identifier: &str) -> String {
     if issue_identifier.is_empty() {
         String::new()
     } else {
-        format!(" {}", dimmed(&format!("[{issue_identifier}]")))
+        let cfg = crate::config::UserConfig::load();
+        let display_id = cfg.tracker.display_identifier(issue_identifier);
+        format!(" {}", dimmed(&format!("[{display_id}]")))
     }
 }
 
