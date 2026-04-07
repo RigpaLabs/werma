@@ -85,31 +85,104 @@ fn compute_derived_vars(vars: &mut HashMap<String, String>) {
     };
     vars.entry("nit_policy".to_string()).or_insert(policy);
 
-    // RIG-357: Skip /code-review skill on re-review rounds to avoid hangs on large diffs.
-    // Re-review is detected by a non-empty `previous_review` variable.
+    // ─── RIG-401: runtime-aware computed vars ──────────────────────────────
+    let agent_runtime = vars
+        .get("agent_runtime")
+        .cloned()
+        .unwrap_or_else(|| "claude-code".to_string());
+    let is_claude = agent_runtime == "claude-code";
+    let is_codex = agent_runtime == "codex";
+
+    // RIG-357 + RIG-401: reviewer_skill_section — runtime × re-review aware.
     let is_re_review = vars
         .get("previous_review")
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
-    let skill_section = if is_re_review {
-        "## Re-Review: Skip /code-review skill\n\
-         **Do NOT invoke the `/code-review` skill** on re-review rounds — skip that step entirely. \
-         The previous review context is already provided above. \
+    let reviewer_skill = if is_claude {
+        if is_re_review {
+            "## Re-Review: Skip /code-review skill\n\
+             **Do NOT invoke the `/code-review` skill** on re-review rounds — skip that step entirely. \
+             The previous review context is already provided above. \
+             Focus exclusively on verifying that the previously flagged issues are resolved.\n\n\
+             ## Review Protocol\n\
+             1. ~~Invoke `/code-review` skill~~ — **SKIP on re-review**"
+                .to_string()
+        } else {
+            "## FIRST: Invoke the Code Review skill\n\
+             Before starting the review, invoke the `/code-review` skill using the Skill tool \
+             (skill: \"code-review:code-review\"). This loads the full review checklist and \
+             standards you MUST follow.\n\n\
+             ## Review Protocol\n\
+             1. Invoke `/code-review` skill (Skill tool, skill: \"code-review:code-review\")"
+                .to_string()
+        }
+    } else if is_re_review {
+        "## Re-Review\n\
+         The previous review context is provided above. \
          Focus exclusively on verifying that the previously flagged issues are resolved.\n\n\
          ## Review Protocol\n\
-         1. ~~Invoke `/code-review` skill~~ — **SKIP on re-review**"
+         1. Read the previous review feedback above"
             .to_string()
     } else {
-        "## FIRST: Invoke the Code Review skill\n\
-         Before starting the review, invoke the `/code-review` skill using the Skill tool \
-         (skill: \"code-review:code-review\"). This loads the full review checklist and \
-         standards you MUST follow.\n\n\
+        "## Code Review\n\
+         Review the PR diff thoroughly. Check for correctness, security vulnerabilities, \
+         missing tests, error handling, and code style.\n\n\
          ## Review Protocol\n\
-         1. Invoke `/code-review` skill (Skill tool, skill: \"code-review:code-review\")"
+         1. Read the project's CLAUDE.md for conventions and quality standards"
             .to_string()
     };
     vars.entry("reviewer_skill_section".to_string())
+        .or_insert(reviewer_skill);
+
+    // RIG-401: skill_section — runtime × language → skill invocation or inline guidance.
+    let language = vars.get("language").cloned().unwrap_or_default();
+    let skill_section = match (is_claude, is_codex, language.is_empty()) {
+        (true, _, false) => format!(
+            "### FIRST: Invoke the {language} skill\n\
+             Before writing any code, invoke the `/{language}` skill using the Skill tool \
+             (skill: \"{language}\"). This loads {language}-specific patterns, testing workflow, \
+             and quality standards that you MUST follow throughout implementation."
+        ),
+        (_, true, false) => format!(
+            "### Project Language: {language}\n\
+             Read the project's CLAUDE.md and AGENTS.md for {language} conventions, \
+             testing commands, and quality standards."
+        ),
+        (_, _, false) => format!(
+            "### Project Language: {language}\n\
+             Read the project's CLAUDE.md for {language} conventions and quality standards."
+        ),
+        (_, _, true) => "### Project Conventions\n\
+             Read the project's CLAUDE.md for language conventions, testing commands, \
+             and quality standards."
+            .to_string(),
+    };
+    vars.entry("skill_section".to_string())
         .or_insert(skill_section);
+
+    // RIG-401: verification_section — test_commands or generic fallback.
+    let test_commands = vars.get("test_commands").cloned().unwrap_or_default();
+    let verification_section = if test_commands.is_empty() {
+        "**Pre-commit verification:**\n\
+         Read the project's CLAUDE.md or Makefile to find the lint/test/format commands.\n\
+         Run them ALL. Fix every error before committing."
+            .to_string()
+    } else {
+        format!(
+            "**Pre-commit verification — ALL must pass before committing:**\n\
+             ```bash\n{test_commands}\n```\n\
+             Fix every error before proceeding. Do NOT commit if any step fails."
+        )
+    };
+    vars.entry("verification_section".to_string())
+        .or_insert(verification_section);
+
+    // RIG-401: commit_format_hint — don't hardcode issue prefix format.
+    let commit_format_hint = "Commit using the repo's conventional commit format from CLAUDE.md \
+         (e.g. `ISSUE-ID type: description`). Check CLAUDE.md for the exact prefix convention."
+        .to_string();
+    vars.entry("commit_format_hint".to_string())
+        .or_insert(commit_format_hint);
 }
 
 #[cfg(test)]
@@ -442,6 +515,286 @@ mod tests {
         assert_eq!(
             result["reviewer_skill_section"], "custom skill section",
             "explicit reviewer_skill_section should not be overridden"
+        );
+    }
+
+    // ─── RIG-401: skill_section — runtime × language ────────────────────────
+
+    #[test]
+    fn skill_section_claude_rust_invokes_skill() {
+        let mut templates = IndexMap::new();
+        templates.insert("language".to_string(), "rust".to_string());
+        let runtime = vars(&[("agent_runtime", "claude-code")]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["skill_section"];
+        assert!(
+            section.contains("/rust"),
+            "claude-code + rust should invoke /rust skill, got:\n{section}"
+        );
+        assert!(
+            section.contains("Skill tool"),
+            "claude-code should reference Skill tool, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn skill_section_claude_python_invokes_python_skill() {
+        let mut templates = IndexMap::new();
+        templates.insert("language".to_string(), "python".to_string());
+        let runtime = vars(&[("agent_runtime", "claude-code")]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["skill_section"];
+        assert!(
+            section.contains("/python"),
+            "claude-code + python should invoke /python skill, got:\n{section}"
+        );
+        assert!(
+            !section.contains("/rust"),
+            "claude-code + python should NOT mention /rust, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn skill_section_qwen_python_reads_claude_md() {
+        let mut templates = IndexMap::new();
+        templates.insert("language".to_string(), "python".to_string());
+        let runtime = vars(&[("agent_runtime", "qwen-code")]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["skill_section"];
+        assert!(
+            section.contains("CLAUDE.md"),
+            "qwen-code should reference CLAUDE.md, got:\n{section}"
+        );
+        assert!(
+            !section.contains("Skill tool"),
+            "qwen-code should NOT reference Skill tool, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn skill_section_gemini_reads_claude_md() {
+        let mut templates = IndexMap::new();
+        templates.insert("language".to_string(), "rust".to_string());
+        let runtime = vars(&[("agent_runtime", "gemini-cli")]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["skill_section"];
+        assert!(
+            section.contains("CLAUDE.md"),
+            "gemini-cli should reference CLAUDE.md, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn skill_section_codex_rust_inline_guidance() {
+        let mut templates = IndexMap::new();
+        templates.insert("language".to_string(), "rust".to_string());
+        let runtime = vars(&[("agent_runtime", "codex")]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["skill_section"];
+        assert!(
+            section.contains("AGENTS.md") || section.contains("CLAUDE.md"),
+            "codex should reference project conventions file, got:\n{section}"
+        );
+        assert!(
+            !section.contains("Skill tool"),
+            "codex should NOT reference Skill tool, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn skill_section_no_language_generic_fallback() {
+        let templates = IndexMap::new();
+        let runtime = vars(&[("agent_runtime", "gemini-cli")]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["skill_section"];
+        assert!(
+            section.contains("CLAUDE.md"),
+            "no language should produce generic fallback, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn skill_section_default_runtime_is_claude() {
+        // No agent_runtime set → defaults to claude-code behavior
+        let mut templates = IndexMap::new();
+        templates.insert("language".to_string(), "rust".to_string());
+        let runtime = vars(&[]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["skill_section"];
+        assert!(
+            section.contains("/rust"),
+            "absent agent_runtime should default to claude-code behavior, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn skill_section_not_overridden_by_explicit_value() {
+        let mut templates = IndexMap::new();
+        templates.insert("language".to_string(), "rust".to_string());
+        templates.insert("skill_section".to_string(), "custom skill".to_string());
+        let runtime = vars(&[("agent_runtime", "claude-code")]);
+        let result = build_vars(&templates, &runtime);
+        assert_eq!(
+            result["skill_section"], "custom skill",
+            "explicit skill_section should not be overridden"
+        );
+    }
+
+    // ─── RIG-401: verification_section ──────────────────────────────────────
+
+    #[test]
+    fn verification_section_with_test_commands() {
+        let mut templates = IndexMap::new();
+        templates.insert("test_commands".to_string(), "make check".to_string());
+        let runtime = vars(&[]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["verification_section"];
+        assert!(
+            section.contains("make check"),
+            "should contain test_commands, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn verification_section_empty_commands_generic() {
+        let templates = IndexMap::new();
+        let runtime = vars(&[]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["verification_section"];
+        assert!(
+            section.contains("CLAUDE.md") || section.contains("Makefile"),
+            "no test_commands should reference CLAUDE.md/Makefile, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn verification_section_not_overridden_by_explicit_value() {
+        let mut templates = IndexMap::new();
+        templates.insert("test_commands".to_string(), "make check".to_string());
+        templates.insert(
+            "verification_section".to_string(),
+            "custom verify".to_string(),
+        );
+        let runtime = vars(&[]);
+        let result = build_vars(&templates, &runtime);
+        assert_eq!(
+            result["verification_section"], "custom verify",
+            "explicit verification_section should not be overridden"
+        );
+    }
+
+    // ─── RIG-401: reviewer_skill_section — runtime awareness ────────────────
+
+    #[test]
+    fn reviewer_skill_section_non_claude_first_review_inline_checklist() {
+        let templates = IndexMap::new();
+        let runtime = vars(&[("agent_runtime", "qwen-code")]); // no previous_review
+        let result = build_vars(&templates, &runtime);
+        let section = &result["reviewer_skill_section"];
+        assert!(
+            !section.contains("code-review:code-review"),
+            "non-claude first review should NOT reference /code-review skill, got:\n{section}"
+        );
+        assert!(
+            section.contains("Review") || section.contains("review"),
+            "non-claude first review should contain review instructions, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn reviewer_skill_section_non_claude_re_review_focuses_fixes() {
+        let templates = IndexMap::new();
+        let runtime = vars(&[
+            ("agent_runtime", "gemini-cli"),
+            ("previous_review", "Prior feedback here."),
+        ]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["reviewer_skill_section"];
+        assert!(
+            !section.contains("code-review:code-review"),
+            "non-claude re-review should NOT reference /code-review skill, got:\n{section}"
+        );
+        assert!(
+            section.contains("fix") || section.contains("resolve") || section.contains("verif"),
+            "non-claude re-review should focus on verifying fixes, got:\n{section}"
+        );
+    }
+
+    #[test]
+    fn reviewer_skill_section_claude_default_runtime_first_review() {
+        // No agent_runtime → defaults to claude-code → should invoke /code-review
+        let templates = IndexMap::new();
+        let runtime = vars(&[("issue_id", "RIG-401")]);
+        let result = build_vars(&templates, &runtime);
+        let section = &result["reviewer_skill_section"];
+        assert!(
+            section.contains("code-review:code-review"),
+            "default runtime (claude-code) first review should invoke /code-review, got:\n{section}"
+        );
+    }
+
+    // ─── RIG-401: commit_format_hint ────────────────────────────────────────
+
+    #[test]
+    fn commit_format_hint_computed() {
+        let templates = IndexMap::new();
+        let runtime = vars(&[("issue_id", "RIG-401")]);
+        let result = build_vars(&templates, &runtime);
+        let hint = &result["commit_format_hint"];
+        assert!(
+            hint.contains("CLAUDE.md") || hint.contains("conventional"),
+            "commit_format_hint should reference repo conventions, got:\n{hint}"
+        );
+    }
+
+    // ─── RIG-401: full rendered prompt integration tests ────────────────────
+
+    #[test]
+    fn rendered_engineer_default_pipeline_contains_rust_skill() {
+        use crate::pipeline::loader::load_from_str;
+        let config = load_from_str(include_str!("../../pipelines/default.yaml"), "<test>").unwrap();
+        let stage_cfg = config.stage("engineer").unwrap();
+        let prompt_source =
+            crate::pipeline::loader::resolve_prompt(stage_cfg.prompt.as_ref().unwrap());
+        let mut runtime = HashMap::new();
+        runtime.insert("agent_runtime".to_string(), "claude-code".to_string());
+        runtime.insert("issue_id".to_string(), "RIG-99".to_string());
+        runtime.insert("issue_title".to_string(), "Test".to_string());
+        runtime.insert("issue_description".to_string(), "Desc".to_string());
+        let vars = build_vars(&config.templates, &runtime);
+        let rendered = render_prompt(&prompt_source, &vars);
+        assert!(
+            rendered.contains("/rust"),
+            "default pipeline engineer with claude-code should contain /rust, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("cargo fmt"),
+            "default pipeline should NOT hardcode cargo fmt, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn rendered_engineer_honeyjourney_no_rust_skill() {
+        use crate::pipeline::loader::load_from_str;
+        let config =
+            load_from_str(include_str!("../../pipelines/honeyjourney.yaml"), "<test>").unwrap();
+        let stage_cfg = config.stage("engineer").unwrap();
+        let prompt_source =
+            crate::pipeline::loader::resolve_prompt(stage_cfg.prompt.as_ref().unwrap());
+        let mut runtime = HashMap::new();
+        runtime.insert("agent_runtime".to_string(), "qwen-code".to_string());
+        runtime.insert("issue_id".to_string(), "honeyjourney#20".to_string());
+        runtime.insert("issue_title".to_string(), "Test".to_string());
+        runtime.insert("issue_description".to_string(), "Desc".to_string());
+        let vars = build_vars(&config.templates, &runtime);
+        let rendered = render_prompt(&prompt_source, &vars);
+        assert!(
+            !rendered.contains("/rust"),
+            "honeyjourney pipeline should NOT contain /rust, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("python") || rendered.contains("Python"),
+            "honeyjourney pipeline should reference python, got:\n{rendered}"
         );
     }
 }

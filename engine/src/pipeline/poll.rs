@@ -1290,11 +1290,15 @@ pub(crate) fn build_poll_prompt(
     let previous_review =
         super::callback::lookup_previous_reviewer_handoff(db, identifier).unwrap_or_default();
 
+    // RIG-401: inject agent_runtime so computed vars (skill_section, etc.) are runtime-aware.
+    let agent_runtime = stage_cfg.runtime.unwrap_or_default().to_string();
+
     let mut runtime: HashMap<String, String> = HashMap::new();
     runtime.insert("issue_id".to_string(), identifier.to_string());
     runtime.insert("issue_title".to_string(), title.to_string());
     runtime.insert("issue_description".to_string(), description.to_string());
     runtime.insert("previous_review".to_string(), previous_review);
+    runtime.insert("agent_runtime".to_string(), agent_runtime);
 
     let vars = build_vars(&config.templates, &runtime);
     render_prompt(&prompt_source, &vars)
