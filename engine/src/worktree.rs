@@ -44,13 +44,13 @@ fn derive_branch_type(task: &Task) -> &'static str {
 
 /// Generate a branch name from a task.
 /// Pipeline tasks → type/RIG-XX-pipeline-{stage}-stage (deterministic, enables branch reuse on re-spawn)
-/// Non-pipeline with linear_issue_id → type/RIG-XX-short-name (e.g. feat/RIG-42-add-worktree-support)
+/// Non-pipeline with issue_identifier → type/RIG-XX-short-name (e.g. feat/RIG-42-add-worktree-support)
 /// Without → werma-{task_id}
 pub fn generate_branch_name(task: &Task) -> String {
-    if !task.linear_issue_id.is_empty() {
-        // Try prompt first, then linear_issue_id (which is the identifier like "RIG-42")
+    if !task.issue_identifier.is_empty() {
+        // Try prompt first, then issue_identifier (which is the identifier like "RIG-42")
         let rig_id = extract_linear_id(&task.prompt)
-            .or_else(|| extract_linear_id_prefix(&task.linear_issue_id))
+            .or_else(|| extract_linear_id_prefix(&task.issue_identifier))
             .unwrap_or_default();
 
         // Pipeline tasks: deterministic branch name based on issue + stage.
@@ -527,7 +527,7 @@ mod tests {
     use super::*;
     use crate::models::Status;
 
-    fn test_task(task_type: &str, linear_issue_id: &str, prompt: &str) -> Task {
+    fn test_task(task_type: &str, issue_identifier: &str, prompt: &str) -> Task {
         Task {
             id: "20260310-001".to_string(),
             status: Status::Pending,
@@ -543,7 +543,7 @@ mod tests {
             max_turns: 15,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: linear_issue_id.to_string(),
+            issue_identifier: issue_identifier.to_string(),
             linear_pushed: false,
             pipeline_stage: String::new(),
             depends_on: vec![],

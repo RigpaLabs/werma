@@ -146,7 +146,7 @@ fn mark_zombie(
 
     if !within_cooldown {
         let label =
-            crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);
+            crate::notify::format_notify_label(&task.id, &task.task_type, &task.issue_identifier);
         notifier.notify_macos(
             "werma: zombie task detected",
             &format!("{label} — {reason}"),
@@ -284,7 +284,7 @@ mod tests {
             max_turns: 15,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: "RIG-210".to_string(),
+            issue_identifier: "RIG-210".to_string(),
             linear_pushed: false,
             pipeline_stage: "engineer".to_string(),
             depends_on: vec![],
@@ -349,7 +349,7 @@ mod tests {
             max_turns: 15,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: String::new(),
+            issue_identifier: String::new(),
             linear_pushed: false,
             pipeline_stage: String::new(),
             depends_on: vec![],

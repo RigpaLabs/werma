@@ -16,7 +16,7 @@ impl super::Db {
         Ok(())
     }
 
-    /// Find tasks by linear_issue_id (optionally filter by pipeline_stage and active status).
+    /// Find tasks by issue_identifier (optionally filter by pipeline_stage and active status).
     pub fn tasks_by_linear_issue(
         &self,
         issue_id: &str,
@@ -25,10 +25,10 @@ impl super::Db {
     ) -> Result<Vec<Task>> {
         let base_sql = "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
-                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    allowed_tools, session_id, issue_identifier, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
                     retry_count, retry_after, cost_usd, turns_used, handoff_content
-             FROM tasks WHERE linear_issue_id = ?1";
+             FROM tasks WHERE issue_identifier = ?1";
         let stage_clause = if stage.is_some() {
             " AND pipeline_stage = ?2"
         } else {
@@ -76,7 +76,7 @@ impl super::Db {
     ) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM tasks
-             WHERE linear_issue_id = ?1
+             WHERE issue_identifier = ?1
                AND pipeline_stage = ?2
                AND status = 'completed'",
             params![issue_id, stage],
@@ -89,7 +89,7 @@ impl super::Db {
     pub fn count_all_tasks_for_issue_stage(&self, issue_id: &str, stage: &str) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM tasks
-             WHERE linear_issue_id = ?1
+             WHERE issue_identifier = ?1
                AND pipeline_stage = ?2",
             params![issue_id, stage],
             |row| row.get(0),
@@ -101,7 +101,7 @@ impl super::Db {
     pub fn count_failed_tasks_for_issue_stage(&self, issue_id: &str, stage: &str) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM tasks
-             WHERE linear_issue_id = ?1
+             WHERE issue_identifier = ?1
                AND pipeline_stage = ?2
                AND status = 'failed'",
             params![issue_id, stage],
@@ -115,7 +115,7 @@ impl super::Db {
     pub fn count_all_attempts_for_issue_stage(&self, issue_id: &str, stage: &str) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM tasks
-             WHERE linear_issue_id = ?1
+             WHERE issue_identifier = ?1
                AND pipeline_stage = ?2
                AND status IN ('completed', 'failed')",
             params![issue_id, stage],
@@ -135,7 +135,7 @@ impl super::Db {
             .conn
             .query_row(
                 "SELECT finished_at FROM tasks
-             WHERE linear_issue_id = ?1
+             WHERE issue_identifier = ?1
                AND pipeline_stage != ?2
                AND pipeline_stage != ''
                AND status = 'completed'
@@ -149,16 +149,16 @@ impl super::Db {
         Ok(result)
     }
 
-    /// Find all completed tasks with a linear_issue_id where linear_pushed=false.
+    /// Find all completed tasks with a issue_identifier where linear_pushed=false.
     pub fn unpushed_linear_tasks(&self) -> Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
-                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    allowed_tools, session_id, issue_identifier, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
                     retry_count, retry_after, cost_usd, turns_used, handoff_content
              FROM tasks
-             WHERE linear_issue_id != '' AND linear_pushed = 0 AND status = 'completed'
+             WHERE issue_identifier != '' AND linear_pushed = 0 AND status = 'completed'
              ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map([], |row| Ok(task_from_row(row)))?;
@@ -174,7 +174,7 @@ impl super::Db {
     pub fn has_unpushed_completed_task(&self, issue_id: &str, stage: &str) -> Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM tasks
-             WHERE linear_issue_id = ?1
+             WHERE issue_identifier = ?1
                AND pipeline_stage = ?2
                AND status = 'completed'
                AND linear_pushed = 0",
@@ -201,7 +201,7 @@ impl super::Db {
     ) -> Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM tasks
-             WHERE linear_issue_id = ?1
+             WHERE issue_identifier = ?1
                AND pipeline_stage = ?2
                AND (
                    status IN ('pending', 'running')
@@ -220,7 +220,7 @@ impl super::Db {
     pub fn has_any_review_task_for_issue(&self, issue_id: &str) -> Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM tasks
-             WHERE linear_issue_id = ?1
+             WHERE issue_identifier = ?1
                AND status IN ('pending', 'running')
                AND (pipeline_stage LIKE '%review%' OR type LIKE '%review%')",
             params![issue_id],
@@ -236,7 +236,7 @@ impl super::Db {
     pub fn has_running_pipeline_task_for_issue(&self, issue_id: &str) -> Result<bool> {
         let count: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM tasks
-             WHERE linear_issue_id = ?1
+             WHERE issue_identifier = ?1
                AND pipeline_stage != ''
                AND status = 'running'",
             params![issue_id],
@@ -317,7 +317,7 @@ impl super::Db {
             .conn
             .query_row(
                 "SELECT finished_at FROM tasks
-                 WHERE linear_issue_id = ?1
+                 WHERE issue_identifier = ?1
                    AND pipeline_stage = ?2
                    AND status = 'failed'
                    AND finished_at IS NOT NULL
@@ -379,7 +379,7 @@ mod tests {
 
         let mut task = make_test_task("20260312-001");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-105".to_string();
+        task.issue_identifier = "RIG-105".to_string();
         task.pipeline_stage = "engineer".to_string();
         task.linear_pushed = false;
         db.insert_task(&task).unwrap();
@@ -417,7 +417,7 @@ mod tests {
         // Completed + unpushed (callback pending) → blocked (RIG-209 protection)
         let mut task = make_test_task("20260313-001");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-209".to_string();
+        task.issue_identifier = "RIG-209".to_string();
         task.pipeline_stage = "analyst".to_string();
         task.linear_pushed = false;
         db.insert_task(&task).unwrap();
@@ -447,7 +447,7 @@ mod tests {
         // Failed task → not blocked
         let mut failed_task = make_test_task("20260313-002");
         failed_task.status = Status::Failed;
-        failed_task.linear_issue_id = "RIG-210".to_string();
+        failed_task.issue_identifier = "RIG-210".to_string();
         failed_task.pipeline_stage = "analyst".to_string();
         db.insert_task(&failed_task).unwrap();
 
@@ -459,7 +459,7 @@ mod tests {
         // Pending task → blocked
         let mut pending_task = make_test_task("20260313-003");
         pending_task.status = Status::Pending;
-        pending_task.linear_issue_id = "RIG-211".to_string();
+        pending_task.issue_identifier = "RIG-211".to_string();
         pending_task.pipeline_stage = "engineer".to_string();
         db.insert_task(&pending_task).unwrap();
 
@@ -485,7 +485,7 @@ mod tests {
         // Engineer #1 completes and callback processes it (pushed=true)
         let mut eng1 = make_test_task("20260324-001");
         eng1.status = Status::Completed;
-        eng1.linear_issue_id = "RIG-272".to_string();
+        eng1.issue_identifier = "RIG-272".to_string();
         eng1.pipeline_stage = "engineer".to_string();
         eng1.linear_pushed = true;
         db.insert_task(&eng1).unwrap();
@@ -493,7 +493,7 @@ mod tests {
         // Reviewer completes and callback processes it (pushed=true)
         let mut rev1 = make_test_task("20260324-002");
         rev1.status = Status::Completed;
-        rev1.linear_issue_id = "RIG-272".to_string();
+        rev1.issue_identifier = "RIG-272".to_string();
         rev1.pipeline_stage = "reviewer".to_string();
         rev1.linear_pushed = true;
         db.insert_task(&rev1).unwrap();
@@ -515,7 +515,7 @@ mod tests {
         // Engineer #2 spawned by poller (pending) — now blocks
         let mut eng2 = make_test_task("20260324-003");
         eng2.status = Status::Pending;
-        eng2.linear_issue_id = "RIG-272".to_string();
+        eng2.issue_identifier = "RIG-272".to_string();
         eng2.pipeline_stage = "engineer".to_string();
         db.insert_task(&eng2).unwrap();
 
@@ -540,7 +540,7 @@ mod tests {
         // Analyst completed with a finished_at timestamp
         let mut analyst_task = make_test_task("20260324-001");
         analyst_task.status = Status::Completed;
-        analyst_task.linear_issue_id = "RIG-275".to_string();
+        analyst_task.issue_identifier = "RIG-275".to_string();
         analyst_task.pipeline_stage = "analyst".to_string();
         db.insert_task(&analyst_task).unwrap();
         db.update_task_field("20260324-001", "finished_at", "2026-03-24T10:00:00")
@@ -562,7 +562,7 @@ mod tests {
         // Two completed stages — should return the most recent
         let mut t1 = make_test_task("20260324-001");
         t1.status = Status::Completed;
-        t1.linear_issue_id = "RIG-275".to_string();
+        t1.issue_identifier = "RIG-275".to_string();
         t1.pipeline_stage = "analyst".to_string();
         db.insert_task(&t1).unwrap();
         db.update_task_field("20260324-001", "finished_at", "2026-03-24T09:00:00")
@@ -570,7 +570,7 @@ mod tests {
 
         let mut t2 = make_test_task("20260324-002");
         t2.status = Status::Completed;
-        t2.linear_issue_id = "RIG-275".to_string();
+        t2.issue_identifier = "RIG-275".to_string();
         t2.pipeline_stage = "engineer".to_string();
         db.insert_task(&t2).unwrap();
         db.update_task_field("20260324-002", "finished_at", "2026-03-24T11:00:00")
@@ -588,7 +588,7 @@ mod tests {
         // Non-pipeline task (empty pipeline_stage) — should be excluded
         let mut t1 = make_test_task("20260324-001");
         t1.status = Status::Completed;
-        t1.linear_issue_id = "RIG-275".to_string();
+        t1.issue_identifier = "RIG-275".to_string();
         t1.pipeline_stage = String::new();
         db.insert_task(&t1).unwrap();
         db.update_task_field("20260324-001", "finished_at", "2026-03-24T10:00:00")
@@ -600,7 +600,7 @@ mod tests {
         // Task for a different issue — should not match
         let mut t2 = make_test_task("20260324-002");
         t2.status = Status::Completed;
-        t2.linear_issue_id = "RIG-999".to_string();
+        t2.issue_identifier = "RIG-999".to_string();
         t2.pipeline_stage = "analyst".to_string();
         db.insert_task(&t2).unwrap();
         db.update_task_field("20260324-002", "finished_at", "2026-03-24T12:00:00")
@@ -649,7 +649,7 @@ mod tests {
             max_turns: 10,
             allowed_tools: "Read,Glob,Grep".to_string(),
             session_id: String::new(),
-            linear_issue_id: String::new(),
+            issue_identifier: String::new(),
             linear_pushed: false,
             pipeline_stage: String::new(),
             depends_on: vec![],
@@ -716,19 +716,19 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
 
         let mut t1 = make_test_task("20260312-001");
-        t1.linear_issue_id = "issue-1".to_string();
+        t1.issue_identifier = "issue-1".to_string();
         t1.pipeline_stage = "engineer".to_string();
         db.insert_task(&t1).unwrap();
 
         let mut t2 = make_test_task("20260312-002");
-        t2.linear_issue_id = "issue-1".to_string();
+        t2.issue_identifier = "issue-1".to_string();
         t2.pipeline_stage = "engineer".to_string();
         db.insert_task(&t2).unwrap();
         db.set_task_status("20260312-002", Status::Completed)
             .unwrap();
 
         let mut t3 = make_test_task("20260312-003");
-        t3.linear_issue_id = "issue-1".to_string();
+        t3.issue_identifier = "issue-1".to_string();
         t3.pipeline_stage = "reviewer".to_string();
         db.insert_task(&t3).unwrap();
 
@@ -758,21 +758,21 @@ mod tests {
         assert!(none.is_empty());
     }
 
-    /// RIG-310: pipeline task insert must persist linear_issue_id.
+    /// RIG-310: pipeline task insert must persist issue_identifier.
     #[test]
-    fn pipeline_task_persists_linear_issue_id() {
+    fn pipeline_task_persists_issue_identifier() {
         let db = Db::open_in_memory().unwrap();
 
         let mut task = make_test_task("20260326-310");
-        task.linear_issue_id = "FAT-59".to_string();
+        task.issue_identifier = "FAT-59".to_string();
         task.pipeline_stage = "engineer".to_string();
         task.task_type = "pipeline-engineer".to_string();
         db.insert_task(&task).unwrap();
 
         let read_back = db.task("20260326-310").unwrap().expect("task must exist");
         assert_eq!(
-            read_back.linear_issue_id, "FAT-59",
-            "linear_issue_id must survive insert+read round-trip"
+            read_back.issue_identifier, "FAT-59",
+            "issue_identifier must survive insert+read round-trip"
         );
     }
 
@@ -782,7 +782,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
 
         let mut task = make_test_task("20260326-311");
-        task.linear_issue_id = "FAT-59".to_string();
+        task.issue_identifier = "FAT-59".to_string();
         task.pipeline_stage = "engineer".to_string();
         task.task_type = "pipeline-engineer".to_string();
         db.insert_task(&task).unwrap();
@@ -792,7 +792,7 @@ mod tests {
             .unwrap();
         assert_eq!(found.len(), 1, "must find exactly one engineer task");
         assert_eq!(found[0].id, "20260326-311");
-        assert_eq!(found[0].linear_issue_id, "FAT-59");
+        assert_eq!(found[0].issue_identifier, "FAT-59");
     }
 
     /// RIG-310: migration 004 must NOT clear FAT-* identifiers.
@@ -801,12 +801,12 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
 
         let mut fat_task = make_test_task("20260326-312");
-        fat_task.linear_issue_id = "FAT-42".to_string();
+        fat_task.issue_identifier = "FAT-42".to_string();
         fat_task.pipeline_stage = "analyst".to_string();
         db.insert_task(&fat_task).unwrap();
 
         let mut rig_task = make_test_task("20260326-313");
-        rig_task.linear_issue_id = "RIG-100".to_string();
+        rig_task.issue_identifier = "RIG-100".to_string();
         rig_task.pipeline_stage = "engineer".to_string();
         db.insert_task(&rig_task).unwrap();
 
@@ -822,7 +822,7 @@ mod tests {
             .unwrap()
             .expect("FAT task must exist");
         assert_eq!(
-            fat_read.linear_issue_id, "FAT-42",
+            fat_read.issue_identifier, "FAT-42",
             "migration 004 must preserve FAT-* identifiers"
         );
 
@@ -831,7 +831,7 @@ mod tests {
             .unwrap()
             .expect("RIG task must exist");
         assert_eq!(
-            rig_read.linear_issue_id, "RIG-100",
+            rig_read.issue_identifier, "RIG-100",
             "migration 004 must preserve RIG-* identifiers"
         );
     }
@@ -848,12 +848,12 @@ mod tests {
 
         let mut t1 = make_test_task("20260312-001");
         t1.pipeline_stage = "engineer".to_string();
-        t1.linear_issue_id = "RIG-001".to_string();
+        t1.issue_identifier = "RIG-001".to_string();
         db.insert_task(&t1).unwrap();
 
         let mut t2 = make_test_task("20260312-002");
         t2.pipeline_stage = "reviewer".to_string();
-        t2.linear_issue_id = "RIG-001".to_string();
+        t2.issue_identifier = "RIG-001".to_string();
         db.insert_task(&t2).unwrap();
         db.set_task_status("20260312-002", Status::Running).unwrap();
 
@@ -861,7 +861,7 @@ mod tests {
 
         let mut t4 = make_test_task("20260312-004");
         t4.pipeline_stage = "engineer".to_string();
-        t4.linear_issue_id = "RIG-002".to_string();
+        t4.issue_identifier = "RIG-002".to_string();
         db.insert_task(&t4).unwrap();
         db.set_task_status("20260312-004", Status::Completed)
             .unwrap();
@@ -874,14 +874,14 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
 
         let mut t1 = make_test_task("20260312-001");
-        t1.linear_issue_id = "issue-1".to_string();
+        t1.issue_identifier = "issue-1".to_string();
         t1.pipeline_stage = "reviewer".to_string();
         db.insert_task(&t1).unwrap();
         db.set_task_status("20260312-001", Status::Completed)
             .unwrap();
 
         let mut t2 = make_test_task("20260312-002");
-        t2.linear_issue_id = "issue-1".to_string();
+        t2.issue_identifier = "issue-1".to_string();
         t2.pipeline_stage = "reviewer".to_string();
         db.insert_task(&t2).unwrap();
 
@@ -907,20 +907,20 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
 
         let mut t1 = make_test_task("20260312-010");
-        t1.linear_issue_id = "issue-1".to_string();
+        t1.issue_identifier = "issue-1".to_string();
         t1.pipeline_stage = "reviewer".to_string();
         db.insert_task(&t1).unwrap();
         db.set_task_status("20260312-010", Status::Failed).unwrap();
 
         let mut t2 = make_test_task("20260312-011");
-        t2.linear_issue_id = "issue-1".to_string();
+        t2.issue_identifier = "issue-1".to_string();
         t2.pipeline_stage = "reviewer".to_string();
         db.insert_task(&t2).unwrap();
         db.set_task_status("20260312-011", Status::Failed).unwrap();
 
         // Completed task should NOT be counted
         let mut t3 = make_test_task("20260312-012");
-        t3.linear_issue_id = "issue-1".to_string();
+        t3.issue_identifier = "issue-1".to_string();
         t3.pipeline_stage = "reviewer".to_string();
         db.insert_task(&t3).unwrap();
         db.set_task_status("20260312-012", Status::Completed)
@@ -949,27 +949,27 @@ mod tests {
 
         // 2 failed + 1 completed = 3 total attempts
         let mut t1 = make_test_task("20260331-010");
-        t1.linear_issue_id = "issue-att".to_string();
+        t1.issue_identifier = "issue-att".to_string();
         t1.pipeline_stage = "qa".to_string();
         db.insert_task(&t1).unwrap();
         db.set_task_status("20260331-010", Status::Failed).unwrap();
 
         let mut t2 = make_test_task("20260331-011");
-        t2.linear_issue_id = "issue-att".to_string();
+        t2.issue_identifier = "issue-att".to_string();
         t2.pipeline_stage = "qa".to_string();
         db.insert_task(&t2).unwrap();
         db.set_task_status("20260331-011", Status::Completed)
             .unwrap();
 
         let mut t3 = make_test_task("20260331-012");
-        t3.linear_issue_id = "issue-att".to_string();
+        t3.issue_identifier = "issue-att".to_string();
         t3.pipeline_stage = "qa".to_string();
         db.insert_task(&t3).unwrap();
         db.set_task_status("20260331-012", Status::Failed).unwrap();
 
         // Pending task should NOT be counted
         let mut t4 = make_test_task("20260331-013");
-        t4.linear_issue_id = "issue-att".to_string();
+        t4.issue_identifier = "issue-att".to_string();
         t4.pipeline_stage = "qa".to_string();
         db.insert_task(&t4).unwrap();
 
@@ -996,7 +996,7 @@ mod tests {
 
         let mut task = make_test_task("20260312-001");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-100".to_string();
+        task.issue_identifier = "RIG-100".to_string();
         task.linear_pushed = false;
         db.insert_task(&task).unwrap();
 
@@ -1015,7 +1015,7 @@ mod tests {
 
         let mut task = make_test_task("20260312-001");
         task.status = Status::Completed;
-        // linear_issue_id is empty
+        // issue_identifier is empty
         db.insert_task(&task).unwrap();
 
         let unpushed = db.unpushed_linear_tasks().unwrap();
@@ -1035,7 +1035,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
 
         let mut task = make_test_task("20260325-001");
-        task.linear_issue_id = "RIG-296".to_string();
+        task.issue_identifier = "RIG-296".to_string();
         task.pipeline_stage = "reviewer".to_string();
         db.insert_task(&task).unwrap();
         db.set_task_status("20260325-001", Status::Running).unwrap();
@@ -1050,7 +1050,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
 
         let mut task = make_test_task("20260325-002");
-        task.linear_issue_id = "RIG-296".to_string();
+        task.issue_identifier = "RIG-296".to_string();
         task.pipeline_stage = "reviewer".to_string();
         task.status = Status::Completed;
         db.insert_task(&task).unwrap();
@@ -1064,7 +1064,7 @@ mod tests {
 
         // Non-pipeline task (empty pipeline_stage) should not block
         let mut task = make_test_task("20260325-003");
-        task.linear_issue_id = "RIG-296".to_string();
+        task.issue_identifier = "RIG-296".to_string();
         task.pipeline_stage = String::new();
         db.insert_task(&task).unwrap();
         db.set_task_status("20260325-003", Status::Running).unwrap();
@@ -1089,7 +1089,7 @@ mod tests {
 
         // Two failed tasks with different finished_at
         let mut t1 = make_test_task("20260401-001");
-        t1.linear_issue_id = "RIG-357".to_string();
+        t1.issue_identifier = "RIG-357".to_string();
         t1.pipeline_stage = "reviewer".to_string();
         db.insert_task(&t1).unwrap();
         db.set_task_status("20260401-001", Status::Failed).unwrap();
@@ -1097,7 +1097,7 @@ mod tests {
             .unwrap();
 
         let mut t2 = make_test_task("20260401-002");
-        t2.linear_issue_id = "RIG-357".to_string();
+        t2.issue_identifier = "RIG-357".to_string();
         t2.pipeline_stage = "reviewer".to_string();
         db.insert_task(&t2).unwrap();
         db.set_task_status("20260401-002", Status::Failed).unwrap();
@@ -1115,7 +1115,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
 
         let mut t1 = make_test_task("20260401-003");
-        t1.linear_issue_id = "RIG-357".to_string();
+        t1.issue_identifier = "RIG-357".to_string();
         t1.pipeline_stage = "reviewer".to_string();
         db.insert_task(&t1).unwrap();
         db.set_task_status("20260401-003", Status::Completed)
@@ -1134,7 +1134,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
 
         let mut t1 = make_test_task("20260401-004");
-        t1.linear_issue_id = "RIG-357".to_string();
+        t1.issue_identifier = "RIG-357".to_string();
         t1.pipeline_stage = "engineer".to_string();
         db.insert_task(&t1).unwrap();
         db.set_task_status("20260401-004", Status::Failed).unwrap();

@@ -26,6 +26,7 @@ const MIGRATION_008_SQL: &str = include_str!("../../migrations/008_retry.sql");
 const MIGRATION_009_SQL: &str = include_str!("../../migrations/009_cost_tracking.sql");
 const MIGRATION_010_SQL: &str = include_str!("../../migrations/010_effects_and_handoff.sql");
 const MIGRATION_011_SQL: &str = include_str!("../../migrations/011_runtime.sql");
+const MIGRATION_012_SQL: &str = include_str!("../../migrations/012_rename_linear_issue_id.sql");
 
 pub struct Db {
     pub(super) conn: Connection,
@@ -70,6 +71,24 @@ impl Db {
     }
 
     fn migrate(&self) -> Result<()> {
+        // 012: rename linear_issue_id → issue_identifier.
+        // Run FIRST so all subsequent migrations use the correct column name.
+        // Skip if the column was already renamed (fresh install or re-run).
+        let needs_012: bool = {
+            let mut stmt = self
+                .conn
+                .prepare("PRAGMA table_info(tasks)")
+                .context("preparing PRAGMA table_info")?;
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .context("querying table_info")?
+                .any(|r| r.map(|n| n == "linear_issue_id").unwrap_or(false))
+        };
+        if needs_012 {
+            self.conn
+                .execute_batch(MIGRATION_012_SQL)
+                .context("migration 012_rename_linear_issue_id")?;
+        }
+
         self.conn
             .execute_batch(MIGRATION_SQL)
             .context("running migrations")?;
@@ -87,7 +106,7 @@ impl Db {
                 return Err(e).context("migration 003_estimate");
             }
         }
-        // 004: normalize linear_issue_id from UUIDs to identifiers (idempotent)
+        // 004: normalize issue_identifier from UUIDs to identifiers (idempotent)
         self.conn
             .execute_batch(MIGRATION_004_SQL)
             .context("migration 004_normalize_linear_ids")?;
@@ -207,7 +226,7 @@ pub(super) fn task_from_row(row: &rusqlite::Row<'_>) -> Result<Task> {
         max_turns: row.get(11)?,
         allowed_tools: row.get(12)?,
         session_id: row.get(13)?,
-        linear_issue_id: row.get(14)?,
+        issue_identifier: row.get(14)?,
         linear_pushed: linear_pushed_int != 0,
         pipeline_stage: row.get(16)?,
         depends_on,
@@ -245,7 +264,7 @@ pub(crate) fn make_test_task(id: &str) -> Task {
         max_turns: 15,
         allowed_tools: String::new(),
         session_id: String::new(),
-        linear_issue_id: String::new(),
+        issue_identifier: String::new(),
         linear_pushed: false,
         pipeline_stage: String::new(),
         depends_on: vec![],
@@ -465,7 +484,7 @@ mod tests {
                  max_turns       INTEGER NOT NULL DEFAULT 15,
                  allowed_tools   TEXT DEFAULT '',
                  session_id      TEXT DEFAULT '',
-                 linear_issue_id TEXT DEFAULT '',
+                 issue_identifier TEXT DEFAULT '',
                  linear_pushed   INTEGER DEFAULT 0,
                  pipeline_stage  TEXT DEFAULT '',
                  depends_on      TEXT DEFAULT '[]',

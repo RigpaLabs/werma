@@ -47,7 +47,7 @@ pub fn process_completed_tasks(
                         &log_path,
                         &format!(
                             "[CALLBACK] {}: {} — TTL expired (finished >1h ago), marking pushed",
-                            task.linear_issue_id, task.id
+                            task.issue_identifier, task.id
                         ),
                     );
                     if let Err(e) = db.set_linear_pushed(&task.id, true) {
@@ -55,7 +55,7 @@ pub fn process_completed_tasks(
                             &log_path,
                             &format!(
                                 "[CALLBACK] {}: {} — TTL set_linear_pushed failed: {e}",
-                                task.linear_issue_id, task.id
+                                task.issue_identifier, task.id
                             ),
                         );
                     }
@@ -77,7 +77,7 @@ pub fn process_completed_tasks(
                 &task.id,
                 &task.pipeline_stage,
                 &output,
-                &task.linear_issue_id,
+                &task.issue_identifier,
                 &task.working_dir,
                 cmd_runner,
             ) {
@@ -88,7 +88,7 @@ pub fn process_completed_tasks(
                         &log_path,
                         &format!(
                             "[CALLBACK] {}: {} stage={} -> queued effects",
-                            task.linear_issue_id, task.id, task.pipeline_stage
+                            task.issue_identifier, task.id, task.pipeline_stage
                         ),
                     );
                 }
@@ -110,7 +110,7 @@ pub fn process_completed_tasks(
                             &log_path,
                             &format!(
                                 "[CALLBACK] {}: {} stage={} -> config error (no retry): {e}",
-                                task.linear_issue_id, task.id, task.pipeline_stage
+                                task.issue_identifier, task.id, task.pipeline_stage
                             ),
                         );
                         if let Err(e) = db.set_linear_pushed(&task.id, true) {
@@ -118,14 +118,14 @@ pub fn process_completed_tasks(
                                 &log_path,
                                 &format!(
                                     "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
-                                    task.linear_issue_id, task.id
+                                    task.issue_identifier, task.id
                                 ),
                             );
                         }
                         write_dead_letter(
                             werma_dir,
                             &task.id,
-                            &task.linear_issue_id,
+                            &task.issue_identifier,
                             &task.pipeline_stage,
                             &err_msg,
                             attempts,
@@ -138,7 +138,7 @@ pub fn process_completed_tasks(
                         &log_path,
                         &format!(
                             "[CALLBACK] {}: {} stage={} -> FAILED (attempt {}/{}): {e}",
-                            task.linear_issue_id,
+                            task.issue_identifier,
                             task.id,
                             task.pipeline_stage,
                             attempts,
@@ -150,7 +150,7 @@ pub fn process_completed_tasks(
                             &log_path,
                             &format!(
                                 "[CALLBACK] {}: {} -> ABANDONED after {} attempts",
-                                task.linear_issue_id, task.id, attempts
+                                task.issue_identifier, task.id, attempts
                             ),
                         );
                         if let Err(e) = db.set_linear_pushed(&task.id, true) {
@@ -158,14 +158,14 @@ pub fn process_completed_tasks(
                                 &log_path,
                                 &format!(
                                     "[CALLBACK] {}: {} — set_linear_pushed failed: {e}",
-                                    task.linear_issue_id, task.id
+                                    task.issue_identifier, task.id
                                 ),
                             );
                         }
                         write_dead_letter(
                             werma_dir,
                             &task.id,
-                            &task.linear_issue_id,
+                            &task.issue_identifier,
                             &task.pipeline_stage,
                             &err_msg,
                             attempts,
@@ -188,7 +188,7 @@ pub fn process_completed_tasks(
                         &log_path,
                         &format!(
                             "research completion: {} issue={}",
-                            task.id, task.linear_issue_id
+                            task.id, task.issue_identifier
                         ),
                     );
                 }
@@ -200,12 +200,12 @@ pub fn process_completed_tasks(
                 }
             }
         } else {
-            // Non-pipeline task with linear_issue_id: push comment + move to Done.
+            // Non-pipeline task with issue_identifier: push comment + move to Done.
             // Only act when a linear client is available and the identifier is a Linear issue.
             let Some(client) = linear else {
                 continue;
             };
-            if crate::project::ProjectResolver::tracker(&task.linear_issue_id)
+            if crate::project::ProjectResolver::tracker(&task.issue_identifier)
                 != Some(crate::project::Tracker::Linear)
             {
                 continue;
@@ -215,7 +215,7 @@ pub fn process_completed_tasks(
                     db.set_linear_pushed(&task.id, true)?;
                     log_daemon(
                         &log_path,
-                        &format!("linear push: {} issue={}", task.id, task.linear_issue_id),
+                        &format!("linear push: {} issue={}", task.id, task.issue_identifier),
                     );
                 }
                 Err(e) => {
@@ -263,9 +263,9 @@ fn push_via_linear(
         ));
     }
 
-    linear.comment(&task.linear_issue_id, &comment)?;
+    linear.comment(&task.issue_identifier, &comment)?;
     if task.status == Status::Completed {
-        linear.move_issue_by_name(&task.linear_issue_id, "done")?;
+        linear.move_issue_by_name(&task.issue_identifier, "done")?;
     }
     db.set_linear_pushed(&task.id, true)?;
     Ok(())
@@ -315,7 +315,7 @@ mod tests {
             max_turns: 15,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: "issue-abc".to_string(),
+            issue_identifier: "issue-abc".to_string(),
             linear_pushed: false,
             pipeline_stage: pipeline_stage.to_string(),
             depends_on: vec![],
@@ -360,7 +360,7 @@ mod tests {
 
         let pipeline_task = make_task("20260309-001", "reviewer", "pipeline-reviewer");
         let mut direct_task = make_task("20260309-002", "", "research");
-        direct_task.linear_issue_id = "issue-def".to_string();
+        direct_task.issue_identifier = "issue-def".to_string();
 
         db.insert_task(&pipeline_task).unwrap();
         db.insert_task(&direct_task).unwrap();
@@ -419,7 +419,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
 
         let mut task = make_task("20260309-003", "", "code");
-        task.linear_issue_id = String::new(); // no Linear integration
+        task.issue_identifier = String::new(); // no Linear integration
         db.insert_task(&task).unwrap();
 
         let unpushed = db.unpushed_linear_tasks().unwrap();
@@ -707,7 +707,7 @@ mod tests {
 
         // Direct linear task (code type, no pipeline stage)
         let mut direct = make_task("20260326-d1", "", "code");
-        direct.linear_issue_id = "issue-xyz".to_string();
+        direct.issue_identifier = "issue-xyz".to_string();
         direct.finished_at = Some("2026-03-26T10:00:00".to_string());
         db.insert_task(&direct).unwrap();
 

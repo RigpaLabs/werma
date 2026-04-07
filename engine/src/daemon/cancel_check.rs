@@ -38,12 +38,12 @@ pub fn check_canceled_and_stuck(
 ) -> Result<()> {
     let log_path = werma_dir.join("logs/daemon.log");
 
-    // Gather all active pipeline tasks (pending + running) with a linear_issue_id.
+    // Gather all active pipeline tasks (pending + running) with a issue_identifier.
     let active_tasks: Vec<_> = db
         .list_tasks(Some(Status::Running))?
         .into_iter()
         .chain(db.list_tasks(Some(Status::Pending))?)
-        .filter(|t| !t.linear_issue_id.is_empty() && !t.pipeline_stage.is_empty())
+        .filter(|t| !t.issue_identifier.is_empty() && !t.pipeline_stage.is_empty())
         .collect();
 
     if active_tasks.is_empty() {
@@ -56,12 +56,12 @@ pub fn check_canceled_and_stuck(
 
     for task in &active_tasks {
         // Only query Linear once per issue; reuse cached result for duplicates.
-        let (state_type, team_key) = if let Some(cached) = issue_cache.get(&task.linear_issue_id) {
+        let (state_type, team_key) = if let Some(cached) = issue_cache.get(&task.issue_identifier) {
             cached.clone()
         } else {
-            match linear.get_issue_state_and_team(&task.linear_issue_id) {
+            match linear.get_issue_state_and_team(&task.issue_identifier) {
                 Ok(result) => {
-                    issue_cache.insert(task.linear_issue_id.clone(), result.clone());
+                    issue_cache.insert(task.issue_identifier.clone(), result.clone());
                     result
                 }
                 Err(e) => {
@@ -70,7 +70,7 @@ pub fn check_canceled_and_stuck(
                         &log_path,
                         &format!(
                             "cancel-check: failed to query {} for task {}: {e}",
-                            task.linear_issue_id, task.id
+                            task.issue_identifier, task.id
                         ),
                     );
                     continue;
@@ -84,7 +84,7 @@ pub fn check_canceled_and_stuck(
                 db,
                 &log_path,
                 task,
-                &format!("Linear issue {} was Canceled", task.linear_issue_id),
+                &format!("Linear issue {} was Canceled", task.issue_identifier),
                 notifier,
                 notified_tasks,
                 notification_cooldown_secs,
@@ -103,7 +103,7 @@ pub fn check_canceled_and_stuck(
                 task,
                 &format!(
                     "Linear issue {} moved to team {} (expected one of: {})",
-                    task.linear_issue_id,
+                    task.issue_identifier,
                     team_key,
                     expected_team_keys.join(", ")
                 ),
@@ -126,7 +126,7 @@ pub fn check_canceled_and_stuck(
                         let hours = elapsed.num_seconds() as f64 / 3600.0;
                         let msg = format!(
                             "task {} stuck: running for {hours:.1}h (issue {})",
-                            task.id, task.linear_issue_id
+                            task.id, task.issue_identifier
                         );
                         log_daemon(&log_path, &format!("STUCK: {msg}"));
 
@@ -139,7 +139,7 @@ pub fn check_canceled_and_stuck(
                             let label = crate::notify::format_notify_label(
                                 &task.id,
                                 &task.task_type,
-                                &task.linear_issue_id,
+                                &task.issue_identifier,
                             );
                             notifier.notify_macos("werma: stuck task", &msg, "Basso");
                             notifier.notify_slack(
@@ -235,7 +235,7 @@ fn cancel_task(
 
     if !within_cooldown {
         let label =
-            crate::notify::format_notify_label(&task.id, &task.task_type, &task.linear_issue_id);
+            crate::notify::format_notify_label(&task.id, &task.task_type, &task.issue_identifier);
         notifier.notify_macos(
             "werma: task canceled",
             &format!("{label} — {reason}"),
@@ -281,7 +281,7 @@ mod tests {
             max_turns: 15,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: issue_id.to_string(),
+            issue_identifier: issue_id.to_string(),
             linear_pushed: false,
             pipeline_stage: "engineer".to_string(),
             depends_on: vec![],

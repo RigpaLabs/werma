@@ -154,10 +154,10 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
 
     // Inject issue context for tasks that have a Linear identifier.
     // GitHub identifiers (owner/repo#N) are skipped by the tracker factory.
-    if !task.linear_issue_id.is_empty()
-        && let Some(client) = crate::tracker::linear_for_identifier(&task.linear_issue_id)
+    if !task.issue_identifier.is_empty()
+        && let Some(client) = crate::tracker::linear_for_identifier(&task.issue_identifier)
     {
-        match client.get_issue_by_identifier(&task.linear_issue_id) {
+        match client.get_issue_by_identifier(&task.issue_identifier) {
             Ok((_uuid, identifier, title, description, labels)) => {
                 prompt.push_str("\n---ISSUE---\n");
                 prompt.push_str(&format!("ID: {identifier}\n"));
@@ -173,7 +173,7 @@ pub fn build_prompt(task: &Task, working_dir: &Path, werma_dir: &Path) -> Result
             Err(e) => {
                 eprintln!(
                     "warning: could not fetch Linear issue {}: {e}",
-                    task.linear_issue_id
+                    task.issue_identifier
                 );
             }
         }
@@ -230,7 +230,7 @@ fn fetch_linear_comments(linear: &dyn crate::linear::LinearApi, db: &Db, task: &
     // Convert from local time (stored by chrono::Local::now) to UTC
     // so the comparison against Linear's UTC timestamps is correct.
     let after_iso = if !task.pipeline_stage.is_empty() {
-        db.last_stage_finished_at(&task.linear_issue_id, &task.pipeline_stage)
+        db.last_stage_finished_at(&task.issue_identifier, &task.pipeline_stage)
             .ok()
             .flatten()
             .map(|ts| naive_local_to_utc_iso(&ts))
@@ -238,12 +238,12 @@ fn fetch_linear_comments(linear: &dyn crate::linear::LinearApi, db: &Db, task: &
         None
     };
 
-    let comments = match linear.list_comments(&task.linear_issue_id, after_iso.as_deref()) {
+    let comments = match linear.list_comments(&task.issue_identifier, after_iso.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!(
                 "warning: could not fetch Linear comments for {}: {e}",
-                task.linear_issue_id
+                task.issue_identifier
             );
             return String::new();
         }
@@ -470,9 +470,9 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     // Late-inject Linear comments at execution time (not creation time)
     // so agents see context updates posted after task was created.
     if full_prompt.contains("{linear_comments}") {
-        let comments_text = if task.linear_issue_id.is_empty() {
+        let comments_text = if task.issue_identifier.is_empty() {
             String::new()
-        } else if let Some(client) = crate::tracker::linear_for_identifier(&task.linear_issue_id) {
+        } else if let Some(client) = crate::tracker::linear_for_identifier(&task.issue_identifier) {
             fetch_linear_comments(&*client, db, task)
         } else {
             eprintln!("warning: could not initialize Linear client, skipping comment fetch");
@@ -484,10 +484,10 @@ pub fn run_task(db: &Db, task: &Task, werma_dir: &Path) -> Result<Option<String>
     // Late-inject sub-issues for analyst stage (epic detection).
     // Fetches child issues from Linear so analyst can analyze epics holistically.
     if full_prompt.contains("{sub_issues}") {
-        let sub_issues_text = if task.linear_issue_id.is_empty() {
+        let sub_issues_text = if task.issue_identifier.is_empty() {
             String::new()
-        } else if let Some(client) = crate::tracker::linear_for_identifier(&task.linear_issue_id) {
-            fetch_sub_issues(&*client, &task.linear_issue_id)
+        } else if let Some(client) = crate::tracker::linear_for_identifier(&task.issue_identifier) {
+            fetch_sub_issues(&*client, &task.issue_identifier)
         } else {
             String::new()
         };
@@ -1278,7 +1278,7 @@ mod tests {
             max_turns: 15,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: String::new(),
+            issue_identifier: String::new(),
             linear_pushed: false,
             pipeline_stage: String::new(),
             depends_on: vec![],
@@ -1318,7 +1318,7 @@ mod tests {
             max_turns: 15,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: String::new(),
+            issue_identifier: String::new(),
             linear_pushed: false,
             pipeline_stage: String::new(),
             depends_on: vec![],
@@ -1356,7 +1356,7 @@ mod tests {
             max_turns: 15,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: String::new(),
+            issue_identifier: String::new(),
             linear_pushed: false,
             pipeline_stage: String::new(),
             depends_on: vec![],
@@ -1402,7 +1402,7 @@ mod tests {
             max_turns: 15,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: String::new(),
+            issue_identifier: String::new(),
             linear_pushed: false,
             pipeline_stage: String::new(),
             depends_on: vec!["dep-001".to_string()],
@@ -1452,7 +1452,7 @@ mod tests {
             max_turns: 15,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: String::new(),
+            issue_identifier: String::new(),
             linear_pushed: false,
             pipeline_stage: String::new(),
             depends_on: vec!["dep-002".to_string()],
@@ -1493,7 +1493,7 @@ mod tests {
             max_turns: 15,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: String::new(),
+            issue_identifier: String::new(),
             linear_pushed: false,
             pipeline_stage: String::new(),
             depends_on: vec!["nonexistent-dep".to_string()],
@@ -1928,7 +1928,7 @@ mod tests {
         );
 
         let task = Task {
-            linear_issue_id: "RIG-TEST".to_string(),
+            issue_identifier: "RIG-TEST".to_string(),
             pipeline_stage: "engineer".to_string(),
             ..Default::default()
         };
@@ -1950,7 +1950,7 @@ mod tests {
         let linear = crate::traits::fakes::FakeLinearApi::new();
 
         let task = Task {
-            linear_issue_id: "RIG-EMPTY".to_string(),
+            issue_identifier: "RIG-EMPTY".to_string(),
             pipeline_stage: "engineer".to_string(),
             ..Default::default()
         };

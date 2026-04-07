@@ -77,7 +77,7 @@ pub fn create_initial_stage_task(
         max_turns,
         allowed_tools,
         session_id: String::new(),
-        linear_issue_id: identifier.to_string(),
+        issue_identifier: identifier.to_string(),
         linear_pushed: false,
         pipeline_stage: stage_name.to_string(),
         depends_on: vec![],
@@ -130,7 +130,7 @@ mod tests {
 
         let task = db.task(&task_id).unwrap().unwrap();
         assert_eq!(task.pipeline_stage, "analyst");
-        assert_eq!(task.linear_issue_id, "RIG-200");
+        assert_eq!(task.issue_identifier, "RIG-200");
         assert_eq!(task.status, Status::Pending);
         assert_eq!(task.estimate, 3);
         assert_eq!(task.working_dir, "~/projects/werma");
@@ -172,7 +172,7 @@ mod tests {
         // Prior task has a non-default working dir
         let prior = Task {
             id: "20260313-001".to_string(),
-            linear_issue_id: "RIG-202".to_string(),
+            issue_identifier: "RIG-202".to_string(),
             working_dir: "~/projects/fathom".to_string(),
             pipeline_stage: "analyst".to_string(),
             task_type: "pipeline-analyst".to_string(),

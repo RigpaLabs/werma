@@ -104,11 +104,11 @@ pub fn format_notification_fields(task: &Task) -> String {
 }
 
 pub fn format_task_line(task: &Task, time_str: &str) -> String {
-    let linear = if task.linear_issue_id.is_empty() {
+    let linear = if task.issue_identifier.is_empty() {
         String::new()
     } else {
         let cfg = crate::config::UserConfig::load();
-        let display_id = cfg.tracker.display_identifier(&task.linear_issue_id);
+        let display_id = cfg.tracker.display_identifier(&task.issue_identifier);
         format!("  [{}]", display_id.cyan())
     };
     let cost_turns = format_cost_turns(task);
@@ -149,12 +149,12 @@ pub fn runtime_suffix(task: &Task) -> String {
     }
 }
 
-pub fn compact_linear_label(linear_issue_id: &str) -> String {
-    if linear_issue_id.is_empty() {
+pub fn compact_linear_label(issue_identifier: &str) -> String {
+    if issue_identifier.is_empty() {
         String::new()
     } else {
         let cfg = crate::config::UserConfig::load();
-        let display_id = cfg.tracker.display_identifier(linear_issue_id);
+        let display_id = cfg.tracker.display_identifier(issue_identifier);
         format!(" [{display_id}]")
     }
 }

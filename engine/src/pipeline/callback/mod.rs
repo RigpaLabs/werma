@@ -17,15 +17,15 @@ use crate::traits::CommandRunner;
 /// Insert a task using a raw `&Connection` — for use inside `Db::transaction()` closures.
 ///
 /// Applies the same guard as `Db::insert_task()`: pipeline tasks (non-empty `pipeline_stage`)
-/// must have a non-empty `linear_issue_id`. Without this guard, callback-spawned tasks with
+/// must have a non-empty `issue_identifier`. Without this guard, callback-spawned tasks with
 /// empty identifiers bypass dedup and cause ghost task spawn loops (RIG-387).
 fn insert_task_with_conn(conn: &Connection, task: &crate::models::Task) -> Result<()> {
     // RIG-387: same guard as Db::insert_task() — pipeline tasks must have a non-empty identifier.
-    // Without this, callback-spawned tasks with empty linear_issue_id bypass dedup and cause
+    // Without this, callback-spawned tasks with empty issue_identifier bypass dedup and cause
     // infinite spawn loops (has_any_nonfailed_task_for_issue_stage("", stage) matches nothing).
-    if !task.pipeline_stage.is_empty() && task.linear_issue_id.is_empty() {
+    if !task.pipeline_stage.is_empty() && task.issue_identifier.is_empty() {
         anyhow::bail!(
-            "refusing to insert pipeline task {}: empty linear_issue_id (stage={}). \
+            "refusing to insert pipeline task {}: empty issue_identifier (stage={}). \
              This is a bug — identifier must be set before spawning a pipeline task.",
             task.id,
             task.pipeline_stage
@@ -35,11 +35,11 @@ fn insert_task_with_conn(conn: &Connection, task: &crate::models::Task) -> Resul
     // RIG-388: log the exact identifier value at insert point for daemon diagnosis.
     if !task.pipeline_stage.is_empty() {
         eprintln!(
-            "[DB] insert_task_with_conn: id={} stage={} linear_issue_id={:?} (len={})",
+            "[DB] insert_task_with_conn: id={} stage={} issue_identifier={:?} (len={})",
             task.id,
             task.pipeline_stage,
-            task.linear_issue_id,
-            task.linear_issue_id.len(),
+            task.issue_identifier,
+            task.issue_identifier.len(),
         );
     }
 
@@ -51,7 +51,7 @@ fn insert_task_with_conn(conn: &Connection, task: &crate::models::Task) -> Resul
         "INSERT INTO tasks (
             id, status, priority, created_at, started_at, finished_at,
             type, prompt, output_path, working_dir, model, max_turns,
-            allowed_tools, session_id, linear_issue_id, linear_pushed,
+            allowed_tools, session_id, issue_identifier, linear_pushed,
             pipeline_stage, depends_on, context_files, repo_hash, estimate,
             retry_count, retry_after, cost_usd, turns_used, handoff_content,
             runtime
@@ -78,7 +78,7 @@ fn insert_task_with_conn(conn: &Connection, task: &crate::models::Task) -> Resul
             task.max_turns,
             task.allowed_tools,
             task.session_id,
-            task.linear_issue_id,
+            task.issue_identifier,
             linear_pushed,
             task.pipeline_stage,
             depends_on,
@@ -97,16 +97,16 @@ fn insert_task_with_conn(conn: &Connection, task: &crate::models::Task) -> Resul
     // RIG-388: read-back verification — confirm the identifier was persisted correctly.
     if !task.pipeline_stage.is_empty() {
         let stored: String = conn.query_row(
-            "SELECT linear_issue_id FROM tasks WHERE id = ?1",
+            "SELECT issue_identifier FROM tasks WHERE id = ?1",
             params![task.id],
             |row| row.get(0),
         )?;
-        if stored != task.linear_issue_id {
+        if stored != task.issue_identifier {
             anyhow::bail!(
-                "RIG-388 read-back mismatch: task {} inserted linear_issue_id={:?} \
+                "RIG-388 read-back mismatch: task {} inserted issue_identifier={:?} \
                  but DB contains {:?} — possible rusqlite binding or DB corruption bug",
                 task.id,
-                task.linear_issue_id,
+                task.issue_identifier,
                 stored,
             );
         }
@@ -127,7 +127,7 @@ pub fn callback(
     task_id: &str,
     stage: &str,
     result: &str,
-    linear_issue_id: &str,
+    issue_identifier: &str,
     working_dir: &str,
     cmd: &dyn CommandRunner,
 ) -> Result<()> {
@@ -136,7 +136,7 @@ pub fn callback(
         task_id,
         stage,
         result,
-        linear_issue_id,
+        issue_identifier,
         working_dir,
         cmd,
     )?;
@@ -191,7 +191,7 @@ pub fn callback(
     // Log for observability: what will the effect processor execute?
     if !decision.effects.is_empty() {
         eprintln!(
-            "[CALLBACK] {linear_issue_id}: queued {} effects for task {task_id}",
+            "[CALLBACK] {issue_identifier}: queued {} effects for task {task_id}",
             decision.effects.len()
         );
     } else if decision.internal.spawn_task.is_none() {
@@ -199,7 +199,7 @@ pub fn callback(
         // to prevent the effect processor from looping on this task indefinitely.
         db.set_linear_pushed(task_id, true)?;
         eprintln!(
-            "[CALLBACK] {linear_issue_id}: no effects and no spawn for task {task_id} — marking linear_pushed=true"
+            "[CALLBACK] {issue_identifier}: no effects and no spawn for task {task_id} — marking linear_pushed=true"
         );
     }
 
@@ -235,7 +235,7 @@ mod tests {
         let mut task = crate::db::make_test_task("20260314-232b");
         task.id = "20260314-232b".to_string();
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-232b".to_string();
+        task.issue_identifier = "RIG-232b".to_string();
         task.pipeline_stage = "engineer".to_string();
         db.insert_task(&task).unwrap();
 
@@ -293,7 +293,7 @@ mod tests {
 
         let mut task = crate::db::make_test_task("20260315-253");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-253".to_string();
+        task.issue_identifier = "RIG-253".to_string();
         task.pipeline_stage = "analyst".to_string();
         db.insert_task(&task).unwrap();
 
@@ -347,7 +347,7 @@ mod tests {
 
         let mut task = crate::db::make_test_task("20260324-274");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-274".to_string();
+        task.issue_identifier = "RIG-274".to_string();
         task.pipeline_stage = "analyst".to_string();
         db.insert_task(&task).unwrap();
 
@@ -384,7 +384,7 @@ mod tests {
 
         let mut task = crate::db::make_test_task("20260324-274c");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-274c".to_string();
+        task.issue_identifier = "RIG-274c".to_string();
         task.pipeline_stage = "analyst".to_string();
         db.insert_task(&task).unwrap();
 
@@ -423,7 +423,7 @@ mod tests {
 
         let mut task = crate::db::make_test_task("20260324-275");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-274b".to_string();
+        task.issue_identifier = "RIG-274b".to_string();
         task.pipeline_stage = "analyst".to_string();
         db.insert_task(&task).unwrap();
 
@@ -497,7 +497,7 @@ mod tests {
             max_turns: 50,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: "RIG-ESC".to_string(),
+            issue_identifier: "RIG-ESC".to_string(),
             linear_pushed: false,
             pipeline_stage: "reviewer".to_string(),
             depends_on: vec![],
@@ -576,7 +576,7 @@ mod tests {
             max_turns: 50,
             allowed_tools: String::new(),
             session_id: String::new(),
-            linear_issue_id: "RIG-UNK".to_string(),
+            issue_identifier: "RIG-UNK".to_string(),
             linear_pushed: false,
             pipeline_stage: "reviewer".to_string(),
             depends_on: vec![],
@@ -620,7 +620,7 @@ mod tests {
 
         let mut task = crate::db::make_test_task("20260325-252a");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-252a".to_string();
+        task.issue_identifier = "RIG-252a".to_string();
         task.pipeline_stage = "engineer".to_string();
         db.insert_task(&task).unwrap();
 
@@ -667,7 +667,7 @@ mod tests {
 
         let mut task = crate::db::make_test_task("20260325-252b");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-252b".to_string();
+        task.issue_identifier = "RIG-252b".to_string();
         task.pipeline_stage = "engineer".to_string();
         db.insert_task(&task).unwrap();
 
@@ -702,7 +702,7 @@ mod tests {
 
         let mut task = crate::db::make_test_task("20260325-252c");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-252c".to_string();
+        task.issue_identifier = "RIG-252c".to_string();
         task.pipeline_stage = "engineer".to_string();
         db.insert_task(&task).unwrap();
 
@@ -741,7 +741,7 @@ mod tests {
         for i in 0..3 {
             let mut prev = crate::db::make_test_task(&format!("20260326-f{i}"));
             prev.status = Status::Completed;
-            prev.linear_issue_id = "RIG-202a".to_string();
+            prev.issue_identifier = "RIG-202a".to_string();
             prev.pipeline_stage = "reviewer".to_string();
             db.insert_task(&prev).unwrap();
             db.set_task_status(&format!("20260326-f{i}"), Status::Failed)
@@ -750,7 +750,7 @@ mod tests {
 
         let mut task = crate::db::make_test_task("20260326-202a");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-202a".to_string();
+        task.issue_identifier = "RIG-202a".to_string();
         task.pipeline_stage = "reviewer".to_string();
         db.insert_task(&task).unwrap();
 
@@ -804,14 +804,14 @@ mod tests {
 
         let mut prev = crate::db::make_test_task("20260326-f0b");
         prev.status = Status::Completed;
-        prev.linear_issue_id = "RIG-202b".to_string();
+        prev.issue_identifier = "RIG-202b".to_string();
         prev.pipeline_stage = "reviewer".to_string();
         db.insert_task(&prev).unwrap();
         db.set_task_status("20260326-f0b", Status::Failed).unwrap();
 
         let mut task = crate::db::make_test_task("20260326-202b");
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-202b".to_string();
+        task.issue_identifier = "RIG-202b".to_string();
         task.pipeline_stage = "reviewer".to_string();
         db.insert_task(&task).unwrap();
 
@@ -851,10 +851,10 @@ mod tests {
 
     // ─── RIG-387: insert_task_with_conn guard + runtime column ───────────────
 
-    /// insert_task_with_conn must reject pipeline tasks with empty linear_issue_id.
+    /// insert_task_with_conn must reject pipeline tasks with empty issue_identifier.
     ///
     /// Bug: the raw-connection INSERT path had no validation, allowing tasks with
-    /// empty linear_issue_id to be inserted. The dedup query
+    /// empty issue_identifier to be inserted. The dedup query
     /// `has_any_nonfailed_task_for_issue_stage("", stage)` then matches nothing,
     /// so the poll loop spawns a new task on every tick — 41+ ghost tasks per session.
     #[test]
@@ -864,22 +864,22 @@ mod tests {
         let result = db.transaction(|conn| {
             let mut task = crate::db::make_test_task("20260403-387a");
             task.pipeline_stage = "engineer".to_string();
-            task.linear_issue_id = String::new(); // empty — must be rejected
+            task.issue_identifier = String::new(); // empty — must be rejected
             insert_task_with_conn(conn, &task)
         });
 
         assert!(
             result.is_err(),
-            "insert_task_with_conn must reject pipeline tasks with empty linear_issue_id"
+            "insert_task_with_conn must reject pipeline tasks with empty issue_identifier"
         );
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("empty linear_issue_id"),
-            "error must mention empty linear_issue_id, got: {msg}"
+            msg.contains("empty issue_identifier"),
+            "error must mention empty issue_identifier, got: {msg}"
         );
     }
 
-    /// Non-pipeline tasks (empty pipeline_stage) with empty linear_issue_id must still be accepted.
+    /// Non-pipeline tasks (empty pipeline_stage) with empty issue_identifier must still be accepted.
     #[test]
     fn insert_task_with_conn_allows_non_pipeline_empty_identifier() {
         let db = crate::db::Db::open_in_memory().unwrap();
@@ -887,7 +887,7 @@ mod tests {
         db.transaction(|conn| {
             let mut task = crate::db::make_test_task("20260403-387b");
             task.pipeline_stage = String::new(); // non-pipeline
-            task.linear_issue_id = String::new(); // empty — OK for non-pipeline
+            task.issue_identifier = String::new(); // empty — OK for non-pipeline
             insert_task_with_conn(conn, &task)
         })
         .unwrap();
@@ -907,7 +907,7 @@ mod tests {
         db.transaction(|conn| {
             let mut task = crate::db::make_test_task("20260403-387c");
             task.pipeline_stage = "engineer".to_string();
-            task.linear_issue_id = "RIG-387".to_string();
+            task.issue_identifier = "RIG-387".to_string();
             task.runtime = crate::models::AgentRuntime::QwenCode;
             insert_task_with_conn(conn, &task)
         })
@@ -935,7 +935,7 @@ mod tests {
             let mut task = crate::db::make_test_task("20260327-zeroA");
             task.id = "20260327-zeroA".to_string();
             task.status = Status::Completed;
-            task.linear_issue_id = "RIG-zeroA".to_string();
+            task.issue_identifier = "RIG-zeroA".to_string();
             task.pipeline_stage = "reviewer".to_string();
             db.insert_task(&task).unwrap();
 

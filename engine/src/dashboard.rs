@@ -50,10 +50,10 @@ fn show_agents(db: &Db) -> Result<()> {
         println!();
         println!(" running:");
         for task in &running {
-            let linear = if task.linear_issue_id.is_empty() {
+            let linear = if task.issue_identifier.is_empty() {
                 String::new()
             } else {
-                format!(" [{}]", task.linear_issue_id)
+                format!(" [{}]", task.issue_identifier)
             };
             let retry_info = if task.retry_count > 0 {
                 format!(" (retry #{})", task.retry_count)
@@ -75,10 +75,10 @@ fn show_agents(db: &Db) -> Result<()> {
         println!();
         println!(" retry pending:");
         for task in &retry_pending {
-            let linear = if task.linear_issue_id.is_empty() {
+            let linear = if task.issue_identifier.is_empty() {
                 String::new()
             } else {
-                format!(" [{}]", task.linear_issue_id)
+                format!(" [{}]", task.issue_identifier)
             };
             let after = task.retry_after.as_deref().unwrap_or("?");
             println!(

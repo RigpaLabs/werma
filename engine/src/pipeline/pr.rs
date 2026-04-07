@@ -89,23 +89,23 @@ pub(crate) fn pr_exists_for_issue(
 /// For GitHub issues, produces:
 ///   `\n\nIssue: https://github.com/{owner}/{repo}/issues/{number}`
 /// Fallback (Linear without workspace env): still includes the identifier.
-fn build_issue_link(linear_issue_id: &str, _task_id: &str) -> String {
-    if let Some(url) = crate::project::ProjectResolver::issue_url(linear_issue_id) {
-        let label = match crate::project::ProjectResolver::tracker(linear_issue_id) {
+fn build_issue_link(issue_identifier: &str, _task_id: &str) -> String {
+    if let Some(url) = crate::project::ProjectResolver::issue_url(issue_identifier) {
+        let label = match crate::project::ProjectResolver::tracker(issue_identifier) {
             Some(crate::project::Tracker::Linear) => "Linear",
             _ => "Issue",
         };
         format!("\n\n{label}: {url}")
     } else {
-        let label = match crate::project::ProjectResolver::tracker(linear_issue_id) {
+        let label = match crate::project::ProjectResolver::tracker(issue_identifier) {
             Some(crate::project::Tracker::Linear) => "Linear",
             _ => "Issue",
         };
         eprintln!(
-            "auto-PR: could not generate issue URL for {linear_issue_id} — \
+            "auto-PR: could not generate issue URL for {issue_identifier} — \
                  for Linear issues, set WERMA_LINEAR_WORKSPACE to your workspace slug."
         );
-        format!("\n\n{label}: {linear_issue_id}")
+        format!("\n\n{label}: {issue_identifier}")
     }
 }
 
@@ -118,12 +118,12 @@ fn build_issue_link(linear_issue_id: &str, _task_id: &str) -> String {
 pub(crate) fn auto_create_pr(
     cmd: &dyn CommandRunner,
     working_dir: &str,
-    linear_issue_id: &str,
+    issue_identifier: &str,
     task_id: &str,
 ) -> Result<Option<String>> {
     let working_dir = resolve_home(working_dir);
     eprintln!(
-        "[auto-PR] {linear_issue_id} (task {task_id}): working_dir={}",
+        "[auto-PR] {issue_identifier} (task {task_id}): working_dir={}",
         working_dir.display()
     );
 
@@ -132,7 +132,7 @@ pub(crate) fn auto_create_pr(
         .run("git", &["branch", "--show-current"], Some(&working_dir))
         .context("git branch --show-current")?;
     let branch_name = branch_output.stdout_str();
-    eprintln!("[auto-PR] {linear_issue_id}: branch={branch_name:?}");
+    eprintln!("[auto-PR] {issue_identifier}: branch={branch_name:?}");
 
     // 2. RIG-355: return Err (not Ok(None)) when on main/master — this is always
     // unexpected for CreatePr effects (engineer tasks run in worktrees). Returning
@@ -203,7 +203,7 @@ pub(crate) fn auto_create_pr(
         let body = lines.next().unwrap_or("");
         if !url.is_empty() {
             // RIG-380: if the PR body is missing the required Linear URL, update it.
-            let expected_link = build_issue_link(linear_issue_id, task_id);
+            let expected_link = build_issue_link(issue_identifier, task_id);
             if !body.contains("linear.app/") && expected_link.contains("linear.app/") {
                 let new_body =
                     format!("## Summary\nPipeline engineer task `{task_id}`.{expected_link}");
@@ -212,15 +212,15 @@ pub(crate) fn auto_create_pr(
                     &["pr", "edit", &url, "--body", &new_body],
                     Some(&working_dir),
                 );
-                eprintln!("[auto-PR] {linear_issue_id}: updated PR body with Linear URL");
+                eprintln!("[auto-PR] {issue_identifier}: updated PR body with Linear URL");
             }
             return Ok(Some(url));
         }
     }
 
     // 6. Create PR
-    let pr_title = format!("{linear_issue_id} feat: implementation");
-    let issue_link = build_issue_link(linear_issue_id, task_id);
+    let pr_title = format!("{issue_identifier} feat: implementation");
+    let issue_link = build_issue_link(issue_identifier, task_id);
     let pr_body = format!("## Summary\nPipeline engineer task `{task_id}`.{issue_link}");
 
     let output = cmd
@@ -246,7 +246,7 @@ pub(crate) fn auto_create_pr(
     } else {
         let stderr = output.stderr_str();
         Err(anyhow::anyhow!(
-            "gh pr create failed for {linear_issue_id}: {stderr}"
+            "gh pr create failed for {issue_identifier}: {stderr}"
         ))
     }
 }

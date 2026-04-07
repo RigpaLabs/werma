@@ -178,7 +178,7 @@ fn callback_done_moves_issue() {
     // Insert a completed engineer task (callback needs it for dedup guard timestamp)
     let mut task = make_test_task("20260313-100");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-200".to_string();
+    task.issue_identifier = "RIG-200".to_string();
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
@@ -223,7 +223,7 @@ fn callback_move_failure_returns_error() {
 
     let mut task = make_test_task("20260313-101");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-201".to_string();
+    task.issue_identifier = "RIG-201".to_string();
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
@@ -267,7 +267,7 @@ fn poll_no_duplicate_while_callback_pending() {
     // Pre-insert a completed but unpushed task (callback pending)
     let mut task = make_test_task("20260313-102");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-202".to_string();
+    task.issue_identifier = "RIG-202".to_string();
     task.pipeline_stage = "engineer".to_string();
     task.linear_pushed = false; // callback hasn't fired yet
     db.insert_task(&task).unwrap();
@@ -310,7 +310,7 @@ fn poll_allows_respawn_after_rejection_cycle() {
     // Engineer #1 completed and callback already processed (pushed=true)
     let mut eng1 = make_test_task("20260324-101");
     eng1.status = Status::Completed;
-    eng1.linear_issue_id = "RIG-277".to_string();
+    eng1.issue_identifier = "RIG-277".to_string();
     eng1.pipeline_stage = "engineer".to_string();
     eng1.linear_pushed = true;
     db.insert_task(&eng1).unwrap();
@@ -318,7 +318,7 @@ fn poll_allows_respawn_after_rejection_cycle() {
     // Reviewer also completed and processed
     let mut rev1 = make_test_task("20260324-102");
     rev1.status = Status::Completed;
-    rev1.linear_issue_id = "RIG-277".to_string();
+    rev1.issue_identifier = "RIG-277".to_string();
     rev1.pipeline_stage = "reviewer".to_string();
     rev1.linear_pushed = true;
     db.insert_task(&rev1).unwrap();
@@ -362,7 +362,7 @@ fn poll_skips_review_when_review_task_exists() {
     // Pre-insert a running review task for this issue (any review type)
     let mut task = make_test_task("20260313-103");
     task.status = Status::Running;
-    task.linear_issue_id = "RIG-203".to_string();
+    task.issue_identifier = "RIG-203".to_string();
     task.pipeline_stage = "reviewer".to_string();
     task.task_type = "pipeline-reviewer".to_string();
     db.insert_task(&task).unwrap();
@@ -389,10 +389,10 @@ fn poll_skips_review_when_review_task_exists() {
     );
 }
 
-// ─── Test 5: poll_sets_linear_issue_id (RIG-137 regression guard) ───────────
+// ─── Test 5: poll_sets_issue_identifier (RIG-137 regression guard) ───────────
 
 #[test]
-fn poll_sets_linear_issue_id() {
+fn poll_sets_issue_identifier() {
     ensure_working_dir();
     let db = Db::open_in_memory().unwrap();
     let linear = FakeLinearApi::new();
@@ -409,14 +409,14 @@ fn poll_sets_linear_issue_id() {
 
     poll(&db, &linear, &cmd).unwrap();
 
-    // The created task should have linear_issue_id set to the identifier
+    // The created task should have issue_identifier set to the identifier
     let tasks = db
         .tasks_by_linear_issue("RIG-204", Some("engineer"), false)
         .unwrap();
     assert_eq!(tasks.len(), 1, "poll should create exactly one task");
     assert_eq!(
-        tasks[0].linear_issue_id, "RIG-204",
-        "linear_issue_id should be set to the identifier"
+        tasks[0].issue_identifier, "RIG-204",
+        "issue_identifier should be set to the identifier"
     );
 }
 
@@ -466,7 +466,7 @@ fn callback_retry_after_move_failure() {
 
     let mut task = make_test_task("20260313-300");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-300".to_string();
+    task.issue_identifier = "RIG-300".to_string();
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
@@ -505,7 +505,7 @@ fn callback_all_retries_exhausted() {
 
     let mut task = make_test_task("20260313-301");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-301".to_string();
+    task.issue_identifier = "RIG-301".to_string();
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
@@ -548,7 +548,7 @@ fn callback_daemon_retry_after_failure() {
 
     let mut task = make_test_task("20260313-302");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-302".to_string();
+    task.issue_identifier = "RIG-302".to_string();
     task.pipeline_stage = "reviewer".to_string();
     db.insert_task(&task).unwrap();
 
@@ -612,7 +612,7 @@ fn callback_failure_sends_notifications() {
 
     let mut task = make_test_task("20260313-303");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-303".to_string();
+    task.issue_identifier = "RIG-303".to_string();
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
@@ -667,7 +667,7 @@ fn poll_creates_research_task() {
     let tasks = db.tasks_by_linear_issue("RIG-208", None, false).unwrap();
     assert_eq!(tasks.len(), 1, "poll should create one research task");
     assert_eq!(tasks[0].task_type, "research");
-    assert_eq!(tasks[0].linear_issue_id, "RIG-208");
+    assert_eq!(tasks[0].issue_identifier, "RIG-208");
 
     // Research issues get moved to in_progress
     let moves = linear.move_calls.borrow();
@@ -900,7 +900,7 @@ fn poll_analyst_skips_if_engineer_ran() {
     // Pre-insert a completed engineer task for this issue
     let mut task = make_test_task("20260313-216");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-216".to_string();
+    task.issue_identifier = "RIG-216".to_string();
     task.pipeline_stage = "engineer".to_string();
     task.task_type = "pipeline-engineer".to_string();
     db.insert_task(&task).unwrap();
@@ -936,7 +936,7 @@ fn callback_dedup_guard_blocks_duplicate() {
 
     let mut task = make_test_task("20260313-217");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-217".to_string();
+    task.issue_identifier = "RIG-217".to_string();
     task.pipeline_stage = "reviewer".to_string();
     db.insert_task(&task).unwrap();
 
@@ -985,7 +985,7 @@ fn callback_empty_output_posts_comment() {
 
     let mut task = make_test_task("20260313-218");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-218".to_string();
+    task.issue_identifier = "RIG-218".to_string();
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
@@ -1018,7 +1018,7 @@ fn callback_unknown_stage_noop() {
 
     let mut task = make_test_task("20260313-219");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-219".to_string();
+    task.issue_identifier = "RIG-219".to_string();
     task.pipeline_stage = "nonexistent_stage".to_string();
     db.insert_task(&task).unwrap();
 
@@ -1047,7 +1047,7 @@ fn callback_analyst_estimate_updates_linear() {
 
     let mut task = make_test_task("20260313-220");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-220".to_string();
+    task.issue_identifier = "RIG-220".to_string();
     task.pipeline_stage = "analyst".to_string();
     db.insert_task(&task).unwrap();
 
@@ -1081,7 +1081,7 @@ fn callback_analyst_adds_done_label() {
 
     let mut task = make_test_task("20260313-219b-done");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-219b-done".to_string();
+    task.issue_identifier = "RIG-219b-done".to_string();
     task.pipeline_stage = "analyst".to_string();
     db.insert_task(&task).unwrap();
 
@@ -1116,7 +1116,7 @@ fn callback_analyst_blocked_adds_blocked_label() {
 
     let mut task = make_test_task("20260313-219b-blk");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-219B-blk".to_string();
+    task.issue_identifier = "RIG-219B-blk".to_string();
     task.pipeline_stage = "analyst".to_string();
     db.insert_task(&task).unwrap();
 
@@ -1153,7 +1153,7 @@ fn callback_missing_verdict_warns() {
 
     let mut task = make_test_task("20260313-221");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-221".to_string();
+    task.issue_identifier = "RIG-221".to_string();
     task.pipeline_stage = "reviewer".to_string();
     db.insert_task(&task).unwrap();
 
@@ -1188,7 +1188,7 @@ fn callback_already_done_blocked_by_open_pr() {
 
     let mut task = make_test_task("20260313-222");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-222".to_string();
+    task.issue_identifier = "RIG-222".to_string();
     task.pipeline_stage = "analyst".to_string();
     db.insert_task(&task).unwrap();
 
@@ -1225,7 +1225,7 @@ fn callback_engineer_done_with_pr_url() {
 
     let mut task = make_test_task("20260313-223");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-223".to_string();
+    task.issue_identifier = "RIG-223".to_string();
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
@@ -1261,7 +1261,7 @@ fn callback_engineer_done_auto_pr() {
 
     let mut task = make_test_task("20260313-224");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-224".to_string();
+    task.issue_identifier = "RIG-224".to_string();
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
@@ -1317,7 +1317,7 @@ fn callback_engineer_done_no_pr_warns() {
 
     let mut task = make_test_task("20260313-225");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-225".to_string();
+    task.issue_identifier = "RIG-225".to_string();
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 
@@ -1358,7 +1358,7 @@ fn callback_reviewer_rejected_spawns_engineer() {
 
     let mut task = make_test_task("20260313-226");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-226".to_string();
+    task.issue_identifier = "RIG-226".to_string();
     task.pipeline_stage = "reviewer".to_string();
     db.insert_task(&task).unwrap();
 
@@ -1409,7 +1409,7 @@ fn callback_review_cycle_limit_escalates() {
     for i in 0..3 {
         let mut task = make_test_task(&format!("20260313-27{i}"));
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-227".to_string();
+        task.issue_identifier = "RIG-227".to_string();
         task.pipeline_stage = "reviewer".to_string();
         task.task_type = "pipeline-reviewer".to_string();
         task.linear_pushed = true;
@@ -1419,7 +1419,7 @@ fn callback_review_cycle_limit_escalates() {
     // Now insert the current (4th) reviewer task that just completed
     let mut task = make_test_task("20260313-227");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-227".to_string();
+    task.issue_identifier = "RIG-227".to_string();
     task.pipeline_stage = "reviewer".to_string();
     task.task_type = "pipeline-reviewer".to_string();
     db.insert_task(&task).unwrap();
@@ -1464,7 +1464,7 @@ fn callback_review_escalation_retries_on_failure() {
     for i in 0..3 {
         let mut task = make_test_task(&format!("20260313-28{i}"));
         task.status = Status::Completed;
-        task.linear_issue_id = "RIG-228".to_string();
+        task.issue_identifier = "RIG-228".to_string();
         task.pipeline_stage = "reviewer".to_string();
         task.task_type = "pipeline-reviewer".to_string();
         task.linear_pushed = true;
@@ -1474,7 +1474,7 @@ fn callback_review_escalation_retries_on_failure() {
     // Current (4th) reviewer task
     let mut task = make_test_task("20260313-228");
     task.status = Status::Completed;
-    task.linear_issue_id = "RIG-228".to_string();
+    task.issue_identifier = "RIG-228".to_string();
     task.pipeline_stage = "reviewer".to_string();
     task.task_type = "pipeline-reviewer".to_string();
     db.insert_task(&task).unwrap();
@@ -1514,7 +1514,7 @@ fn outbox_full_cycle_callback_to_processor() {
 
     let mut task = make_test_task("20260326-cycle");
     task.status = Status::Completed;
-    task.linear_issue_id = "FAT-CYCLE".to_string();
+    task.issue_identifier = "FAT-CYCLE".to_string();
     task.pipeline_stage = "analyst".to_string();
     task.task_type = "pipeline-analyst".to_string();
     task.working_dir = "/tmp".to_string();
@@ -1713,7 +1713,7 @@ fn callback_reviewer_recheck_model_on_rerejection() {
 
     // Create a completed reviewer task for the issue (simulating round 0).
     let mut reviewer_task = make_test_task("20260401-373e");
-    reviewer_task.linear_issue_id = "RIG-373E".to_string();
+    reviewer_task.issue_identifier = "RIG-373E".to_string();
     reviewer_task.pipeline_stage = "reviewer".to_string();
     reviewer_task.task_type = "pipeline-reviewer".to_string();
     reviewer_task.status = Status::Completed;
@@ -1722,7 +1722,7 @@ fn callback_reviewer_recheck_model_on_rerejection() {
 
     // Create the engineer task that will be re-spawned after rejection.
     let mut engineer_task = make_test_task("20260401-373e-eng");
-    engineer_task.linear_issue_id = "RIG-373E".to_string();
+    engineer_task.issue_identifier = "RIG-373E".to_string();
     engineer_task.pipeline_stage = "engineer".to_string();
     engineer_task.task_type = "pipeline-engineer".to_string();
     engineer_task.status = Status::Completed;
@@ -1849,7 +1849,7 @@ fn github_client_callback_queues_effects() {
     // `id` in DB is the numeric part only, as emitted by normalize_issue().
     let mut task = make_test_task("20260402-379a");
     task.status = Status::Completed;
-    task.linear_issue_id = "42".to_string();
+    task.issue_identifier = "42".to_string();
     task.pipeline_stage = "engineer".to_string();
     db.insert_task(&task).unwrap();
 

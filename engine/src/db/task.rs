@@ -87,11 +87,11 @@ impl super::Db {
 
     /// Insert a new task.
     pub fn insert_task(&self, task: &Task) -> Result<()> {
-        // RIG-385: pipeline tasks MUST have a non-empty linear_issue_id.
+        // RIG-385: pipeline tasks MUST have a non-empty issue_identifier.
         // An empty identifier breaks the dedup guard (searches "" → no match → infinite spawn).
-        if !task.pipeline_stage.is_empty() && task.linear_issue_id.is_empty() {
+        if !task.pipeline_stage.is_empty() && task.issue_identifier.is_empty() {
             anyhow::bail!(
-                "refusing to insert pipeline task {}: empty linear_issue_id (stage={}). \
+                "refusing to insert pipeline task {}: empty issue_identifier (stage={}). \
                  This is a bug — identifier must be set by normalize_issue / process_issue_for_stage.",
                 task.id,
                 task.pipeline_stage
@@ -105,7 +105,7 @@ impl super::Db {
             "INSERT INTO tasks (
                 id, status, priority, created_at, started_at, finished_at,
                 type, prompt, output_path, working_dir, model, max_turns,
-                allowed_tools, session_id, linear_issue_id, linear_pushed,
+                allowed_tools, session_id, issue_identifier, linear_pushed,
                 pipeline_stage, depends_on, context_files, repo_hash, estimate,
                 retry_count, retry_after, cost_usd, turns_used, handoff_content,
                 runtime
@@ -132,7 +132,7 @@ impl super::Db {
                 task.max_turns,
                 task.allowed_tools,
                 task.session_id,
-                task.linear_issue_id,
+                task.issue_identifier,
                 linear_pushed,
                 task.pipeline_stage,
                 depends_on,
@@ -156,8 +156,8 @@ impl super::Db {
             self.conn.execute_batch("PRAGMA wal_checkpoint(FULL)").ok();
 
             crate::daemon::log_daemon_to_default(&format!(
-                "[DB-INSERT] task={} stage={} linear_issue_id={:?} (checkpointed)",
-                task.id, task.pipeline_stage, task.linear_issue_id,
+                "[DB-INSERT] task={} stage={} issue_identifier={:?} (checkpointed)",
+                task.id, task.pipeline_stage, task.issue_identifier,
             ));
         }
 
@@ -169,7 +169,7 @@ impl super::Db {
         let result = self.conn.query_row(
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
-                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    allowed_tools, session_id, issue_identifier, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
                     retry_count, retry_after, cost_usd, turns_used, handoff_content,
                     runtime
@@ -193,7 +193,7 @@ impl super::Db {
             let mut stmt = self.conn.prepare(
                 "SELECT id, status, priority, created_at, started_at, finished_at,
                         type, prompt, output_path, working_dir, model, max_turns,
-                        allowed_tools, session_id, linear_issue_id, linear_pushed,
+                        allowed_tools, session_id, issue_identifier, linear_pushed,
                         pipeline_stage, depends_on, context_files, repo_hash, estimate,
                     retry_count, retry_after, cost_usd, turns_used, handoff_content,
                     runtime
@@ -208,7 +208,7 @@ impl super::Db {
             let mut stmt = self.conn.prepare(
                 "SELECT id, status, priority, created_at, started_at, finished_at,
                         type, prompt, output_path, working_dir, model, max_turns,
-                        allowed_tools, session_id, linear_issue_id, linear_pushed,
+                        allowed_tools, session_id, issue_identifier, linear_pushed,
                         pipeline_stage, depends_on, context_files, repo_hash, estimate,
                     retry_count, retry_after, cost_usd, turns_used, handoff_content,
                     runtime
@@ -229,7 +229,7 @@ impl super::Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
-                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    allowed_tools, session_id, issue_identifier, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
                     retry_count, retry_after, cost_usd, turns_used, handoff_content,
                     runtime
@@ -254,7 +254,7 @@ impl super::Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
-                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    allowed_tools, session_id, issue_identifier, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
                     retry_count, retry_after, cost_usd, turns_used, handoff_content,
                     runtime
@@ -277,7 +277,7 @@ impl super::Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
-                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    allowed_tools, session_id, issue_identifier, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
                     retry_count, retry_after, cost_usd, turns_used, handoff_content,
                     runtime
@@ -370,7 +370,7 @@ impl super::Db {
         let result = self.conn.query_row(
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
-                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    allowed_tools, session_id, issue_identifier, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
                     retry_count, retry_after, cost_usd, turns_used, handoff_content,
                     runtime
@@ -417,11 +417,11 @@ impl super::Db {
                -- pipeline task for the same issue is still running. Prevents reviewer
                -- and engineer from running simultaneously on the same issue.
                AND NOT (
-                 linear_issue_id != ''
+                 issue_identifier != ''
                  AND pipeline_stage != ''
                  AND EXISTS (
                    SELECT 1 FROM tasks t3
-                   WHERE t3.linear_issue_id = tasks.linear_issue_id
+                   WHERE t3.issue_identifier = tasks.issue_identifier
                      AND t3.pipeline_stage != ''
                      AND t3.status = 'running'
                      AND t3.id != tasks.id
@@ -463,7 +463,7 @@ impl super::Db {
         let mut stmt = self.conn.prepare(
             "SELECT id, status, priority, created_at, started_at, finished_at,
                     type, prompt, output_path, working_dir, model, max_turns,
-                    allowed_tools, session_id, linear_issue_id, linear_pushed,
+                    allowed_tools, session_id, issue_identifier, linear_pushed,
                     pipeline_stage, depends_on, context_files, repo_hash, estimate,
                     retry_count, retry_after, cost_usd, turns_used, handoff_content,
                     runtime
@@ -914,14 +914,14 @@ mod tests {
 
         // Reviewer is running for RIG-296
         let mut reviewer = make_test_task("20260325-rev");
-        reviewer.linear_issue_id = "RIG-296".to_string();
+        reviewer.issue_identifier = "RIG-296".to_string();
         reviewer.pipeline_stage = "reviewer".to_string();
         db.insert_task(&reviewer).unwrap();
         db.set_task_status("20260325-rev", Status::Running).unwrap();
 
         // Engineer is pending for the same issue
         let mut engineer = make_test_task("20260325-eng");
-        engineer.linear_issue_id = "RIG-296".to_string();
+        engineer.issue_identifier = "RIG-296".to_string();
         engineer.pipeline_stage = "engineer".to_string();
         db.insert_task(&engineer).unwrap();
 
@@ -947,14 +947,14 @@ mod tests {
 
         // Reviewer running for RIG-100
         let mut reviewer = make_test_task("20260325-rev");
-        reviewer.linear_issue_id = "RIG-100".to_string();
+        reviewer.issue_identifier = "RIG-100".to_string();
         reviewer.pipeline_stage = "reviewer".to_string();
         db.insert_task(&reviewer).unwrap();
         db.set_task_status("20260325-rev", Status::Running).unwrap();
 
         // Engineer pending for RIG-200 (different issue)
         let mut engineer = make_test_task("20260325-eng");
-        engineer.linear_issue_id = "RIG-200".to_string();
+        engineer.issue_identifier = "RIG-200".to_string();
         engineer.pipeline_stage = "engineer".to_string();
         db.insert_task(&engineer).unwrap();
 
@@ -971,14 +971,14 @@ mod tests {
 
         // Pipeline reviewer running for RIG-296
         let mut reviewer = make_test_task("20260325-rev");
-        reviewer.linear_issue_id = "RIG-296".to_string();
+        reviewer.issue_identifier = "RIG-296".to_string();
         reviewer.pipeline_stage = "reviewer".to_string();
         db.insert_task(&reviewer).unwrap();
         db.set_task_status("20260325-rev", Status::Running).unwrap();
 
-        // Non-pipeline task (no pipeline_stage, no linear_issue_id) should still be claimable
+        // Non-pipeline task (no pipeline_stage, no issue_identifier) should still be claimable
         let mut adhoc = make_test_task("20260325-adhoc");
-        adhoc.linear_issue_id = String::new();
+        adhoc.issue_identifier = String::new();
         adhoc.pipeline_stage = String::new();
         db.insert_task(&adhoc).unwrap();
 
@@ -1347,39 +1347,39 @@ mod tests {
     }
 
     #[test]
-    fn insert_pipeline_task_with_empty_linear_issue_id_is_rejected() {
-        // RIG-385: pipeline tasks with empty linear_issue_id must be rejected at the DB level.
+    fn insert_pipeline_task_with_empty_issue_identifier_is_rejected() {
+        // RIG-385: pipeline tasks with empty issue_identifier must be rejected at the DB level.
         // An empty identifier breaks the dedup guard (searches "" → no match → infinite spawn).
         let db = Db::open_in_memory().unwrap();
         let mut task = make_test_task("20260403-bad");
         task.pipeline_stage = "engineer".to_string();
-        task.linear_issue_id = String::new(); // intentionally empty
+        task.issue_identifier = String::new(); // intentionally empty
 
         let result = db.insert_task(&task);
         assert!(
             result.is_err(),
-            "should reject pipeline task with empty linear_issue_id"
+            "should reject pipeline task with empty issue_identifier"
         );
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("empty linear_issue_id"),
-            "error message should mention empty linear_issue_id, got: {msg}"
+            msg.contains("empty issue_identifier"),
+            "error message should mention empty issue_identifier, got: {msg}"
         );
     }
 
     #[test]
-    fn insert_non_pipeline_task_with_empty_linear_issue_id_is_allowed() {
-        // RIG-385: non-pipeline tasks (pipeline_stage="") can have empty linear_issue_id —
+    fn insert_non_pipeline_task_with_empty_issue_identifier_is_allowed() {
+        // RIG-385: non-pipeline tasks (pipeline_stage="") can have empty issue_identifier —
         // that's the normal case for `werma add` tasks.
         let db = Db::open_in_memory().unwrap();
         let mut task = make_test_task("20260403-ok");
         task.pipeline_stage = String::new(); // not a pipeline task
-        task.linear_issue_id = String::new();
+        task.issue_identifier = String::new();
 
         db.insert_task(&task).unwrap(); // must succeed
     }
 
-    /// RIG-388: verify linear_issue_id survives insert → read-back on file-based DB.
+    /// RIG-388: verify issue_identifier survives insert → read-back on file-based DB.
     /// This catches WAL/journal issues that don't manifest with in-memory DBs.
     #[test]
     fn insert_task_file_db_cross_connection_readback() {
@@ -1391,20 +1391,20 @@ mod tests {
             let db = Db::open(&db_path).unwrap();
             let mut task = make_test_task("20260406-file-001");
             task.pipeline_stage = "engineer".to_string();
-            task.linear_issue_id = "honeyjourney#20".to_string();
+            task.issue_identifier = "honeyjourney#20".to_string();
 
             db.insert_task(&task).unwrap();
 
             // Same-connection read must work
             let fetched = db.task("20260406-file-001").unwrap().unwrap();
-            assert_eq!(fetched.linear_issue_id, "honeyjourney#20");
+            assert_eq!(fetched.issue_identifier, "honeyjourney#20");
         } // db dropped here — connection closed
 
         // Raw SQLite connection (no migrations) — is the data there?
         let raw = Connection::open(&db_path).unwrap();
         let raw_val: String = raw
             .query_row(
-                "SELECT linear_issue_id FROM tasks WHERE id = ?1",
+                "SELECT issue_identifier FROM tasks WHERE id = ?1",
                 params!["20260406-file-001"],
                 |row| row.get(0),
             )
@@ -1418,7 +1418,7 @@ mod tests {
         let db2 = Db::open(&db_path).unwrap();
         let fetched2 = db2.task("20260406-file-001").unwrap().unwrap();
         assert_eq!(
-            fetched2.linear_issue_id, "honeyjourney#20",
+            fetched2.issue_identifier, "honeyjourney#20",
             "Db::open must see the same data — if this fails, migrate() is the culprit"
         );
     }
@@ -1429,11 +1429,11 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let mut task = make_test_task("20260406-hash-001");
         task.pipeline_stage = "engineer".to_string();
-        task.linear_issue_id = "repo#42".to_string();
+        task.issue_identifier = "repo#42".to_string();
 
         db.insert_task(&task).unwrap();
 
         let fetched = db.task("20260406-hash-001").unwrap().unwrap();
-        assert_eq!(fetched.linear_issue_id, "repo#42");
+        assert_eq!(fetched.issue_identifier, "repo#42");
     }
 }

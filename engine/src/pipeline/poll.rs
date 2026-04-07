@@ -99,7 +99,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             max_turns,
             allowed_tools,
             session_id: String::new(),
-            linear_issue_id: identifier.to_string(),
+            issue_identifier: identifier.to_string(),
             linear_pushed: false,
             pipeline_stage: String::new(),
             depends_on: vec![],
@@ -354,7 +354,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     max_turns,
                     allowed_tools,
                     session_id: String::new(),
-                    linear_issue_id: identifier.to_string(),
+                    issue_identifier: identifier.to_string(),
                     linear_pushed: false,
                     pipeline_stage: stage_name.clone(),
                     depends_on: vec![],
@@ -612,7 +612,7 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 max_turns,
                 allowed_tools,
                 session_id: String::new(),
-                linear_issue_id: identifier.to_string(),
+                issue_identifier: identifier.to_string(),
                 linear_pushed: false,
                 pipeline_stage: stage_name.to_string(),
                 depends_on: vec![],
@@ -1041,7 +1041,7 @@ fn process_issue_for_stage(
         max_turns,
         allowed_tools,
         session_id: String::new(),
-        linear_issue_id: identifier.to_string(),
+        issue_identifier: identifier.to_string(),
         linear_pushed: false,
         pipeline_stage: stage_name.to_string(),
         depends_on: vec![],
@@ -1488,7 +1488,7 @@ stages:
 
     #[test]
     fn poll_creates_analyst_task_with_issue_id() {
-        // RIG-274: analyst tasks must include linear_issue_id for visibility in `werma st`
+        // RIG-274: analyst tasks must include issue_identifier for visibility in `werma st`
         let db = crate::db::Db::open_in_memory().unwrap();
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
@@ -1508,8 +1508,8 @@ stages:
             .unwrap();
         assert_eq!(tasks.len(), 1, "should create exactly one analyst task");
         assert_eq!(
-            tasks[0].linear_issue_id, "FAT-18",
-            "analyst task must have linear_issue_id set"
+            tasks[0].issue_identifier, "FAT-18",
+            "analyst task must have issue_identifier set"
         );
         assert_eq!(tasks[0].pipeline_stage, "analyst");
     }
@@ -1546,7 +1546,7 @@ stages:
         for i in 0..6 {
             let mut task = crate::db::make_test_task(&format!("20260326-rev{i}"));
             task.status = crate::models::Status::Completed;
-            task.linear_issue_id = "RIG-309".to_string();
+            task.issue_identifier = "RIG-309".to_string();
             task.pipeline_stage = "reviewer".to_string();
             task.linear_pushed = true;
             db.insert_task(&task).unwrap();
@@ -1586,7 +1586,7 @@ stages:
         // Insert a completed engineer task for this issue
         let mut engineer_task = crate::db::make_test_task("20260324-eng");
         engineer_task.status = crate::models::Status::Completed;
-        engineer_task.linear_issue_id = "RIG-280".to_string();
+        engineer_task.issue_identifier = "RIG-280".to_string();
         engineer_task.pipeline_stage = "engineer".to_string();
         db.insert_task(&engineer_task).unwrap();
 
@@ -1636,8 +1636,8 @@ stages:
             "should create exactly one engineer task for FAT-37"
         );
         assert_eq!(
-            tasks[0].linear_issue_id, "FAT-37",
-            "engineer task must have FAT-37 as linear_issue_id"
+            tasks[0].issue_identifier, "FAT-37",
+            "engineer task must have FAT-37 as issue_identifier"
         );
         assert_eq!(tasks[0].pipeline_stage, "engineer");
     }
@@ -1668,7 +1668,7 @@ stages:
             1,
             "should create exactly one engineer task for RIG-100"
         );
-        assert_eq!(tasks[0].linear_issue_id, "RIG-100");
+        assert_eq!(tasks[0].issue_identifier, "RIG-100");
         assert_eq!(tasks[0].pipeline_stage, "engineer");
     }
 
@@ -1746,7 +1746,7 @@ stages:
         // Insert a running engineer task for FAT-50
         let mut running = crate::db::make_test_task("20260331-eng-run");
         running.status = crate::models::Status::Running;
-        running.linear_issue_id = "FAT-50".to_string();
+        running.issue_identifier = "FAT-50".to_string();
         running.pipeline_stage = "engineer".to_string();
         running.task_type = "pipeline-engineer".to_string();
         db.insert_task(&running).unwrap();
@@ -1856,7 +1856,7 @@ stages:
         for i in 0..3 {
             let mut task = crate::db::make_test_task(&format!("20260401-fail{i}"));
             task.status = crate::models::Status::Failed;
-            task.linear_issue_id = "RIG-357".to_string();
+            task.issue_identifier = "RIG-357".to_string();
             task.pipeline_stage = "reviewer".to_string();
             task.linear_pushed = true;
             db.insert_task(&task).unwrap();
@@ -1912,7 +1912,7 @@ stages:
         for i in 0..3 {
             let mut task = crate::db::make_test_task(&format!("20260401-once-fail{i}"));
             task.status = crate::models::Status::Failed;
-            task.linear_issue_id = "RIG-360".to_string();
+            task.issue_identifier = "RIG-360".to_string();
             task.pipeline_stage = "reviewer".to_string();
             task.linear_pushed = true;
             db.insert_task(&task).unwrap();
@@ -1956,7 +1956,7 @@ stages:
         // Insert 1 recently failed reviewer task (within cooldown window)
         let mut task = crate::db::make_test_task("20260401-recent-fail");
         task.status = crate::models::Status::Failed;
-        task.linear_issue_id = "FAT-49".to_string();
+        task.issue_identifier = "FAT-49".to_string();
         task.pipeline_stage = "reviewer".to_string();
         task.linear_pushed = true;
         db.insert_task(&task).unwrap();
@@ -1997,7 +1997,7 @@ stages:
         // Insert 1 failed reviewer task with old finished_at (well past cooldown)
         let mut task = crate::db::make_test_task("20260401-old-fail");
         task.status = crate::models::Status::Failed;
-        task.linear_issue_id = "FAT-50".to_string();
+        task.issue_identifier = "FAT-50".to_string();
         task.pipeline_stage = "reviewer".to_string();
         task.linear_pushed = true;
         db.insert_task(&task).unwrap();
@@ -2042,7 +2042,7 @@ stages:
         for i in 0..2 {
             let mut task = crate::db::make_test_task(&format!("20260401-eng-fail{i}"));
             task.status = crate::models::Status::Failed;
-            task.linear_issue_id = "RIG-358".to_string();
+            task.issue_identifier = "RIG-358".to_string();
             task.pipeline_stage = "engineer".to_string();
             task.linear_pushed = true;
             db.insert_task(&task).unwrap();
@@ -2120,7 +2120,7 @@ stages:
             .tasks_by_linear_issue("testrepo#42", Some("engineer"), false)
             .unwrap();
         assert_eq!(tasks.len(), 1, "should create one engineer task");
-        assert_eq!(tasks[0].linear_issue_id, "testrepo#42");
+        assert_eq!(tasks[0].issue_identifier, "testrepo#42");
         assert_eq!(tasks[0].pipeline_stage, "engineer");
     }
 
@@ -2173,7 +2173,7 @@ stages:
         // Insert an existing pending engineer task for this GH issue
         let mut existing = crate::db::make_test_task("20260403-eng-gh");
         existing.status = crate::models::Status::Pending;
-        existing.linear_issue_id = "testrepo#44".to_string();
+        existing.issue_identifier = "testrepo#44".to_string();
         existing.pipeline_stage = "engineer".to_string();
         db.insert_task(&existing).unwrap();
 
@@ -2286,12 +2286,12 @@ stages:
         assert_eq!(skipped, 0);
     }
 
-    // ─── RIG-385: regression tests — linear_issue_id must never be empty ─────
+    // ─── RIG-385: regression tests — issue_identifier must never be empty ─────
 
     #[test]
-    fn gh_normalize_to_process_sets_linear_issue_id() {
+    fn gh_normalize_to_process_sets_issue_identifier() {
         // RIG-385: integration test — real gh CLI JSON shape → normalize_issue →
-        // process_issue_for_stage → task.linear_issue_id must be non-empty.
+        // process_issue_for_stage → task.issue_identifier must be non-empty.
         //
         // This is the exact JSON shape that `gh issue list --json number,title,body,labels,state`
         // produces in production. `state` is a plain string ("OPEN"/"CLOSED"), `labels` is an
@@ -2358,8 +2358,8 @@ stages:
             .unwrap();
         assert_eq!(tasks.len(), 1, "should create exactly one task");
         assert_eq!(
-            tasks[0].linear_issue_id, "honeyjourney#20",
-            "RIG-385: linear_issue_id must be set from gh normalized identifier, not empty string"
+            tasks[0].issue_identifier, "honeyjourney#20",
+            "RIG-385: issue_identifier must be set from gh normalized identifier, not empty string"
         );
     }
 

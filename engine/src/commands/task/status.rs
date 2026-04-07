@@ -313,7 +313,7 @@ fn render_compact(
             .as_deref()
             .map(format_elapsed_since)
             .unwrap_or_default();
-        let linear = compact_linear_label(&task.linear_issue_id);
+        let linear = compact_linear_label(&task.issue_identifier);
         println!(
             " {} {} {}{} {}",
             "●".green().bold(),
@@ -325,7 +325,7 @@ fn render_compact(
     }
 
     for task in pending.iter().take(3) {
-        let linear = compact_linear_label(&task.linear_issue_id);
+        let linear = compact_linear_label(&task.issue_identifier);
         println!(
             " {} {} {}{}",
             "○".yellow(),
@@ -349,7 +349,7 @@ fn render_compact(
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label(&task.linear_issue_id);
+        let linear = compact_linear_label(&task.issue_identifier);
         println!(
             " {} {} {}{} {}",
             "✓".dimmed(),
@@ -366,7 +366,7 @@ fn render_compact(
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label(&task.linear_issue_id);
+        let linear = compact_linear_label(&task.issue_identifier);
         println!(
             " {} {} {}{} {}",
             "✗".red(),
@@ -383,7 +383,7 @@ fn render_compact(
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = compact_linear_label(&task.linear_issue_id);
+        let linear = compact_linear_label(&task.issue_identifier);
         println!(
             " {} {} {}{} {}",
             "⊘".dimmed(),
@@ -426,10 +426,10 @@ fn render_plain(db: &Db, limit: Option<usize>) -> Result<()> {
                 (Some(s), None, Status::Running) => format_elapsed_since(s),
                 _ => String::new(),
             };
-            let linear = if task.linear_issue_id.is_empty() {
+            let linear = if task.issue_identifier.is_empty() {
                 "-"
             } else {
-                &task.linear_issue_id
+                &task.issue_identifier
             };
             let description = task.prompt.lines().next().unwrap_or(&task.prompt);
             println!(
@@ -446,10 +446,10 @@ fn render_plain(db: &Db, limit: Option<usize>) -> Result<()> {
             (Some(s), Some(e)) => format_duration_between(s, e),
             _ => String::new(),
         };
-        let linear = if task.linear_issue_id.is_empty() {
+        let linear = if task.issue_identifier.is_empty() {
             "-"
         } else {
-            &task.linear_issue_id
+            &task.issue_identifier
         };
         let description = task.prompt.lines().next().unwrap_or(&task.prompt);
         println!(

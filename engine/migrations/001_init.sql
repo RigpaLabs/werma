@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     max_turns       INTEGER NOT NULL DEFAULT 15,
     allowed_tools   TEXT DEFAULT '',
     session_id      TEXT DEFAULT '',
-    linear_issue_id TEXT DEFAULT '',
+    issue_identifier TEXT DEFAULT '',
     linear_pushed   INTEGER DEFAULT 0,
     pipeline_stage  TEXT DEFAULT '',
     depends_on      TEXT DEFAULT '[]',
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status_priority ON tasks(status, priority);
-CREATE INDEX IF NOT EXISTS idx_tasks_linear ON tasks(linear_issue_id) WHERE linear_issue_id != '';
+CREATE INDEX IF NOT EXISTS idx_tasks_linear ON tasks(issue_identifier) WHERE issue_identifier != '';
 CREATE INDEX IF NOT EXISTS idx_tasks_pipeline ON tasks(pipeline_stage) WHERE pipeline_stage != '';
 
 CREATE TABLE IF NOT EXISTS schedules (

@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS tasks_new (
     max_turns       INTEGER NOT NULL DEFAULT 15,
     allowed_tools   TEXT DEFAULT '',
     session_id      TEXT DEFAULT '',
-    linear_issue_id TEXT DEFAULT '',
+    issue_identifier TEXT DEFAULT '',
     linear_pushed   INTEGER DEFAULT 0,
     pipeline_stage  TEXT DEFAULT '',
     depends_on      TEXT DEFAULT '[]',
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS tasks_new (
 INSERT OR IGNORE INTO tasks_new
     SELECT id, status, priority, created_at, started_at, finished_at,
            type, prompt, output_path, working_dir, model, max_turns,
-           allowed_tools, session_id, linear_issue_id, linear_pushed,
+           allowed_tools, session_id, issue_identifier, linear_pushed,
            pipeline_stage, depends_on, context_files, repo_hash, estimate,
            callback_fired_at
     FROM tasks;
@@ -39,5 +39,5 @@ DROP TABLE IF EXISTS tasks;
 ALTER TABLE tasks_new RENAME TO tasks;
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status_priority ON tasks(status, priority);
-CREATE INDEX IF NOT EXISTS idx_tasks_linear ON tasks(linear_issue_id) WHERE linear_issue_id != '';
+CREATE INDEX IF NOT EXISTS idx_tasks_linear ON tasks(issue_identifier) WHERE issue_identifier != '';
 CREATE INDEX IF NOT EXISTS idx_tasks_pipeline ON tasks(pipeline_stage) WHERE pipeline_stage != '';

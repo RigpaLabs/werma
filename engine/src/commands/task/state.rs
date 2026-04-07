@@ -86,7 +86,7 @@ pub fn cmd_complete(
         db.set_task_status(id, Status::Failed)?;
         log_empty_output(id, &task, result_file);
 
-        let label = notify::format_notify_label(id, &task.task_type, &task.linear_issue_id);
+        let label = notify::format_notify_label(id, &task.task_type, &task.issue_identifier);
         notify::notify_macos(
             "werma",
             &format!("{label} EMPTY OUTPUT — marked failed"),
@@ -103,14 +103,14 @@ pub fn cmd_complete(
 
     // Pipeline callback: write effects to outbox + internal DB changes.
     // linear_pushed is set by the effect processor after effects are executed.
-    if !task.pipeline_stage.is_empty() && !task.linear_issue_id.is_empty() {
+    if !task.pipeline_stage.is_empty() && !task.issue_identifier.is_empty() {
         let cmd_runner = crate::traits::RealCommandRunner;
         match pipeline::callback(
             db,
             id,
             &task.pipeline_stage,
             &result_text,
-            &task.linear_issue_id,
+            &task.issue_identifier,
             &task.working_dir,
             &cmd_runner,
         ) {
@@ -125,8 +125,8 @@ pub fn cmd_complete(
     }
 
     // Research completion: curator follow-up + Linear update
-    if task.task_type == "research" && !task.linear_issue_id.is_empty() {
-        if let Some(ref client) = crate::tracker::linear_for_identifier(&task.linear_issue_id) {
+    if task.task_type == "research" && !task.issue_identifier.is_empty() {
+        if let Some(ref client) = crate::tracker::linear_for_identifier(&task.issue_identifier) {
             if let Err(e) =
                 pipeline::handle_research_completion(db, &task, &result_text, client.as_ref())
             {
@@ -136,7 +136,7 @@ pub fn cmd_complete(
     }
 
     // Notifications — enriched for pipeline tasks with configurable fields
-    let label = notify::format_notify_label(id, &task.task_type, &task.linear_issue_id);
+    let label = notify::format_notify_label(id, &task.task_type, &task.issue_identifier);
     let notify_msg = if !task.pipeline_stage.is_empty() {
         let verdict = parse_verdict(&result_text);
         let next_stage = resolve_next_stage(&task, verdict.as_deref());
@@ -184,11 +184,11 @@ pub fn cmd_fail(db: &Db, id: &str) -> Result<()> {
 
     // Post failure comment to Linear for pipeline tasks
     if !task.pipeline_stage.is_empty()
-        && !task.linear_issue_id.is_empty()
-        && let Some(ref linear) = crate::tracker::linear_for_identifier(&task.linear_issue_id)
+        && !task.issue_identifier.is_empty()
+        && let Some(ref linear) = crate::tracker::linear_for_identifier(&task.issue_identifier)
     {
         let _ = linear.comment(
-            &task.linear_issue_id,
+            &task.issue_identifier,
             &format!(
                 "**Task `{id}` FAILED** (stage: {}). Manual intervention needed.",
                 task.pipeline_stage,
@@ -197,7 +197,7 @@ pub fn cmd_fail(db: &Db, id: &str) -> Result<()> {
     }
 
     // Notifications — include pipeline stage if present
-    let label = notify::format_notify_label(id, &task.task_type, &task.linear_issue_id);
+    let label = notify::format_notify_label(id, &task.task_type, &task.issue_identifier);
     let notify_msg = if !task.pipeline_stage.is_empty() {
         format!("{label} {} FAILED", task.pipeline_stage.to_uppercase())
     } else {
@@ -258,7 +258,7 @@ pub fn cmd_peek(db: &Db, id: &str) -> Result<()> {
     if !task.pipeline_stage.is_empty() {
         println!(
             "stage: {}  issue: {}",
-            task.pipeline_stage, task.linear_issue_id
+            task.pipeline_stage, task.issue_identifier
         );
     }
 

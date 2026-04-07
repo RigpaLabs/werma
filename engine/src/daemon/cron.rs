@@ -105,7 +105,7 @@ pub fn check_schedules(
             max_turns,
             allowed_tools,
             session_id: String::new(),
-            linear_issue_id: String::new(),
+            issue_identifier: String::new(),
             linear_pushed: false,
             pipeline_stage: String::new(),
             depends_on: vec![],
