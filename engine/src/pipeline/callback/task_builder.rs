@@ -346,6 +346,9 @@ pub(super) fn build_handoff_prompt(
         }
     };
 
+    // RIG-401: inject agent_runtime so computed vars (skill_section, etc.) are runtime-aware.
+    let agent_runtime = stage_cfg.runtime.unwrap_or_default().to_string();
+
     let mut runtime: HashMap<String, String> = HashMap::new();
     runtime.insert("issue_id".to_string(), issue_identifier.to_string());
     runtime.insert("issue_title".to_string(), issue_title.to_string());
@@ -363,6 +366,7 @@ pub(super) fn build_handoff_prompt(
         previous_review.unwrap_or_default().to_string(),
     );
     runtime.insert("working_dir".to_string(), String::new());
+    runtime.insert("agent_runtime".to_string(), agent_runtime);
 
     let vars = build_vars(&config.templates, &runtime);
     let mut rendered = render_prompt(&prompt_source, &vars);

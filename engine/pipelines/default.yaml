@@ -6,6 +6,8 @@ launch_stagger_secs: 4
 templates:
   verdict_instruction: "Output your verdict on the LAST line of your response"
   nit_threshold: "0"
+  language: rust
+  test_commands: "make check"
 
 stages:
   analyst:
