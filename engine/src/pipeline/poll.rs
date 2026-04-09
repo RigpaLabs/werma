@@ -226,50 +226,58 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     continue;
                 }
 
-                // RIG-309: Circuit breaker — cap total reviewer spawns per issue to prevent
-                // infinite loops when reviewer produces empty results (no verdict → issue stays
-                // in Review → poller spawns another reviewer → repeat).
-                if stage_name == "reviewer" {
-                    let max_rounds = stage_cfg
-                        .review_round_limit()
-                        .unwrap_or(super::callback::DEFAULT_MAX_REVIEW_ROUNDS)
-                        as i64;
-                    let total_reviewer_tasks =
-                        db.count_all_tasks_for_issue_stage(identifier, "reviewer")?;
-                    if total_reviewer_tasks >= max_rounds * 2 {
-                        eprintln!(
-                            "  ! {identifier} circuit breaker: {total_reviewer_tasks} total reviewer \
-                             tasks (limit: {}), skipping spawn",
-                            max_rounds * 2
-                        );
-                        if total_reviewer_tasks == max_rounds * 2 {
-                            // Only move to backlog on first trigger, not every poll
-                            if let Err(e) = linear.move_issue_by_name(issue_id, "backlog") {
-                                eprintln!(
-                                    "  ! circuit breaker: failed to move {identifier} to backlog: {e}"
-                                );
+                // RIG-309/RIG-405: Generic circuit breaker — cap total task spawns per stage to
+                // prevent infinite loops when agents produce no progress (no verdict, empty output,
+                // etc.). Previously reviewer-only; now applies to all stages (RIG-405).
+                {
+                    let cap: i64 = if stage_name == "reviewer" {
+                        let max_rounds = stage_cfg
+                            .review_round_limit()
+                            .unwrap_or(super::callback::DEFAULT_MAX_REVIEW_ROUNDS)
+                            as i64;
+                        max_rounds * 2
+                    } else {
+                        // For non-reviewer stages: cap at max_stage_attempts * 2 (if configured)
+                        stage_cfg.attempt_limit().map(|a| a as i64 * 2).unwrap_or(0)
+                    };
+                    if cap > 0 {
+                        let total_tasks =
+                            db.count_all_tasks_for_issue_stage(identifier, stage_name)?;
+                        if total_tasks >= cap {
+                            eprintln!(
+                                "  ! {identifier} circuit breaker: {total_tasks} total {stage_name} \
+                                 tasks (limit: {cap}), skipping spawn"
+                            );
+                            if total_tasks == cap {
+                                // Only move to backlog on first trigger, not every poll
+                                if let Err(e) = linear.move_issue_by_name(issue_id, "backlog") {
+                                    eprintln!(
+                                        "  ! circuit breaker: failed to move {identifier} to backlog: {e}"
+                                    );
+                                }
+                                if let Err(e) = linear.comment(
+                                    identifier,
+                                    &format!(
+                                        "**{stage_name} circuit breaker triggered** — {total_tasks} \
+                                         {stage_name} tasks spawned without resolution. \
+                                         Moving to Backlog. Manual intervention required."
+                                    ),
+                                ) {
+                                    eprintln!(
+                                        "  ! circuit breaker: failed to post comment on {identifier}: {e}"
+                                    );
+                                }
                             }
-                            if let Err(e) = linear.comment(
-                                identifier,
-                                &format!(
-                                    "**Reviewer circuit breaker triggered** — {total_reviewer_tasks} \
-                                     reviewer tasks spawned without resolution. Moving to Backlog. \
-                                     Manual intervention required."
-                                ),
-                            ) {
-                                eprintln!(
-                                    "  ! circuit breaker: failed to post comment on {identifier}: {e}"
-                                );
-                            }
+                            total_skipped += 1;
+                            continue;
                         }
-                        total_skipped += 1;
-                        continue;
                     }
                 }
 
-                // RIG-357: Failure cooldown + failure cap — prevents rapid-fire retries
-                // when tasks crash or time out. Covers the failed-task path that
-                // decide_callback() never sees (it only runs for completed tasks).
+                // RIG-357/RIG-405: Fruitless cooldown + cap — prevents rapid-fire retries
+                // when tasks crash or complete without progress. Covers failed tasks and
+                // fruitless completions (e.g. Qwen producing empty output) that callbacks
+                // never see (decide_callback only runs for completed tasks with verdicts).
                 if should_skip_due_to_failures(
                     db, identifier, stage_name, stage_cfg, linear, issue_id,
                 )? {
@@ -518,26 +526,31 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                 continue;
             }
 
-            // RIG-309: Circuit breaker (label-based path) — same logic as status-based path.
-            if *stage_name == "reviewer" {
-                let max_rounds = stage_cfg
-                    .review_round_limit()
-                    .unwrap_or(super::callback::DEFAULT_MAX_REVIEW_ROUNDS)
-                    as i64;
-                let total_reviewer_tasks =
-                    db.count_all_tasks_for_issue_stage(identifier, "reviewer")?;
-                if total_reviewer_tasks >= max_rounds * 2 {
-                    eprintln!(
-                        "  ! {identifier} circuit breaker: {total_reviewer_tasks} total reviewer \
-                         tasks (limit: {}), skipping spawn (label path)",
-                        max_rounds * 2
-                    );
-                    total_skipped += 1;
-                    continue;
+            // RIG-309/RIG-405: Generic circuit breaker (label-based path) — applies to all stages.
+            {
+                let cap: i64 = if *stage_name == "reviewer" {
+                    let max_rounds = stage_cfg
+                        .review_round_limit()
+                        .unwrap_or(super::callback::DEFAULT_MAX_REVIEW_ROUNDS)
+                        as i64;
+                    max_rounds * 2
+                } else {
+                    stage_cfg.attempt_limit().map(|a| a as i64 * 2).unwrap_or(0)
+                };
+                if cap > 0 {
+                    let total_tasks = db.count_all_tasks_for_issue_stage(identifier, stage_name)?;
+                    if total_tasks >= cap {
+                        eprintln!(
+                            "  ! {identifier} circuit breaker: {total_tasks} total {stage_name} \
+                             tasks (limit: {cap}), skipping spawn (label path)"
+                        );
+                        total_skipped += 1;
+                        continue;
+                    }
                 }
             }
 
-            // RIG-357: Failure cooldown + failure cap (label path)
+            // RIG-357/RIG-405: Fruitless cooldown + cap (label path)
             if should_skip_due_to_failures(db, identifier, stage_name, stage_cfg, linear, issue_id)?
             {
                 total_skipped += 1;
@@ -916,38 +929,49 @@ fn process_issue_for_stage(
         return Ok(PollAction::Skipped);
     }
 
-    // RIG-309: circuit breaker for reviewer
-    if stage_name == "reviewer" {
-        let max_rounds = stage_cfg
-            .review_round_limit()
-            .unwrap_or(super::callback::DEFAULT_MAX_REVIEW_ROUNDS) as i64;
-        let total_reviewer_tasks = db.count_all_tasks_for_issue_stage(identifier, "reviewer")?;
-        if total_reviewer_tasks >= max_rounds * 2 {
-            eprintln!(
-                "  ! {identifier} circuit breaker: {total_reviewer_tasks} total reviewer \
-                 tasks (limit: {}), skipping spawn",
-                max_rounds * 2
-            );
-            if total_reviewer_tasks == max_rounds * 2 {
-                if let Err(e) = client.move_issue_by_name(issue_id, "backlog") {
-                    eprintln!("  ! circuit breaker: failed to move {identifier} to backlog: {e}");
+    // RIG-309/RIG-405: Generic circuit breaker — applies to all stages, not just reviewer.
+    {
+        let cap: i64 = if stage_name == "reviewer" {
+            let max_rounds = stage_cfg
+                .review_round_limit()
+                .unwrap_or(super::callback::DEFAULT_MAX_REVIEW_ROUNDS)
+                as i64;
+            max_rounds * 2
+        } else {
+            stage_cfg.attempt_limit().map(|a| a as i64 * 2).unwrap_or(0)
+        };
+        if cap > 0 {
+            let total_tasks = db.count_all_tasks_for_issue_stage(identifier, stage_name)?;
+            if total_tasks >= cap {
+                eprintln!(
+                    "  ! {identifier} circuit breaker: {total_tasks} total {stage_name} \
+                     tasks (limit: {cap}), skipping spawn"
+                );
+                if total_tasks == cap {
+                    if let Err(e) = client.move_issue_by_name(issue_id, "backlog") {
+                        eprintln!(
+                            "  ! circuit breaker: failed to move {identifier} to backlog: {e}"
+                        );
+                    }
+                    if let Err(e) = client.comment(
+                        identifier,
+                        &format!(
+                            "**{stage_name} circuit breaker triggered** — {total_tasks} \
+                             {stage_name} tasks spawned without resolution. \
+                             Moving to Backlog. Manual intervention required."
+                        ),
+                    ) {
+                        eprintln!(
+                            "  ! circuit breaker: failed to post comment on {identifier}: {e}"
+                        );
+                    }
                 }
-                if let Err(e) = client.comment(
-                    identifier,
-                    &format!(
-                        "**Reviewer circuit breaker triggered** — {total_reviewer_tasks} \
-                         reviewer tasks spawned without resolution. Moving to Backlog. \
-                         Manual intervention required."
-                    ),
-                ) {
-                    eprintln!("  ! circuit breaker: failed to post comment on {identifier}: {e}");
-                }
+                return Ok(PollAction::Skipped);
             }
-            return Ok(PollAction::Skipped);
         }
     }
 
-    // RIG-357: failure cooldown + cap
+    // RIG-357/RIG-405: Fruitless cooldown + cap
     if should_skip_due_to_failures(db, identifier, stage_name, stage_cfg, client, issue_id)? {
         return Ok(PollAction::Skipped);
     }
@@ -1255,10 +1279,11 @@ const FAILURE_COOLDOWN_SECS: i64 = 300; // 5 minutes
 /// Check if a recent failure should block spawning a new task for this issue+stage (RIG-357).
 ///
 /// Returns `true` (should skip) if:
-/// 1. The most recent failed task finished within `FAILURE_COOLDOWN_SECS`, OR
-/// 2. The number of failed tasks >= `max_stage_attempts` (if configured).
+/// 1. The number of fruitless tasks >= `max_stage_attempts` (if configured), OR
+/// 2. The most recent fruitless task finished within `FAILURE_COOLDOWN_SECS`.
 ///
-/// When the failure cap is hit, posts a comment and moves the issue to the escalation status.
+/// A "fruitless" task is one that failed OR completed without producing any effects.
+/// When the fruitless cap is hit, posts a comment and moves the issue to the escalation status.
 fn should_skip_due_to_failures(
     db: &Db,
     identifier: &str,
@@ -1267,14 +1292,20 @@ fn should_skip_due_to_failures(
     linear: &dyn LinearApi,
     issue_id: &str,
 ) -> Result<bool> {
-    // 1. Failure cap: check if failed task count >= max_stage_attempts.
-    // This mirrors decide_callback()'s retry cap (RIG-338) but covers the failed-task path
-    // that callbacks never see (callbacks only run for completed tasks).
+    // 1. Fruitless cap: check if fruitless task count >= max_stage_attempts (RIG-405).
+    //
+    // A "fruitless" task is one that made no progress: either it failed (crashed/timed out)
+    // OR it completed but produced no effects (e.g. Qwen agent outputs nothing — no MoveIssue,
+    // no CreatePr). Counting only `failed` tasks (the previous behavior) missed the second
+    // case and caused infinite spawn loops when agents complete successfully but do nothing.
+    //
+    // This mirrors decide_callback()'s retry cap (RIG-338) but covers tasks that callbacks
+    // never see (callbacks only run for completed tasks) and fruitless completions.
     if let (Some(max_attempts), Some(on_max_verdict)) =
         (stage_cfg.attempt_limit(), &stage_cfg.on_max_rounds)
     {
-        let failed_count = db.count_failed_tasks_for_issue_stage(identifier, stage_name)?;
-        if failed_count >= max_attempts as i64 {
+        let fruitless_count = db.count_fruitless_tasks_for_issue_stage(identifier, stage_name)?;
+        if fruitless_count >= max_attempts as i64 {
             let escalation_status = stage_cfg
                 .transition_for(on_max_verdict)
                 .map(|t| t.status.as_str())
@@ -1294,51 +1325,52 @@ fn should_skip_due_to_failures(
 
             if already_escalated {
                 eprintln!(
-                    "  ~ {identifier} stage={stage_name}: failure cap already escalated \
+                    "  ~ {identifier} stage={stage_name}: fruitless cap already escalated \
                      to {escalation_status}, skipping"
                 );
             } else {
                 eprintln!(
-                    "  ! {identifier} stage={stage_name}: failure cap reached — \
-                     {failed_count} failed tasks >= limit {max_attempts}, \
+                    "  ! {identifier} stage={stage_name}: fruitless cap reached — \
+                     {fruitless_count} fruitless tasks >= limit {max_attempts}, \
                      escalating to {escalation_status}"
                 );
                 if let Err(e) = linear.move_issue_by_name(issue_id, &escalation_status) {
                     eprintln!(
-                        "  ! failure cap: failed to move {identifier} to {escalation_status}: {e}"
+                        "  ! fruitless cap: failed to move {identifier} to {escalation_status}: {e}"
                     );
                 }
                 if let Err(e) = linear.comment(
                     identifier,
                     &format!(
-                        "**Stage failure cap reached** (stage: {stage_name}, {failed_count} failed tasks, \
-                         limit: {max_attempts}). Tasks are crashing/timing out repeatedly. \
+                        "**Stage fruitless cap reached** (stage: {stage_name}, \
+                         {fruitless_count} fruitless tasks, limit: {max_attempts}). \
+                         Tasks are failing or completing without progress. \
                          Moving to {escalation_status} — manual intervention required."
                     ),
                 ) {
-                    eprintln!(
-                        "  ! failure cap: failed to post comment on {identifier}: {e}"
-                    );
+                    eprintln!("  ! fruitless cap: failed to post comment on {identifier}: {e}");
                 }
             }
             return Ok(true);
         }
     }
 
-    // 2. Cooldown: if the most recent failed task finished within FAILURE_COOLDOWN_SECS,
-    // skip this poll cycle to avoid rapid-fire retries.
-    if let Some(last_failed_time) =
-        db.last_failed_task_time_for_issue_stage(identifier, stage_name)?
+    // 2. Cooldown: if the most recent fruitless task (failed or completed-without-effects)
+    // finished within FAILURE_COOLDOWN_SECS, skip this poll cycle to avoid rapid-fire retries.
+    // RIG-405: uses `last_fruitless_task_time` to cover both failed tasks and fruitless
+    // completions (e.g. Qwen empty output), matching the cap query above.
+    if let Some(last_fruitless_time) =
+        db.last_fruitless_task_time_for_issue_stage(identifier, stage_name)?
     {
         if let Ok(ts) =
-            chrono::NaiveDateTime::parse_from_str(&last_failed_time, "%Y-%m-%dT%H:%M:%S")
+            chrono::NaiveDateTime::parse_from_str(&last_fruitless_time, "%Y-%m-%dT%H:%M:%S")
         {
             let now = chrono::Local::now().naive_local();
             let elapsed = now.signed_duration_since(ts).num_seconds();
             if elapsed < FAILURE_COOLDOWN_SECS {
                 eprintln!(
                     "  ~ {identifier} stage={stage_name}: cooldown active — \
-                     last failure {elapsed}s ago (limit: {FAILURE_COOLDOWN_SECS}s)"
+                     last fruitless task {elapsed}s ago (limit: {FAILURE_COOLDOWN_SECS}s)"
                 );
                 return Ok(true);
             }
@@ -1666,6 +1698,94 @@ stages:
     }
 
     #[test]
+    fn poll_circuit_breaker_blocks_excessive_engineer_spawns() {
+        // RIG-405: circuit breaker must now apply to all stages, not just reviewer.
+        // Engineer has max_stage_attempts=3 → cap = 3*2 = 6 total tasks.
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Insert 6 completed+pushed engineer tasks (max_stage_attempts=3, limit=3*2=6)
+        for i in 0..6 {
+            let mut task = crate::db::make_test_task(&format!("20260409-eng{i}"));
+            task.status = crate::models::Status::Completed;
+            task.issue_identifier = "RIG-405".to_string();
+            task.pipeline_stage = "engineer".to_string();
+            task.linear_pushed = true;
+            db.insert_task(&task).unwrap();
+        }
+
+        // Issue in In Progress status (triggers engineer stage)
+        let issue = serde_json::json!({
+            "id": "uuid-405",
+            "identifier": "RIG-405",
+            "title": "Fix engineer circuit breaker",
+            "description": "Fix it",
+            "state": {"type": "started"},
+            "estimate": 3,
+            "labels": {"nodes": [{"name": "repo:werma"}]}
+        });
+        linear.set_issues_for_status("in_progress", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // No new engineer task should be created
+        let tasks = db
+            .tasks_by_linear_issue("RIG-405", Some("engineer"), true)
+            .unwrap();
+        assert!(
+            tasks.is_empty(),
+            "circuit breaker should prevent spawning new engineer task after {} total tasks",
+            6
+        );
+    }
+
+    #[test]
+    fn poll_fruitless_cap_blocks_empty_completions() {
+        // RIG-405: should_skip_due_to_failures must now count fruitless completions
+        // (completed tasks with no effects), not just failed tasks.
+        // Simulates Qwen engineer completing with empty output (no effects produced).
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Insert 3 completed engineer tasks with NO effects (fruitless completions).
+        // Engineer has max_stage_attempts=3, so this should trigger the cap.
+        for i in 0..3 {
+            let mut task = crate::db::make_test_task(&format!("20260409-qwen{i}"));
+            task.status = crate::models::Status::Completed;
+            task.issue_identifier = "RIG-405b".to_string();
+            task.pipeline_stage = "engineer".to_string();
+            task.linear_pushed = true;
+            db.insert_task(&task).unwrap();
+            // Deliberately no effects inserted — simulates empty Qwen output
+        }
+
+        // Issue in In Progress status
+        let issue = serde_json::json!({
+            "id": "uuid-405b",
+            "identifier": "RIG-405b",
+            "title": "Fix fruitless cap",
+            "description": "Fix it",
+            "state": {"type": "started"},
+            "estimate": 3,
+            "labels": {"nodes": [{"name": "repo:werma"}]}
+        });
+        linear.set_issues_for_status("in_progress", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // No new engineer task should be created — fruitless cap triggered
+        let tasks = db
+            .tasks_by_linear_issue("RIG-405b", Some("engineer"), true)
+            .unwrap();
+        assert!(
+            tasks.is_empty(),
+            "fruitless cap should prevent spawning new engineer task after 3 fruitless completions"
+        );
+    }
+
+    #[test]
     fn poll_skips_analyst_when_engineer_already_ran() {
         // RIG-274: don't re-run analyst if engineer has already started for the issue
         let db = crate::db::Db::open_in_memory().unwrap();
@@ -1979,13 +2099,13 @@ stages:
             "failure cap should move issue to backlog, got: {moves:?}"
         );
 
-        // Comment should be posted
+        // Comment should be posted with updated message (fruitless, not just failure)
         let comments = linear.comment_calls.borrow();
         assert!(
             comments
                 .iter()
-                .any(|(id, body)| id == "RIG-357" && body.contains("failure cap reached")),
-            "failure cap should post a comment"
+                .any(|(id, body)| id == "RIG-357" && body.contains("fruitless cap reached")),
+            "fruitless cap should post a comment"
         );
     }
 

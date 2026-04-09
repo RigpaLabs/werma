@@ -1,9 +1,7 @@
 use anyhow::{Context, Result, bail};
 
 use crate::db::Db;
-use crate::github::GitHubIssueClient;
-use crate::project::IssueIdentifier;
-use crate::traits::{CommandRunner, RealCommandRunner};
+use crate::traits::RealCommandRunner;
 use crate::{config, linear, pipeline, tracker, ui};
 
 pub fn cmd_pipeline_poll(db: &Db) -> Result<()> {
@@ -93,9 +91,9 @@ pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<(
     let mut skipped = 0;
 
     for identifier in &filtered {
-        // RIG-384: Route to the correct tracker client based on identifier format.
+        // RIG-384/RIG-404: Route to the correct tracker client based on identifier format.
         let client: Box<dyn crate::linear::LinearApi> =
-            resolve_tracker_client(identifier, &user_cfg, &cmd)?;
+            tracker::resolve_tracker_client(identifier, &user_cfg, &cmd)?;
 
         // Fetch issue from tracker
         let (_issue_id, ident, title, description, labels) =
@@ -150,56 +148,6 @@ pub fn cmd_pipeline_run(identifiers: &[String], stage: Option<&str>) -> Result<(
 
     println!("\nPipeline run: {created} created, {skipped} skipped");
     Ok(())
-}
-
-/// Resolve the correct tracker client for a given identifier (RIG-384).
-///
-/// Routes based on identifier format:
-/// - `owner/repo#N` → GitHubIssueClient (owner/repo from identifier)
-/// - `repo#N` → GitHubIssueClient (owner looked up from `[tracker.github]` config)
-/// - `TEAM-N` → Linear client
-fn resolve_tracker_client<'a>(
-    identifier: &str,
-    user_cfg: &crate::config::UserConfig,
-    cmd: &'a dyn CommandRunner,
-) -> Result<Box<dyn crate::linear::LinearApi + 'a>> {
-    // Try parsing as a typed identifier first
-    if let Some(parsed) = IssueIdentifier::parse(identifier) {
-        match parsed {
-            IssueIdentifier::GitHub { owner, repo, .. } => {
-                return Ok(Box::new(GitHubIssueClient::new(cmd, owner, repo)));
-            }
-            IssueIdentifier::Linear { .. } => {
-                return tracker::try_linear_client();
-            }
-        }
-    }
-
-    // Try `repo#N` format: look up owner from [tracker.github] config
-    if let Some(hash_pos) = identifier.find('#') {
-        let repo_part = &identifier[..hash_pos];
-        // Check if repo_part matches a tracker.github label directly
-        if let Some(entry) = user_cfg.tracker.github_entry(repo_part) {
-            return Ok(Box::new(GitHubIssueClient::new(
-                cmd,
-                entry.owner.clone(),
-                entry.repo.clone(),
-            )));
-        }
-        // Also check if repo_part matches an entry's repo name
-        for entry in user_cfg.tracker.github.values() {
-            if entry.repo == repo_part {
-                return Ok(Box::new(GitHubIssueClient::new(
-                    cmd,
-                    entry.owner.clone(),
-                    entry.repo.clone(),
-                )));
-            }
-        }
-    }
-
-    // Fall back to Linear
-    tracker::try_linear_client()
 }
 
 /// Infer working directory, with GitHub repo config as fallback (RIG-384).
