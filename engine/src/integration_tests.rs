@@ -307,12 +307,19 @@ fn poll_allows_respawn_after_rejection_cycle() {
 
     ensure_working_dir();
 
-    // Engineer #1 completed and callback already processed (pushed=true)
+    // Engineer #1 completed and callback already processed (pushed=true).
+    // created_at must be recent so the stale-issue TTL guard does not trigger
+    // before the respawn check — the rejection cycle happened recently.
+    let recent = (chrono::Local::now() - chrono::Duration::days(1))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+
     let mut eng1 = make_test_task("20260324-101");
     eng1.status = Status::Completed;
     eng1.issue_identifier = "RIG-277".to_string();
     eng1.pipeline_stage = "engineer".to_string();
     eng1.linear_pushed = true;
+    eng1.created_at = recent.clone();
     db.insert_task(&eng1).unwrap();
 
     // Reviewer also completed and processed
@@ -321,6 +328,7 @@ fn poll_allows_respawn_after_rejection_cycle() {
     rev1.issue_identifier = "RIG-277".to_string();
     rev1.pipeline_stage = "reviewer".to_string();
     rev1.linear_pushed = true;
+    rev1.created_at = recent;
     db.insert_task(&rev1).unwrap();
 
     // Issue is back at "in_progress" after reviewer rejection

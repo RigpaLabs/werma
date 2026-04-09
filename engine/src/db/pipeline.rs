@@ -370,6 +370,48 @@ impl super::Db {
         Ok(count)
     }
 
+    /// Get the `created_at` of the most recently created task for a given issue+stage.
+    /// Returns `None` if no tasks exist. Used by the stale-issue TTL guard (RIG-408).
+    pub fn newest_task_created_at_for_issue_stage(
+        &self,
+        issue_id: &str,
+        stage: &str,
+    ) -> Result<Option<String>> {
+        let result: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT MAX(created_at) FROM tasks
+                 WHERE issue_identifier = ?1
+                   AND pipeline_stage = ?2",
+                params![issue_id, stage],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        Ok(result)
+    }
+
+    /// Get the `created_at` of the oldest task for a given issue+stage.
+    /// Returns `None` if no tasks exist. Used for the "in progress since" log message (RIG-408).
+    pub fn oldest_task_created_at_for_issue_stage(
+        &self,
+        issue_id: &str,
+        stage: &str,
+    ) -> Result<Option<String>> {
+        let result: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT MIN(created_at) FROM tasks
+                 WHERE issue_identifier = ?1
+                   AND pipeline_stage = ?2",
+                params![issue_id, stage],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten();
+        Ok(result)
+    }
+
     /// Get the `finished_at` timestamp of the most recently failed task for an issue+stage.
     /// Returns `None` if no failed tasks exist or if `finished_at` is NULL.
     /// Used by the poller to impose a cooldown between rapid failure retries (RIG-357).
