@@ -81,17 +81,11 @@ pub fn process_effects(
             } else if let Some(l) = linear {
                 l
             } else {
-                let msg = format!("no Linear client available for '{}'", effect.issue_id);
-                db.mark_effect_failed(effect.id, &msg)?;
-                failed += 1;
-                if effect.blocking {
-                    eprintln!(
-                        "[effects] blocking effect {} (type={:?}) failed for task {}: {msg}",
-                        effect.id, effect.effect_type, task_id
-                    );
-                    break;
-                }
-                continue;
+                // LINEAR_API_KEY not configured — leave effect pending so it will be
+                // retried once the key becomes available. This preserves the pre-RIG-404
+                // behavior where the entire effects block was gated behind
+                // `linear_poll.is_some()`.
+                break;
             };
 
             match execute_effect(effect, db, client, cmd, notifier) {

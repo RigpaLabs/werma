@@ -133,6 +133,7 @@ pub fn run(werma_dir: &Path) -> Result<()> {
     // Used for both pipeline polling and merge detection.
     let linear_poll = crate::tracker::linear_client();
     let expected_team_keys = crate::linear::configured_team_keys().unwrap_or_default();
+    let user_cfg = crate::config::UserConfig::load();
 
     loop {
         let tick_start = Instant::now();
@@ -159,7 +160,6 @@ pub fn run(werma_dir: &Path) -> Result<()> {
             // (Linear or GitHub). The optional `linear_poll` is passed as fallback for
             // Linear identifiers; GitHub effects are resolved via user_cfg.
             {
-                let user_cfg = crate::config::UserConfig::load();
                 match crate::pipeline::effects::process_effects(
                     &db,
                     linear_poll.as_deref(),
