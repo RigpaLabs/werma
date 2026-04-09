@@ -1194,10 +1194,11 @@ const FAILURE_COOLDOWN_SECS: i64 = 300; // 5 minutes
 /// Check if a recent failure should block spawning a new task for this issue+stage (RIG-357).
 ///
 /// Returns `true` (should skip) if:
-/// 1. The most recent failed task finished within `FAILURE_COOLDOWN_SECS`, OR
-/// 2. The number of failed tasks >= `max_stage_attempts` (if configured).
+/// 1. The number of fruitless tasks >= `max_stage_attempts` (if configured), OR
+/// 2. The most recent fruitless task finished within `FAILURE_COOLDOWN_SECS`.
 ///
-/// When the failure cap is hit, posts a comment and moves the issue to the escalation status.
+/// A "fruitless" task is one that failed OR completed without producing any effects.
+/// When the fruitless cap is hit, posts a comment and moves the issue to the escalation status.
 fn should_skip_due_to_failures(
     db: &Db,
     identifier: &str,
@@ -1269,20 +1270,22 @@ fn should_skip_due_to_failures(
         }
     }
 
-    // 2. Cooldown: if the most recent failed task finished within FAILURE_COOLDOWN_SECS,
-    // skip this poll cycle to avoid rapid-fire retries.
-    if let Some(last_failed_time) =
-        db.last_failed_task_time_for_issue_stage(identifier, stage_name)?
+    // 2. Cooldown: if the most recent fruitless task (failed or completed-without-effects)
+    // finished within FAILURE_COOLDOWN_SECS, skip this poll cycle to avoid rapid-fire retries.
+    // RIG-405: uses `last_fruitless_task_time` to cover both failed tasks and fruitless
+    // completions (e.g. Qwen empty output), matching the cap query above.
+    if let Some(last_fruitless_time) =
+        db.last_fruitless_task_time_for_issue_stage(identifier, stage_name)?
     {
         if let Ok(ts) =
-            chrono::NaiveDateTime::parse_from_str(&last_failed_time, "%Y-%m-%dT%H:%M:%S")
+            chrono::NaiveDateTime::parse_from_str(&last_fruitless_time, "%Y-%m-%dT%H:%M:%S")
         {
             let now = chrono::Local::now().naive_local();
             let elapsed = now.signed_duration_since(ts).num_seconds();
             if elapsed < FAILURE_COOLDOWN_SECS {
                 eprintln!(
                     "  ~ {identifier} stage={stage_name}: cooldown active — \
-                     last failure {elapsed}s ago (limit: {FAILURE_COOLDOWN_SECS}s)"
+                     last fruitless task {elapsed}s ago (limit: {FAILURE_COOLDOWN_SECS}s)"
                 );
                 return Ok(true);
             }
