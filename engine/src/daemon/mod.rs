@@ -155,9 +155,18 @@ pub fn run(werma_dir: &Path) -> Result<()> {
             }
 
             // Drain outbox: execute pending external effects (Linear, GitHub, notifications).
-            // Only runs when LINEAR_API_KEY is configured.
-            if let Some(lp) = linear_poll.as_deref() {
-                match crate::pipeline::effects::process_effects(&db, lp, &cmd_runner, &notifier) {
+            // RIG-404: Always run — effects are routed per-issue to the correct tracker
+            // (Linear or GitHub). The optional `linear_poll` is passed as fallback for
+            // Linear identifiers; GitHub effects are resolved via user_cfg.
+            {
+                let user_cfg = crate::config::UserConfig::load();
+                match crate::pipeline::effects::process_effects(
+                    &db,
+                    linear_poll.as_deref(),
+                    &cmd_runner,
+                    &notifier,
+                    &user_cfg,
+                ) {
                     Ok(r) if r.processed > 0 || r.failed > 0 => {
                         log_daemon(
                             &log_path,

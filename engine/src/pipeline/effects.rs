@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use super::callback::move_with_retry;
 use super::pr::{auto_create_pr, post_pr_review, pr_title_from_url};
+use crate::config::UserConfig;
 use crate::db::Db;
 use crate::linear::LinearApi;
 use crate::models::{Effect, EffectType};
@@ -20,11 +21,16 @@ pub struct ProcessResult {
 /// Groups effects by task_id and processes them in id order. If a blocking effect
 /// fails, the remaining effects for that task are skipped until next processor run.
 /// After all of a task's effects succeed, marks `linear_pushed = true` on the task.
+///
+/// RIG-404: Routes each effect to the correct tracker client (Linear or GitHub)
+/// based on the effect's `issue_id`. The `linear` parameter is used as default
+/// for Linear identifiers; GitHub identifiers are resolved via `user_cfg`.
 pub fn process_effects(
     db: &Db,
-    linear: &dyn LinearApi,
+    linear: Option<&dyn LinearApi>,
     cmd: &dyn CommandRunner,
     notifier: &dyn Notifier,
+    user_cfg: &UserConfig,
 ) -> Result<ProcessResult> {
     let batch = db.pending_effects(20)?;
 
@@ -47,7 +53,48 @@ pub fn process_effects(
         let effects = by_task.remove(&task_id).unwrap_or_default();
 
         for effect in &effects {
-            match execute_effect(effect, db, linear, cmd, notifier) {
+            // RIG-404: Route each effect to the correct tracker client.
+            // GitHub identifiers (contain '#') → resolve via tracker config.
+            // Linear identifiers → use the passed-in client.
+            let gh_client;
+            let client: &dyn LinearApi = if effect.issue_id.contains('#') {
+                match crate::tracker::resolve_tracker_client(&effect.issue_id, user_cfg, cmd) {
+                    Ok(c) => {
+                        gh_client = c;
+                        &*gh_client
+                    }
+                    Err(e) => {
+                        let msg =
+                            format!("failed to resolve tracker for '{}': {e}", effect.issue_id);
+                        db.mark_effect_failed(effect.id, &msg)?;
+                        failed += 1;
+                        if effect.blocking {
+                            eprintln!(
+                                "[effects] blocking effect {} (type={:?}) failed for task {}: {msg}",
+                                effect.id, effect.effect_type, task_id
+                            );
+                            break;
+                        }
+                        continue;
+                    }
+                }
+            } else if let Some(l) = linear {
+                l
+            } else {
+                let msg = format!("no Linear client available for '{}'", effect.issue_id);
+                db.mark_effect_failed(effect.id, &msg)?;
+                failed += 1;
+                if effect.blocking {
+                    eprintln!(
+                        "[effects] blocking effect {} (type={:?}) failed for task {}: {msg}",
+                        effect.id, effect.effect_type, task_id
+                    );
+                    break;
+                }
+                continue;
+            };
+
+            match execute_effect(effect, db, client, cmd, notifier) {
                 Ok(()) => {
                     db.mark_effect_done(effect.id)?;
                     processed += 1;
@@ -287,7 +334,8 @@ mod tests {
         );
         db.insert_effects(&[effect]).unwrap();
 
-        let result = process_effects(&db, &linear, &cmd, &notifier).unwrap();
+        let result =
+            process_effects(&db, Some(&linear), &cmd, &notifier, &UserConfig::default()).unwrap();
         assert_eq!(result.processed, 1);
         assert_eq!(result.failed, 0);
 
@@ -317,7 +365,7 @@ mod tests {
         );
         db.insert_effects(&[effect]).unwrap();
 
-        process_effects(&db, &linear, &cmd, &notifier).unwrap();
+        process_effects(&db, Some(&linear), &cmd, &notifier, &UserConfig::default()).unwrap();
 
         // No pending effects remain
         let pending = db.pending_effects(100).unwrap();
@@ -349,7 +397,8 @@ mod tests {
         );
         db.insert_effects(&[effect]).unwrap();
 
-        let result = process_effects(&db, &linear, &cmd, &notifier).unwrap();
+        let result =
+            process_effects(&db, Some(&linear), &cmd, &notifier, &UserConfig::default()).unwrap();
         assert_eq!(result.failed, 1);
         assert_eq!(result.processed, 0);
 
@@ -392,7 +441,8 @@ mod tests {
         );
         db.insert_effects(&[e1, e2]).unwrap();
 
-        let result = process_effects(&db, &linear, &cmd, &notifier).unwrap();
+        let result =
+            process_effects(&db, Some(&linear), &cmd, &notifier, &UserConfig::default()).unwrap();
 
         // Only 1 effect attempted (MoveIssue failed, chain halted)
         assert_eq!(result.failed, 1, "only the first effect should have failed");
@@ -426,7 +476,7 @@ mod tests {
         );
         db.insert_effects(&[effect]).unwrap();
 
-        process_effects(&db, &linear, &cmd, &notifier).unwrap();
+        process_effects(&db, Some(&linear), &cmd, &notifier, &UserConfig::default()).unwrap();
 
         let task = db.task(task_id).unwrap().unwrap();
         assert!(
@@ -464,7 +514,8 @@ mod tests {
         db.insert_effects(&[effect]).unwrap();
 
         // First process_effects call: the effect fails and goes dead.
-        let result = process_effects(&db, &linear, &cmd, &notifier).unwrap();
+        let result =
+            process_effects(&db, Some(&linear), &cmd, &notifier, &UserConfig::default()).unwrap();
         assert_eq!(result.failed, 1);
         assert_eq!(result.processed, 0);
 
@@ -1024,7 +1075,8 @@ mod tests {
         db.insert_effects(&[a1, a2]).unwrap();
         db.insert_effects(&[b1, b2]).unwrap();
 
-        let result = process_effects(&db, &linear, &cmd, &notifier).unwrap();
+        let result =
+            process_effects(&db, Some(&linear), &cmd, &notifier, &UserConfig::default()).unwrap();
 
         // Task A: 1 failed (MoveIssue), 0 processed. Task B: 2 processed (Move + Comment).
         assert_eq!(result.failed, 1, "only Task A's MoveIssue should fail");
@@ -1182,7 +1234,8 @@ mod tests {
 
         db.insert_effects(&[e1, e2, e3]).unwrap();
 
-        let result = process_effects(&db, &linear, &cmd, &notifier).unwrap();
+        let result =
+            process_effects(&db, Some(&linear), &cmd, &notifier, &UserConfig::default()).unwrap();
 
         assert_eq!(
             result.failed, 1,
