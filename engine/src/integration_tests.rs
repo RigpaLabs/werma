@@ -1547,7 +1547,10 @@ fn outbox_full_cycle_callback_to_processor() {
     );
 
     // Phase 2: process_effects drains the outbox.
-    let result = crate::pipeline::effects::process_effects(&db, &linear, &cmd, &notifier).unwrap();
+    let user_cfg = crate::config::UserConfig::default();
+    let result =
+        crate::pipeline::effects::process_effects(&db, Some(&linear), &cmd, &notifier, &user_cfg)
+            .unwrap();
     assert!(
         result.processed > 0,
         "processor should have executed effects"
