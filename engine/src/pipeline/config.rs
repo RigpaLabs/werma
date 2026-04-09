@@ -15,6 +15,15 @@ fn default_launch_stagger_secs() -> u32 {
     DEFAULT_LAUNCH_STAGGER_SECS
 }
 
+/// Default max age (in days) for an issue to be auto-spawned by poll.
+/// Issues whose most recent task for the stage was created longer ago than this
+/// are skipped with a warning. Manual `werma pipeline run` bypasses this guard.
+pub const DEFAULT_POLL_MAX_ISSUE_AGE_DAYS: u32 = 7;
+
+fn default_poll_max_issue_age_days() -> u32 {
+    DEFAULT_POLL_MAX_ISSUE_AGE_DAYS
+}
+
 /// Top-level pipeline configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PipelineConfig {
@@ -28,6 +37,12 @@ pub struct PipelineConfig {
     /// Prevents simultaneous claude process crashes from API rate limits.
     #[serde(default = "default_launch_stagger_secs")]
     pub launch_stagger_secs: u32,
+    /// Maximum age (days) for an issue to be auto-spawned by the poll daemon.
+    /// Issues whose most recent task for the same stage was created more than this
+    /// many days ago are considered stale and skipped with a warning.
+    /// Manual `werma pipeline run` bypasses this guard. Default: 7.
+    #[serde(default = "default_poll_max_issue_age_days")]
+    pub poll_max_issue_age_days: u32,
     /// Reusable template snippets available as `{key}` in all prompts.
     #[serde(default)]
     pub templates: IndexMap<String, String>,
@@ -797,5 +812,36 @@ stages:
 
         let default = config.stage("default_stage").unwrap();
         assert!(default.runtime.is_none());
+    }
+
+    #[test]
+    fn poll_max_issue_age_days_defaults_to_7() {
+        let yaml = r#"
+pipeline: minimal
+stages:
+  test:
+    agent: pipeline-test
+    model: sonnet
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.poll_max_issue_age_days,
+            DEFAULT_POLL_MAX_ISSUE_AGE_DAYS
+        );
+        assert_eq!(config.poll_max_issue_age_days, 7);
+    }
+
+    #[test]
+    fn poll_max_issue_age_days_explicit_value() {
+        let yaml = r#"
+pipeline: custom
+poll_max_issue_age_days: 14
+stages:
+  test:
+    agent: pipeline-test
+    model: sonnet
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.poll_max_issue_age_days, 14);
     }
 }

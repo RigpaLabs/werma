@@ -277,6 +277,13 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
                     continue;
                 }
 
+                // RIG-408: Stale issue TTL — skip ancient issues that were inadvertently
+                // unlocked (e.g. by blocking-effects fix). Manual pipeline run bypasses this.
+                if is_stale_issue(db, identifier, stage_name, config.poll_max_issue_age_days)? {
+                    total_skipped += 1;
+                    continue;
+                }
+
                 // For reviewer stage: skip if PR is already merged (manual merge while in Review)
                 // RIG-306: Only skip if merged AND no open PR exists (re-worked issues have both)
                 if stage_name == "reviewer"
@@ -533,6 +540,12 @@ pub fn poll(db: &Db, linear: &dyn LinearApi, cmd: &dyn CommandRunner) -> Result<
             // RIG-357: Failure cooldown + failure cap (label path)
             if should_skip_due_to_failures(db, identifier, stage_name, stage_cfg, linear, issue_id)?
             {
+                total_skipped += 1;
+                continue;
+            }
+
+            // RIG-408: Stale issue TTL (label path)
+            if is_stale_issue(db, identifier, stage_name, config.poll_max_issue_age_days)? {
                 total_skipped += 1;
                 continue;
             }
@@ -939,6 +952,11 @@ fn process_issue_for_stage(
         return Ok(PollAction::Skipped);
     }
 
+    // RIG-408: stale issue TTL
+    if is_stale_issue(db, identifier, stage_name, config.poll_max_issue_age_days)? {
+        return Ok(PollAction::Skipped);
+    }
+
     // Label-based path: analyst guards (spec:done, engineer already ran)
     if let Some(label) = trigger_label {
         if stage_name == "analyst" {
@@ -1161,6 +1179,73 @@ fn resolve_effective_stage(
         effective_stage_cfg,
         runtime: task_runtime,
     }))
+}
+
+/// Check if an issue+stage has gone stale and should be skipped by the poll daemon (RIG-408).
+///
+/// Returns `true` (should skip) when the issue has historical task activity for this stage AND
+/// the most recently created task is older than `max_age_days`. This prevents the daemon from
+/// auto-spawning engineers for ancient issues that were inadvertently "unlocked" by DB-level
+/// fixes (e.g. RIG-403 blocking-effects change).
+///
+/// Manual `werma pipeline run` bypasses poll entirely and is unaffected.
+fn is_stale_issue(db: &Db, identifier: &str, stage_name: &str, max_age_days: u32) -> Result<bool> {
+    // Fast path: if no tasks exist for this issue+stage, it's fresh — not stale.
+    let total_attempts = db.count_all_tasks_for_issue_stage(identifier, stage_name)?;
+    if total_attempts == 0 {
+        return Ok(false);
+    }
+
+    // Check when the most recent task for this issue+stage was created.
+    let Some(newest_created_at) =
+        db.newest_task_created_at_for_issue_stage(identifier, stage_name)?
+    else {
+        return Ok(false);
+    };
+
+    // Parse created_at — handles both "...T%H:%M:%S" (production) and "...Z" (test helper).
+    let Ok(newest_ts) =
+        chrono::NaiveDateTime::parse_from_str(&newest_created_at, "%Y-%m-%dT%H:%M:%S").or_else(
+            |_| {
+                chrono::NaiveDateTime::parse_from_str(
+                    newest_created_at.trim_end_matches('Z'),
+                    "%Y-%m-%dT%H:%M:%S",
+                )
+            },
+        )
+    else {
+        return Ok(false);
+    };
+
+    let now = chrono::Local::now().naive_local();
+    let age_days = now.signed_duration_since(newest_ts).num_days();
+
+    if age_days < max_age_days as i64 {
+        return Ok(false);
+    }
+
+    // Stale: retrieve oldest task date for the log message.
+    let in_progress_since = db
+        .oldest_task_created_at_for_issue_stage(identifier, stage_name)?
+        .and_then(|s| {
+            chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%dT%H:%M:%S")
+                .or_else(|_| {
+                    chrono::NaiveDateTime::parse_from_str(
+                        s.trim_end_matches('Z'),
+                        "%Y-%m-%dT%H:%M:%S",
+                    )
+                })
+                .ok()
+                .map(|dt| dt.format("%Y-%m-%d").to_string())
+        })
+        .unwrap_or_else(|| newest_created_at[..10].to_string());
+
+    eprintln!(
+        "  ! skipping stale issue {identifier} stage={stage_name} \
+         (in progress since {in_progress_since}, {total_attempts} previous attempt(s), \
+         last activity {age_days}d ago — use `werma pipeline run {identifier} {stage_name}` to force)"
+    );
+    Ok(true)
 }
 
 /// Cooldown in seconds after a failed task before the poller can spawn a new one (RIG-357).
@@ -1998,18 +2083,20 @@ stages:
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
 
-        // Insert 1 failed reviewer task with old finished_at (well past cooldown)
+        // Insert 1 failed reviewer task with old finished_at (well past cooldown).
+        // created_at must be recent so the stale-issue TTL guard does not trigger first.
+        let recent_created = (chrono::Local::now() - chrono::Duration::minutes(10))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
         let mut task = crate::db::make_test_task("20260401-old-fail");
         task.status = crate::models::Status::Failed;
         task.issue_identifier = "FAT-50".to_string();
         task.pipeline_stage = "reviewer".to_string();
         task.linear_pushed = true;
+        task.created_at = recent_created.clone();
         db.insert_task(&task).unwrap();
         // Set finished_at to 10 minutes ago (past 5-minute cooldown)
-        let old_time = (chrono::Local::now() - chrono::Duration::minutes(10))
-            .format("%Y-%m-%dT%H:%M:%S")
-            .to_string();
-        db.update_task_field("20260401-old-fail", "finished_at", &old_time)
+        db.update_task_field("20260401-old-fail", "finished_at", &recent_created)
             .unwrap();
 
         // Issue in Review status
@@ -2042,20 +2129,26 @@ stages:
         let linear = FakeLinearApi::new();
         let cmd = FakeCommandRunner::new();
 
-        // Insert 2 failed engineer tasks (max_stage_attempts=3 in default.yaml)
+        // Insert 2 failed engineer tasks (max_stage_attempts=3 in default.yaml).
+        // created_at must be recent so the stale-issue TTL does not trigger first.
+        let recent_time = (chrono::Local::now() - chrono::Duration::minutes(10))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
         for i in 0..2 {
             let mut task = crate::db::make_test_task(&format!("20260401-eng-fail{i}"));
             task.status = crate::models::Status::Failed;
             task.issue_identifier = "RIG-358".to_string();
             task.pipeline_stage = "engineer".to_string();
             task.linear_pushed = true;
+            task.created_at = recent_time.clone();
             db.insert_task(&task).unwrap();
             // Set finished_at to 10 minutes ago (past cooldown)
-            let old_time = (chrono::Local::now() - chrono::Duration::minutes(10))
-                .format("%Y-%m-%dT%H:%M:%S")
-                .to_string();
-            db.update_task_field(&format!("20260401-eng-fail{i}"), "finished_at", &old_time)
-                .unwrap();
+            db.update_task_field(
+                &format!("20260401-eng-fail{i}"),
+                "finished_at",
+                &recent_time,
+            )
+            .unwrap();
         }
 
         // Issue in In Progress status
@@ -2429,6 +2522,142 @@ stages:
             tasks.len(),
             1,
             "RIG-385: dedup guard must prevent duplicate tasks — only one task allowed per issue+stage"
+        );
+    }
+
+    // ─── RIG-408: stale issue TTL ─────────────────────────────────────────
+
+    /// Insert a completed+pushed task with an explicit created_at timestamp.
+    fn insert_old_task(
+        db: &crate::db::Db,
+        task_id: &str,
+        issue_id: &str,
+        stage: &str,
+        created_at: &str,
+    ) {
+        let mut task = crate::db::make_test_task(task_id);
+        task.status = crate::models::Status::Completed;
+        task.issue_identifier = issue_id.to_string();
+        task.pipeline_stage = stage.to_string();
+        task.linear_pushed = true;
+        task.created_at = created_at.to_string();
+        db.insert_task(&task).unwrap();
+    }
+
+    #[test]
+    fn is_stale_issue_returns_false_when_no_tasks() {
+        // Fresh issue with no previous tasks → not stale
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let result = is_stale_issue(&db, "RIG-408", "engineer", 7).unwrap();
+        assert!(
+            !result,
+            "issue with no tasks should not be considered stale"
+        );
+    }
+
+    #[test]
+    fn is_stale_issue_returns_true_when_all_tasks_are_old() {
+        // Issue whose most recent engineer task was created 30 days ago → stale
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let old_ts = (chrono::Local::now() - chrono::Duration::days(30))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        insert_old_task(&db, "20260310-eng-old", "RIG-100", "engineer", &old_ts);
+
+        let result = is_stale_issue(&db, "RIG-100", "engineer", 7).unwrap();
+        assert!(
+            result,
+            "issue with 30-day-old tasks should be considered stale"
+        );
+    }
+
+    #[test]
+    fn is_stale_issue_returns_false_when_recent_task_exists() {
+        // Issue with a recent task (1 day old) → not stale even if there are older ones
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let old_ts = (chrono::Local::now() - chrono::Duration::days(30))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        let recent_ts = (chrono::Local::now() - chrono::Duration::days(1))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        insert_old_task(&db, "20260310-eng-old2", "RIG-200", "engineer", &old_ts);
+        insert_old_task(&db, "20260408-eng-new", "RIG-200", "engineer", &recent_ts);
+
+        let result = is_stale_issue(&db, "RIG-200", "engineer", 7).unwrap();
+        assert!(!result, "issue with a recent task (1d) should not be stale");
+    }
+
+    #[test]
+    fn is_stale_issue_boundary_at_exactly_max_age() {
+        // Task created exactly max_age_days ago is considered stale (age_days >= max_age)
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let boundary_ts = (chrono::Local::now() - chrono::Duration::days(7))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        insert_old_task(
+            &db,
+            "20260402-eng-boundary",
+            "RIG-300",
+            "engineer",
+            &boundary_ts,
+        );
+
+        let result = is_stale_issue(&db, "RIG-300", "engineer", 7).unwrap();
+        assert!(
+            result,
+            "task exactly 7 days old should be treated as stale (>= threshold)"
+        );
+    }
+
+    #[test]
+    fn is_stale_issue_under_threshold_not_stale() {
+        // Task created 3 days ago with threshold 7 → not stale
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let fresh_ts = (chrono::Local::now() - chrono::Duration::days(3))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        insert_old_task(&db, "20260406-eng-fresh", "RIG-301", "engineer", &fresh_ts);
+
+        let result = is_stale_issue(&db, "RIG-301", "engineer", 7).unwrap();
+        assert!(
+            !result,
+            "task 3 days old with 7-day threshold should not be stale"
+        );
+    }
+
+    #[test]
+    fn poll_skips_stale_engineer_issue() {
+        // RIG-408: issue in In Progress with only ancient tasks should be skipped by poll
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let linear = FakeLinearApi::new();
+        let cmd = FakeCommandRunner::new();
+
+        // Insert an old completed+pushed engineer task (30 days ago)
+        let old_ts = (chrono::Local::now() - chrono::Duration::days(30))
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string();
+        insert_old_task(&db, "20260310-eng-stale", "RIG-408", "engineer", &old_ts);
+
+        // Issue is In Progress — would normally trigger engineer spawn
+        let issue = fake_issue_with_state(
+            "uuid-408",
+            "RIG-408",
+            "Ancient stuck issue",
+            &["Feature", "repo:werma"],
+            "started",
+        );
+        linear.set_issues_for_status("in_progress", vec![issue]);
+
+        poll(&db, &linear, &cmd).unwrap();
+
+        // No new engineer task should be spawned — stale TTL blocks it
+        let new_tasks = db
+            .tasks_by_linear_issue("RIG-408", Some("engineer"), true)
+            .unwrap();
+        assert!(
+            new_tasks.is_empty(),
+            "stale issue TTL should block engineer spawn for ancient issue"
         );
     }
 }
